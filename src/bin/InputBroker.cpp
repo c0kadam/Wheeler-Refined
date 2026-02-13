@@ -305,6 +305,12 @@ bool InputBroker::ShouldProcessKey(PluginId pluginIdSelf, DeviceType device, std
 		return false;
 	}
 
+	// Active owner has full processing rights while owning input.
+	// Reservations are primarily for arbitration when no wheel currently owns input.
+	if (g_state.activeOwner == pluginIdSelf) {
+		return true;
+	}
+
 	ReservationKey reservationKey{ device, key };
 	auto reservationIt = g_state.reservationsByKey.find(reservationKey);
 	if (reservationIt == g_state.reservationsByKey.end()) {
@@ -436,4 +442,3 @@ void InputBroker::SyncWheelerActiveOwner(bool mainWheelOpen, bool ammoWheelOpen)
 		}
 	}
 }
-
