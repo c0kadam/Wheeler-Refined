@@ -64,9 +64,6 @@ Integrations extend Wheeler Refined when their companion mod or API is present; 
 
 ![Wheeler Refined Ammo Wheel settings inside dMenu](images/refined/dmenu-customization.png)
 
-### Low-ammo indicator
-
-![Low-ammo warning displayed on an Ammo Wheel slot](images/refined/low-ammo-indicator.png)
 
 ## Installation
 
@@ -85,6 +82,7 @@ Use the [Wheeler Refined Nexus page](https://www.nexusmods.com/skyrimspecialedit
 - [Dragonborn Reskin - Wheeler](https://www.nexusmods.com/skyrimspecialedition/mods/100043) is strongly recommended by the author and was used while many improvements were developed.
 - Install [Skyrim Souls and Wheeler Slow Time Fix](https://www.nexusmods.com/skyrimspecialedition/mods/174828) when using Skyrim Souls.
 - [Typing Mode](https://www.nexusmods.com/skyrimspecialedition/mods/164851) can help when text input conflicts with other menus.
+- [Ammo Wheel Reskin SHULDOVAH](https://www.nexusmods.com/skyrimspecialedition/mods/176631) A concept reskin for Wheeler Refined's Ammo Wheel.[](images/refined/shuldovahAmmoWheel.jpg)
 
 ### Normal mod-manager order
 
