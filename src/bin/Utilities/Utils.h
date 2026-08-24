@@ -27,6 +27,7 @@ namespace Utils
 
 	namespace Magic
 	{
+		void GetMagicItemDescription(RE::MagicItem* a_magicItem, RE::BSString& a_buf);
 		void GetMagicItemDescription(RE::MagicItem* a_magicItem, std::string& a_buf);
 		
 		/// Returns true if the spell has at least one effect with a summon-type archetype

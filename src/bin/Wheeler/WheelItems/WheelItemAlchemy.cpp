@@ -232,7 +232,7 @@ namespace
 		}
 
 		RE::BSString rawDescription;
-		RE::MagicSystem::GetMagicItemDescription(rawDescription, a_item, "", "");
+		Utils::Magic::GetMagicItemDescription(a_item, rawDescription);
 
 		logger::info("[AlchemyDescDiag] item form={:08X} name='{}' editor='{}' rawDesc='{}' cachedDesc='{}'",
 			a_item->GetFormID(),
