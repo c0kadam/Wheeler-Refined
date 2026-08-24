@@ -25,6 +25,7 @@
 #include "bin/Rendering/ResolutionScaleContext.h"
 #include "bin/InitState.h"
 #include "bin/Config.h"
+#include "bin/HookValidation.h"
 
 #include "bin/Animation/TimeInterpolator/TimeInterpolatorManager.h"
 
@@ -219,24 +220,6 @@ namespace stl
 		T::func = trampoline.write_call<5>(hook.address(), T::thunk);
 	}
 }
-
-namespace
-{
-	bool ValidateCallHookSite(std::uintptr_t address, const char* label)
-	{
-		const auto opcode = *reinterpret_cast<std::uint8_t*>(address);
-		if (opcode != 0xE8) {
-			logger::warn("RenderManager: {} hook site {:X} has unexpected opcode {:02X}; skipping install",
-				label,
-				address,
-				static_cast<std::uint32_t>(opcode));
-			return false;
-		}
-
-		return true;
-	}
-}
-
 
 LRESULT RenderManager::WndProcHook::thunk(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -507,10 +490,33 @@ bool RenderManager::Install()
 		return false;
 	}
 
+	const REL::Relocation<std::uintptr_t> d3dAnchor{ D3DInitHook::id };
 	const REL::Relocation<std::uintptr_t> d3dInitHook{ D3DInitHook::id, D3DInitHook::offset };
+	const REL::Relocation<std::uintptr_t> presentAnchor{ DXGIPresentHook::id };
 	const REL::Relocation<std::uintptr_t> presentHook{ DXGIPresentHook::id, DXGIPresentHook::offset };
-	if (!ValidateCallHookSite(d3dInitHook.address(), "D3DInit") ||
-		!ValidateCallHookSite(presentHook.address(), "DXGIPresent")) {
+	if (!HookValidation::ValidateCallHookSite(
+			d3dAnchor.address(),
+			d3dInitHook.address(),
+			77396,
+			"RenderManager",
+			"D3DInit",
+			[anchor = d3dAnchor.address(), hookSite = d3dInitHook.address()]() {
+				return HookValidation::MatchBytes(anchor + 0x264, { 0x48, 0x8B, 0x0D }) &&
+				       HookValidation::MatchBytes(anchor + 0x26B, { 0x48, 0x8B, 0x49, 0x48, 0xFF, 0x15 }) &&
+				       HookValidation::MatchBytes(hookSite + 5, { 0x44, 0x39, 0x6E, 0x2C, 0x74, 0x2E, 0x33, 0xC9 }) &&
+				       HookValidation::MatchBytes(hookSite + 13, { 0xE8 });
+			}) ||
+		!HookValidation::ValidateCallHookSite(
+			presentAnchor.address(),
+			presentHook.address(),
+			109135,
+			"RenderManager",
+			"DXGIPresent",
+			[anchor = presentAnchor.address(), hookSite = presentHook.address()]() {
+				return HookValidation::MatchBytes(anchor, { 0x48, 0x83, 0xEC, 0x48, 0xB9, 0x01, 0x00, 0x00, 0x00 }) &&
+				       HookValidation::MatchBytes(hookSite + 5, { 0x80, 0x3D }) &&
+				       HookValidation::MatchBytes(hookSite + 11, { 0x00, 0x74, 0x70 });
+			})) {
 		return false;
 	}
 

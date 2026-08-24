@@ -2,6 +2,7 @@
 #include "Utilities/UniqueIDHandler.h"
 #include "bin/UserInput/Input.h"
 #include "bin/Config.h"
+#include "bin/HookValidation.h"
 #include "bin/Wheeler/Wheeler.h"
 #include "RE/T/TESObjectWEAP.h"
 
@@ -48,20 +49,6 @@ namespace Hooks
 				a_source ? a_source : "unknown",
 				a_object ? a_object->GetFormID() : 0,
 				a_object ? a_object->GetName() : "");
-		}
-
-		bool ValidateCallHookSite(std::uintptr_t address, const char* label)
-		{
-			const auto opcode = *reinterpret_cast<std::uint8_t*>(address);
-			if (opcode != 0xE8) {
-				logger::warn("Hooks: {} hook site {:X} has unexpected opcode {:02X}; skipping install",
-					label,
-					address,
-					static_cast<std::uint32_t>(opcode));
-				return false;
-			}
-
-			return true;
 		}
 
 		////https://github.com/ahzaab/iEquipUtil/blob/master/src/BaseExtraListEX.cpp
@@ -233,7 +220,20 @@ namespace Hooks
 			auto& trampoline = SKSE::GetTrampoline();
 			REL::Relocation<uintptr_t> caller{ RELOCATION_ID(67315, 68617) };
 			const auto hookSite = caller.address() + RELOCATION_OFFSET(0x7B, 0x7B);
-			if (!ValidateCallHookSite(hookSite, "InputDispatch")) {
+			if (!HookValidation::ValidateCallHookSite(
+					caller.address(),
+					hookSite,
+					68655,
+					"Hooks",
+					"InputDispatch",
+					[anchor = caller.address(), hookSite]() {
+						return HookValidation::MatchBytes(anchor + 0x67, { 0x48, 0x8D, 0x54, 0x24, 0x40 }) &&
+						       HookValidation::MatchBytes(anchor + 0x6C, { 0x48, 0x8B, 0x88, 0x58, 0x05, 0x00, 0x00 }) &&
+						       HookValidation::MatchBytes(anchor + 0x73, { 0x48, 0x89, 0x4C, 0x24, 0x40 }) &&
+						       HookValidation::MatchBytes(anchor + 0x78, { 0x48, 0x8B, 0xCE }) &&
+						       HookValidation::MatchBytes(hookSite + 5, { 0x48, 0x8B, 0x0D }) &&
+						       HookValidation::MatchBytes(hookSite + 12, { 0xE8 });
+					})) {
 				return false;
 			}
 
