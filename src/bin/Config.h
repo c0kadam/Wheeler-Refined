@@ -478,7 +478,7 @@ namespace Config
 		inline bool EnableSounds = true;
 
 		// Editor IDs for looking up sounds (configurable via INI).
-		// These are passed directly to BSAudioManager::BuildSoundDataFromEditorID.
+		// These are passed directly to BSAudioManager::GetSoundHandleByName.
 		inline std::string HoverSoundEditorID = "UIFavorite";
 		inline std::string ActivateSoundEditorID = "UIMenuOK";
 

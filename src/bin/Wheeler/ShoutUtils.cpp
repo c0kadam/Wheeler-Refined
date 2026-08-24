@@ -239,7 +239,7 @@ namespace
 		}
 
 		RE::SkyrimVM* skyrimVM = RE::SkyrimVM::GetSingleton();
-		RE::BSScript::IVirtualMachine* vm = skyrimVM ? skyrimVM->impl.get() : nullptr;
+		RE::BSScript::IVirtualMachine* vm = skyrimVM ? skyrimVM->GetVMRuntimeData().impl.get() : nullptr;
 		const GameFuncInfo info = BuildGameFuncInfo(vm);
 
 		logger::info("[ShoutUnlockVMInit] vm={} gameTypeFound={} linked={} funcFound={} funcSig='{}' funcParams={} retType='{}' native={} static={} tasklets={} globals={}",
@@ -290,7 +290,7 @@ namespace
 		}
 
 		RE::SkyrimVM* skyrimVM = RE::SkyrimVM::GetSingleton();
-		RE::BSScript::IVirtualMachine* vm = skyrimVM ? skyrimVM->impl.get() : nullptr;
+		RE::BSScript::IVirtualMachine* vm = skyrimVM ? skyrimVM->GetVMRuntimeData().impl.get() : nullptr;
 		const GameFuncInfo info = BuildGameFuncInfo(vm);
 
 		if (!info.vmAvailable) {

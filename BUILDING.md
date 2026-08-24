@@ -7,9 +7,9 @@ This guide describes the supported public Windows build. It separates what the p
 - Windows x64 and Git.
 - CMake **3.22 or newer** (`cmake_minimum_required(VERSION 3.22)`).
 - Visual Studio 2022 with the **Desktop development with C++** workload and the `v143` toolset used by the public preset.
-- A compiler with C++20 support; the `wheeler` target requests `cxx_std_20`.
+- A compiler with C++23 support; the `wheeler` target requests `cxx_std_23`.
 - A bootstrapped [vcpkg](https://github.com/microsoft/vcpkg) checkout with `VCPKG_ROOT` set.
-- A [CommonLibSSE-NG](https://github.com/CharmedBaryon/CommonLibSSE-NG) Git checkout at exactly `b93280e832f263dbef44e44cbe2936622a02f91a`.
+- An [alandtse/CommonLibSSE-NG](https://github.com/alandtse/CommonLibSSE-NG) Git checkout at tag `v6.7.0`, exactly commit `3d81614617910e7f34b33d8750881811b5e36445`.
 
 The public preset targets `x64-windows-static-md`. CMake rejects a CommonLib Git checkout at any other revision.
 
@@ -23,9 +23,9 @@ The public source gate was run with:
 - Windows SDK 10.0.26100.0
 - vcpkg triplet `x64-windows-static-md`
 - vcpkg registry baseline `382c5b8a94b3d6b6286df7a488c7efa8d37313eb`
-- CommonLibSSE-NG commit `b93280e832f263dbef44e44cbe2936622a02f91a` (MIT)
+- CommonLibSSE-NG `v6.7.0`, commit `3d81614617910e7f34b33d8750881811b5e36445` (GPL-3.0-or-later with the upstream modding and linking exceptions)
 
-The exact audited CMake, MSVC, and Windows SDK versions document the verified environment; they are not raised above the requirements expressed by the current build files. `vcpkg-configuration.json` pins the registry baseline, and CMake pins CommonLibSSE-NG. Do not change manifest dependencies or features when reproducing this build.
+The exact audited CMake, MSVC, and Windows SDK versions document the verified environment; they are not raised above the requirements expressed by the current build files. `vcpkg-configuration.json` pins the registry baseline, and CMake pins CommonLibSSE-NG. The manifest includes CommonLib 6.7.0's DirectXMath, DirectXTK, fmt, and toml11 requirements in addition to Wheeler's existing dependencies.
 
 ## From-Zero Windows Build
 
@@ -39,8 +39,8 @@ git clone https://github.com/microsoft/vcpkg.git C:\src\vcpkg
 C:\src\vcpkg\bootstrap-vcpkg.bat
 $env:VCPKG_ROOT = 'C:\src\vcpkg'
 
-git clone https://github.com/CharmedBaryon/CommonLibSSE-NG.git C:\src\CommonLibSSE-NG
-git -C C:\src\CommonLibSSE-NG checkout b93280e832f263dbef44e44cbe2936622a02f91a
+git clone https://github.com/alandtse/CommonLibSSE-NG.git C:\src\CommonLibSSE-NG
+git -C C:\src\CommonLibSSE-NG checkout 3d81614617910e7f34b33d8750881811b5e36445
 
 cmake --preset vs2022-windows -B build-public `
   -DCOPY_OUTPUT=OFF `
@@ -94,3 +94,4 @@ See [the sample README](tools/action_hotkeys_bridge_api_sample/README.md) for ru
 - The manifest retains ImGui's current `dx11-binding` and `win32-binding` features.
 - Wheeler uses ImGui's built-in font rasterizer (`ENABLE_FREETYPE = 0`) rather than compiling the bundled `imgui_freetype.cpp` implementation.
 - Skyrim SE and AE support are enabled by default; VR support is disabled by default in the current build configuration.
+- This CommonLib/toolchain migration does not certify a new Skyrim runtime. The input hook at `PollInputDevices + 0x7B`, D3D initialization hook at AE `+0x275`, and Present hook at `+0x9` still require separate Skyrim 1.7.99 binary and runtime verification.

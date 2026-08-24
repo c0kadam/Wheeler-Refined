@@ -154,7 +154,7 @@ Managed wheels are deliberately excluded from save serialization. Their owning p
 
 ## Building from Source
 
-The project requires a C++20 Windows toolchain, CMake 3.22 or newer, vcpkg, and the pinned CommonLibSSE-NG revision. With `VCPKG_ROOT` set and CommonLib checked out:
+The project requires a C++23 Windows toolchain, CMake 3.22 or newer, vcpkg, and the pinned CommonLibSSE-NG revision. With `VCPKG_ROOT` set and CommonLib checked out:
 
 ```powershell
 cmake --preset vs2022-windows -B build-public `

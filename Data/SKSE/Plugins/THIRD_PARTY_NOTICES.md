@@ -71,12 +71,40 @@ in the build instructions.
 
 ### CommonLibSSE-NG
 
-- Upstream: [CharmedBaryon/CommonLibSSE-NG](https://github.com/CharmedBaryon/CommonLibSSE-NG)
-- Audited revision: `b93280e832f263dbef44e44cbe2936622a02f91a`
-- License: MIT
+- Upstream: [alandtse/CommonLibSSE-NG](https://github.com/alandtse/CommonLibSSE-NG)
+- Audited release: `v6.7.0`, revision `3d81614617910e7f34b33d8750881811b5e36445`
+- License: GPL-3.0-or-later with the Modding Exception and GPL-3.0 Linking Exception (with Corresponding Source)
 - Use: SKSE/CommonLib headers and link target used to build Wheeler Refined
 - Bundled status: dependency source is not vendored; binary distributions must
-  retain the applicable CommonLibSSE-NG notice
+  retain the applicable CommonLibSSE-NG notice and upstream exceptions in
+  `Data/SKSE/Plugins/third-party-notices/`
+
+### DirectXMath and DirectXTK
+
+- Upstream: [microsoft/DirectXMath](https://github.com/microsoft/DirectXMath) and [microsoft/DirectXTK](https://github.com/microsoft/DirectXTK)
+- Audited revision: resolved through the pinned vcpkg registry baseline
+- License: MIT
+- Use: direct CommonLibSSE-NG 6.7.0 build and link requirements
+- Bundled status: linked build dependencies, not vendored; generated vcpkg
+  notices are retained under `Data/SKSE/Plugins/third-party-notices/`
+
+### fmt
+
+- Upstream: [fmtlib/fmt](https://github.com/fmtlib/fmt)
+- Audited revision: resolved through the pinned vcpkg registry baseline
+- License: MIT
+- Use: direct CommonLibSSE-NG 6.7.0 formatting dependency
+- Bundled status: linked build dependency, not vendored; its generated vcpkg
+  notice is retained under `Data/SKSE/Plugins/third-party-notices/`
+
+### toml11
+
+- Upstream: [ToruNiina/toml11](https://github.com/ToruNiina/toml11)
+- Audited revision: resolved through the pinned vcpkg registry baseline
+- License: MIT
+- Use: direct CommonLibSSE-NG 6.7.0 TOML dependency
+- Bundled status: linked/header build dependency, not vendored; its generated
+  vcpkg notice is retained under `Data/SKSE/Plugins/third-party-notices/`
 
 ### Dear ImGui
 

@@ -733,7 +733,7 @@ bool WheelItemSpell::tryCastImmediate(bool allowNonInstant, RE::MagicSystem::Cas
 
 		// Deduct magicka
 		if (magickaCost > 0.0f) {
-			pc->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka, -magickaCost);
+			pc->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka, -magickaCost);
 			if (debugLog) {
 				logger::info("InstantCast: Deducted {:.1f} magicka for '{}'", magickaCost, _spell->GetName());
 			}
@@ -753,7 +753,7 @@ bool WheelItemSpell::tryCastImmediate(bool allowNonInstant, RE::MagicSystem::Cas
 		if (!(caster->currentSpell && caster->currentSpell->GetFormID() == _spell->GetFormID())) {
 			// Cast failed - refund the magicka we deducted
 			float refundAmount = baseCost * actualConcentrationDuration;
-			pc->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka, refundAmount);
+			pc->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka, refundAmount);
 			if (debugLog) {
 				logger::info("InstantCast: REFUNDED {:.1f} magicka - concentration spell '{}' failed to start", refundAmount, _spell->GetName());
 			}

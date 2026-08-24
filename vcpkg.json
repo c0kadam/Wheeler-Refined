@@ -2,13 +2,17 @@
   "name": "wheeler",
   "version": "1",
   "dependencies": [
+    "directxmath",
+    "directxtk",
     "fast-cpp-csv-parser",
+    "fmt",
     "rsm-binary-io",
     "simpleini",
     "spdlog",
     "xbyak",
     "rapidcsv",
     "nlohmann-json",
+    "toml11",
     "freetype",
     {
       "name":  "imgui",

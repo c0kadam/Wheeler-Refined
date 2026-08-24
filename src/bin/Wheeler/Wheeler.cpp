@@ -2324,19 +2324,16 @@ namespace
 			return false;
 		}
 
-		RE::BSString desc;
-		book->GetDescription(desc, nullptr);
-
 		RE::NiMatrix3 rot;
 		rot.entry[0][0] = 1.0f; rot.entry[0][1] = 0.0f; rot.entry[0][2] = 0.0f;
 		rot.entry[1][0] = 0.0f; rot.entry[1][1] = 1.0f; rot.entry[1][2] = 0.0f;
 		rot.entry[2][0] = 0.0f; rot.entry[2][1] = 0.0f; rot.entry[2][2] = 1.0f;
 
-		RE::BookMenu::OpenBookMenu(desc, nullptr, nullptr, book, {0, 0, 0}, rot, 1.0f, true);
+		RE::BookMenu::OpenMenuFromBaseForm(book, nullptr, {0, 0, 0}, rot, 1.0f, true);
 
 		if (MainWheelDebug::IsEnabled()) {
 			MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Issued",
-				"OpenBookMenu called ({}), formID={:08X}", source, bookFormID);
+				"OpenMenuFromBaseForm called ({}), formID={:08X}", source, bookFormID);
 		}
 
 		SKSE::GetTaskInterface()->AddTask([bookFormID]() {
@@ -3545,7 +3542,7 @@ void Wheeler::PlaySoundByEditorID(const char* a_editorID, float a_volume)
 	handle.assumeSuccess = false;
 	auto* audioManager = RE::BSAudioManager::GetSingleton();
 	if (audioManager) {
-		audioManager->BuildSoundDataFromEditorID(handle, a_editorID, 0x10);
+		audioManager->GetSoundHandleByName(handle, a_editorID, 0x10);
 		if (handle.IsValid()) {
 			handle.SetVolume(a_volume);
 			handle.Play();
@@ -7435,7 +7432,7 @@ void Wheeler::ProcessPendingActions()
 			
 			if (shouldRefund && pc) {
 				// Refund the magicka
-				pc->AsActorValueOwner()->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka, refundAmount);
+				pc->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka, refundAmount);
 				if (Config::WheelBehavior::InstantSpellDebugLog) {
 					logger::info("InstantCast: REFUNDED {:.1f} magicka for failed summon (spellFormID={:08X})",
 						refundAmount, check.spellFormID);
@@ -9304,7 +9301,7 @@ void Wheeler::EnableEditModeGameplayInputBlock()
 	_editModeGameplayInputBlocker.disabledByUsMask = 0;
 	for (const auto flag : kEditModeGameplayBlockFlags) {
 		if (controlMap->AreControlsEnabled(flag)) {
-			controlMap->ToggleControls(flag, false);
+			controlMap->ToggleControls(flag, false, false);
 			_editModeGameplayInputBlocker.disabledByUsMask |= static_cast<std::uint32_t>(flag);
 		}
 	}
@@ -9326,7 +9323,7 @@ void Wheeler::DisableEditModeGameplayInputBlock()
 	for (const auto flag : kEditModeGameplayBlockFlags) {
 		const std::uint32_t mask = static_cast<std::uint32_t>(flag);
 		if ((_editModeGameplayInputBlocker.disabledByUsMask & mask) != 0) {
-			controlMap->ToggleControls(flag, true);
+			controlMap->ToggleControls(flag, true, false);
 		}
 	}
 

@@ -705,14 +705,8 @@ namespace Utils
 	}
 	void NotificationMessage(std::string a_message)
 	{
-		RE::DebugNotification(a_message.data());
+		RE::SendHUDMessage::ShowHUDMessage(a_message.data());
 	}
-}
-void Utils::Magic::GetMagicItemDescription(RE::ItemCard* a_itemCard, RE::MagicItem* a_magicItem, RE::BSString& a_str)
-{
-	using func_t = void* (*)(RE::ItemCard*, RE::MagicItem*, RE::BSString&);
-	REL::Relocation<func_t> func{ RELOCATION_ID(51022, 51900) };
-	func(a_itemCard, a_magicItem, a_str);
 }
 
 static void stripMagicItemDescriptionFormatCode(std::string& a_description)
@@ -952,9 +946,8 @@ static void stripSurvivalModeItemCardText(std::string& a_description)
 /// </summary>
 void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, std::string& a_buf)
 {
-	RE::ItemCard card;
 	RE::BSString buf;
-	GetMagicItemDescription(&card, a_magicItem, buf);
+	RE::MagicSystem::GetMagicItemDescription(buf, a_magicItem, "", "");
 	a_buf = buf.c_str();
 	stripMagicItemDescriptionFormatCode(a_buf);
 	stripSurvivalModeItemCardText(a_buf);
