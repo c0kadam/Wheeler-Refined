@@ -37,7 +37,18 @@ This is an independent derivative project. It is not an official continuation an
 | Expanded item support | Improved handling for renamed and enchanted equipment, scripted miscellaneous items, throwables, books, instruments, transformation skills, and other mod-added actions. |
 | Adaptive presentation | Global scaling, automatic screen-bound scaling, configurable wheel geometry, slot text fitting, and resolution-aware layouts. |
 | dMenu configuration | In-game controls for behavior, keybinds, layout, sorting, visuals, sounds, indicators, and optional features. |
-| Performance and integrations | An Ammo Wheel performance mode plus optional integrations including I4 icons, Dynamic Grip, Action Hotkeys Bridge, and OStim where installed. These companion integrations are not required for core wheel interaction. |
+| Performance | An Ammo Wheel performance mode replaces animated presentation with a simpler rendering path for lower-overhead use. |
+
+### Integration overview
+
+Integrations extend Wheeler Refined when their companion mod or API is present; none is required for core wheel interaction.
+
+| Integration | Type and factory default | Purpose | Configuration or documentation |
+| --- | --- | --- | --- |
+| I4 / Inventory Injector | Optional runtime integration; enabled, but inactive without Inventory Injector | Uses Inventory Injector metadata and rendering to provide richer item icons, labels, and colors. | [I4.defaults.ini](Data/SKSE/Plugins/wheeler/I4.defaults.ini) |
+| Action Hotkeys Bridge | Optional runtime integration; disabled | Imports Action Hotkeys slots into managed Wheeler wheels and supports hotkeys supplied through the native bridge API. | [ActionHotkeysBridge.defaults.ini](Data/SKSE/Plugins/wheeler/ActionHotkeysBridge.defaults.ini) · [API sample](tools/action_hotkeys_bridge_api_sample/README.md) |
+| OStim | Optional runtime integration; disabled | Adds an OStim scene-control wheel with optional position browsing and previews when a compatible OStim installation is detected. | [OStimIntegration.defaults.ini](Data/SKSE/Plugins/wheeler/OStimIntegration.defaults.ini) |
+| External Wheeler API | Developer API; available after Wheeler initializes | Lets SKSE plugins manage transient wheels, entries, form items, external hotkeys, and supported event callbacks. | [API overview](docs/API_INTEGRATION_SUMMARY.md) · [Logging reference](docs/API_LOGGING_REFERENCE.md) |
 
 ## Screenshots
 
@@ -112,6 +123,34 @@ Wheel state is stored per save in the SKSE co-save, including the identity neede
 - **Optional integrations:** Integrations activate only when their companion mod or API is available and configured. Review the relevant settings and logs before reporting a compatibility issue.
 
 Compatibility depends on each load order, input setup, UI stack, and game runtime. Please report reproducible combinations rather than assuming universal compatibility.
+
+## Integrations
+
+### Action Hotkeys Bridge
+
+The Action Hotkeys Bridge is for users of Action Hotkeys and for SKSE plugins that supply external hotkeys. It is **disabled by default**. When enabled with automatic injection, Wheeler Refined reads `Data\SKSE\Plugins\ActionHotkeys.ini` and the dedicated `Data\SKSE\Plugins\ActionSlots.ini` slot file, falling back to slot data in `ActionHotkeys.ini` when necessary. Automatic refresh watches those source files and rebuilds the managed bridge wheels after changes.
+
+Factory settings create two bridge wheels, with per-wheel capacity and jump keys available for up to eight. Jumping to a bridge wheel remembers the previous user wheel so the same control can return to it. Source-tagged placement is retained in `ActionHotkeysBridge.layout.ini`; conflicting Wheeler hotkeys are blocked by default, and secondary activation mirrors primary activation by default. Override these settings in `ActionHotkeysBridge.ini`; see [ActionHotkeysBridge.defaults.ini](Data/SKSE/Plugins/wheeler/ActionHotkeysBridge.defaults.ini).
+
+Plugins can also upsert, remove, or clear external hotkeys through the native bridge API. API-injected entries are transient and should be recreated by their owner, while stable source tags allow the bridge layout to retain their positions. The [Action Hotkeys bridge API sample](tools/action_hotkeys_bridge_api_sample/README.md) demonstrates the supported workflow.
+
+### I4 / Inventory Injector
+
+I4 support is **enabled in the factory defaults but remains runtime-optional**: it activates only when Inventory Injector and its Scaleform `ProcessEntry` interface are available. Inventory Injector is not a dependency for core Wheeler behavior. With `PreferI4Icons` enabled, Wheeler passes item metadata through Inventory Injector and uses the returned icon source, label, and color. Built-in icon handling and off-screen extraction are enabled by default. The enabled alternative path also permits I4 attempts for non-inventory spell, shout, and power entries when their category controls allow it. If I4 is unavailable or cannot produce an image, Wheeler keeps its normal fallback icon.
+
+The `UseFor*` switches determine which categories may use I4. Factory defaults enable inventory categories and shouts, with spells and powers disabled. The separate `ExtractFor*` switches enable capture for weapons, armor, ammo, books, scrolls, lights, miscellaneous items, shouts, and powers; food, ingredients, potions, poisons, and spells are disabled. An extraction switch does not bypass its category's `UseFor*` switch. Review and override [I4.defaults.ini](Data/SKSE/Plugins/wheeler/I4.defaults.ini) to match your UI setup.
+
+### OStim
+
+OStim integration is runtime-optional and **disabled by default**. `AutoDetect` probes for a compatible installation, but does not enable the integration on its own. When explicitly enabled and available, Wheeler Refined creates a managed scene-control wheel and removes it when the scene ends. Automatic switching to that wheel is off by default; restoration of the previously selected wheel after the scene is on.
+
+Position browsing, valid-position filtering, names, and previews are enabled by default. Preview resolution prefers OStim scene metadata and then Wheeler's resource mappings; browsing prefers the current animation class and displays up to six positions per page by default. All actions remain guarded by the detected scene state and API availability. See [OStimIntegration.defaults.ini](Data/SKSE/Plugins/wheeler/OStimIntegration.defaults.ini) for the full set of controls.
+
+### External Wheeler API
+
+The External Wheeler API is a developer capability, not a player dependency. After confirming that Wheeler has initialized, another SKSE plugin can query Wheeler status; create and delete managed wheels; inspect or select wheels; add and remove entries; inject, remove, inspect, and select items by FormID; and manage external hotkeys. Implemented notifications cover item activation and wheel open/close state.
+
+Managed wheels are deliberately excluded from save serialization. Their owning plugin must recreate them and manage their lifecycle on each session. Start with the [API integration summary](docs/API_INTEGRATION_SUMMARY.md), use the [API logging reference](docs/API_LOGGING_REFERENCE.md) when diagnosing calls, and see the [Action Hotkeys bridge API sample](tools/action_hotkeys_bridge_api_sample/README.md) for a buildable client example.
 
 ## Building from Source
 
