@@ -9301,7 +9301,7 @@ void Wheeler::EnableEditModeGameplayInputBlock()
 	_editModeGameplayInputBlocker.disabledByUsMask = 0;
 	for (const auto flag : kEditModeGameplayBlockFlags) {
 		if (controlMap->AreControlsEnabled(flag)) {
-			controlMap->ToggleControls(flag, false, false);
+			controlMap->ToggleControls(flag, false, true);
 			_editModeGameplayInputBlocker.disabledByUsMask |= static_cast<std::uint32_t>(flag);
 		}
 	}
@@ -9323,7 +9323,7 @@ void Wheeler::DisableEditModeGameplayInputBlock()
 	for (const auto flag : kEditModeGameplayBlockFlags) {
 		const std::uint32_t mask = static_cast<std::uint32_t>(flag);
 		if ((_editModeGameplayInputBlocker.disabledByUsMask & mask) != 0) {
-			controlMap->ToggleControls(flag, true, false);
+			controlMap->ToggleControls(flag, true, true);
 		}
 	}
 

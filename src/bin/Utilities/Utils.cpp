@@ -1,9 +1,30 @@
 #include "Utils.h"
 #include <chrono>
+#include <cstddef>
 #include <string_view>
 
 namespace
 {
+	// CommonLibSSE-NG 6.7 requires a live GFxMovieView to construct RE::ItemCard,
+	// but the native description function still accepts the pre-6.7 ItemCard layout.
+	struct LegacyItemCard
+	{
+		RE::GFxValue obj;
+		RE::BSString infoText;
+		void* unk28;
+		std::uint32_t unk30;
+		std::uint32_t pad34;
+		RE::GPtr<RE::GFxMovieView> view;
+	};
+
+	static_assert(sizeof(LegacyItemCard) == sizeof(RE::ItemCard));
+	static_assert(offsetof(LegacyItemCard, obj) == offsetof(RE::ItemCard, obj));
+	static_assert(offsetof(LegacyItemCard, infoText) == offsetof(RE::ItemCard, infoText));
+	static_assert(offsetof(LegacyItemCard, unk28) == offsetof(RE::ItemCard, unk28));
+	static_assert(offsetof(LegacyItemCard, unk30) == offsetof(RE::ItemCard, unk30));
+	static_assert(offsetof(LegacyItemCard, pad34) == offsetof(RE::ItemCard, pad34));
+	static_assert(offsetof(LegacyItemCard, view) == offsetof(RE::ItemCard, view));
+
 	template <class Fn>
 	bool InvokeWithSehGuard(Fn&& a_fn)
 	{
@@ -941,13 +962,21 @@ static void stripSurvivalModeItemCardText(std::string& a_description)
 	}
 }
 
+void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, RE::BSString& a_buf)
+{
+	LegacyItemCard card;
+	using func_t = void* (*)(LegacyItemCard*, RE::MagicItem*, RE::BSString&);
+	static REL::Relocation<func_t> func{ RELOCATION_ID(51022, 51900) };
+	func(&card, a_magicItem, a_buf);
+}
+
 /// <summary>
 /// Get the description of the magic item without html formatting.
 /// </summary>
 void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, std::string& a_buf)
 {
 	RE::BSString buf;
-	RE::MagicSystem::GetMagicItemDescription(buf, a_magicItem, "", "");
+	GetMagicItemDescription(a_magicItem, buf);
 	a_buf = buf.c_str();
 	stripMagicItemDescriptionFormatCode(a_buf);
 	stripSurvivalModeItemCardText(a_buf);
