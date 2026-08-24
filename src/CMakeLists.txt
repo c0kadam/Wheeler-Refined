@@ -79,7 +79,7 @@ add_library(
 target_compile_features(
 	"${PROJECT_NAME}"
 	PRIVATE
-		cxx_std_20
+		cxx_std_23
 )
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
@@ -89,8 +89,6 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 			"/sdl"	# Enable Additional Security Checks
 			"/utf-8"	# Set Source and Executable character sets to UTF-8
 			"/Zi"	# Debug Information Format
-
-			"/await"
 
 			"/permissive-"	# Standards conformance
 			"/Zc:preprocessor"	# Enable preprocessor conformance mode

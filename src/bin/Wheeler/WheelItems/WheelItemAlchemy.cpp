@@ -231,9 +231,8 @@ namespace
 			return;
 		}
 
-		RE::ItemCard card;
 		RE::BSString rawDescription;
-		Utils::Magic::GetMagicItemDescription(&card, a_item, rawDescription);
+		RE::MagicSystem::GetMagicItemDescription(rawDescription, a_item, "", "");
 
 		logger::info("[AlchemyDescDiag] item form={:08X} name='{}' editor='{}' rawDesc='{}' cachedDesc='{}'",
 			a_item->GetFormID(),

@@ -24,13 +24,6 @@
 #include "bin/Wheeler/Wheeler.h"
 #include "Controls.h"
 
-class CharEvent : public RE::InputEvent
-{
-public:
-	uint32_t keyCode;  // 18 (ascii code)
-};
-
-
 static enum : std::uint32_t
 {
 	kInvalid = static_cast<std::uint32_t>(-1),

@@ -29,7 +29,8 @@ if(NOT IS_DIRECTORY "${CommonLibSSEPath_NG}")
 	message(FATAL_ERROR "CommonLibSSEPath_NG must name a CommonLibSSE-NG checkout. Set -DCommonLibSSEPath_NG=<path> or the CommonLibSSEPath_NG environment variable.")
 endif()
 
-set(WHEELER_COMMONLIBSSE_NG_REVISION "b93280e832f263dbef44e44cbe2936622a02f91a")
+# alandtse/CommonLibSSE-NG v6.7.0
+set(WHEELER_COMMONLIBSSE_NG_REVISION "3d81614617910e7f34b33d8750881811b5e36445")
 find_package(Git QUIET)
 if(Git_FOUND AND EXISTS "${CommonLibSSEPath_NG}/.git")
 	execute_process(

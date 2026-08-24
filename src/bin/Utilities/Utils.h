@@ -27,8 +27,6 @@ namespace Utils
 
 	namespace Magic
 	{
-		void GetMagicItemDescription(RE::ItemCard* a_itemCard, RE::MagicItem* a_magicItem, RE::BSString& a_str);
-
 		void GetMagicItemDescription(RE::MagicItem* a_magicItem, std::string& a_buf);
 		
 		/// Returns true if the spell has at least one effect with a summon-type archetype
@@ -76,7 +74,7 @@ namespace Utils
 
 		inline RE::InventoryEntryData* MakeInventoryEntryData(RE::TESBoundObject* a_obj)
 		{
-			RE::InventoryEntryData* ptr = (RE::InventoryEntryData*)RE::MemoryManager::GetSingleton()->Allocate(24, 0, true);
+			RE::InventoryEntryData* ptr = (RE::InventoryEntryData*)RE::MemoryManager::GetSingleton()->Allocate(sizeof(RE::InventoryEntryData), 0, true);
 			ptr = sub_1401d5ba0(ptr, a_obj, 1);
 			return ptr;
 		}

@@ -7751,7 +7751,7 @@ void AmmoWheel::PlayHoverSlotSound(int newHoveredIndex)
 	
 	auto* audioManager = RE::BSAudioManager::GetSingleton();
 	if (audioManager) {
-		audioManager->BuildSoundDataFromEditorID(handle, editorID, 0x10);
+		audioManager->GetSoundHandleByName(handle, editorID, 0x10);
 		if (handle.IsValid()) {
 			handle.SetVolume(Config::AmmoWheel::Sounds::HoverSlotSoundVolume);
 			handle.Play();
