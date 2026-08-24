@@ -1,0 +1,125 @@
+name: Crash report
+description: Report a reproducible crash to desktop involving Wheeler Refined.
+title: "[Crash]: "
+labels:
+  - crash
+  - needs-logs
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A complete crash log is essential. Attach files or links in the requested fields; do not paste an enormous crash log into the issue body.
+  - type: input
+    id: wheeler_version
+    attributes:
+      label: Wheeler Refined version
+      placeholder: "Example: 1.3.3 / packaged version 1.3.3.0"
+    validations:
+      required: true
+  - type: input
+    id: skyrim_runtime
+    attributes:
+      label: Skyrim version/runtime
+      placeholder: "Example: 1.6.1170"
+    validations:
+      required: true
+  - type: input
+    id: skse_version
+    attributes:
+      label: SKSE version
+    validations:
+      required: true
+  - type: dropdown
+    id: mod_manager
+    attributes:
+      label: Mod manager
+      options:
+        - Mod Organizer 2
+        - Vortex
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: dmenu_version
+    attributes:
+      label: dMenu NG version
+    validations:
+      required: true
+  - type: input
+    id: crash_logger
+    attributes:
+      label: Crash logger used
+      placeholder: "Name and version"
+    validations:
+      required: true
+  - type: textarea
+    id: crash_log
+    attributes:
+      label: Full crash log
+      description: Drag and drop the complete crash-log file or provide a stable link. Do not paste only the probable call stack.
+    validations:
+      required: true
+  - type: textarea
+    id: wheeler_log
+    attributes:
+      label: wheeler.log
+      description: Drag and drop the log or provide a link. If no log was produced, say so.
+    validations:
+      required: true
+  - type: textarea
+    id: preceding_action
+    attributes:
+      label: Exact action immediately preceding the CTD
+      placeholder: Describe the open menu, selected wheel/slot/item, input pressed, and player state.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the shortest numbered sequence that reaches the crash.
+    validations:
+      required: true
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Is the crash reproducible?
+      options:
+        - Yes, every time
+        - Yes, intermittently
+        - No, it happened once
+        - Not yet retested
+    validations:
+      required: true
+  - type: dropdown
+    id: without_wheeler
+    attributes:
+      label: Reproducible without Wheeler Refined?
+      description: Test only when it is safe and feasible for your setup.
+      options:
+        - No
+        - Yes
+        - Not tested because removal was not safe or feasible
+    validations:
+      required: true
+  - type: textarea
+    id: recent_changes
+    attributes:
+      label: Recently installed or updated related mods
+      description: Include UI, input, controller, combat, animation, crash-fix, and Wheeler integration changes.
+    validations:
+      required: true
+  - type: textarea
+    id: relevant_mods
+    attributes:
+      label: Other relevant mod list details
+      description: List related mods and attach a load order or mod-list link when useful.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I attached the full crash log and searched existing crash reports.
+          required: true

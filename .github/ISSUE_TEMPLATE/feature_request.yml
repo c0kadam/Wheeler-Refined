@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a focused improvement to Wheeler Refined.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What workflow is difficult or impossible today, and who would benefit?
+    validations:
+      required: true
+  - type: textarea
+    id: desired_behavior
+    attributes:
+      label: Desired behavior
+      description: Describe the outcome rather than only an implementation idea.
+    validations:
+      required: true
+  - type: dropdown
+    id: input_relevance
+    attributes:
+      label: Input relevance
+      options:
+        - Both controller and mouse/keyboard
+        - Controller
+        - Mouse/keyboard
+        - Not input-related
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: Explain what you use now and why it is insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples or screenshots
+      description: Attach mockups, screenshots, or links when they clarify the request.
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and this request is scoped to Wheeler Refined.
+          required: true

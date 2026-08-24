@@ -1,0 +1,102 @@
+name: Bug report
+description: Report reproducible incorrect behavior that does not involve a crash.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please use the Nexus page for installation support. For a code or compatibility defect, complete the environment and reproduction details below.
+  - type: input
+    id: wheeler_version
+    attributes:
+      label: Wheeler Refined version
+      placeholder: "Example: 1.3.3 / packaged version 1.3.3.0"
+    validations:
+      required: true
+  - type: input
+    id: skyrim_runtime
+    attributes:
+      label: Skyrim version/runtime
+      placeholder: "Example: 1.6.1170"
+    validations:
+      required: true
+  - type: input
+    id: skse_version
+    attributes:
+      label: SKSE version
+      placeholder: "Example: 2.2.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: mod_manager
+    attributes:
+      label: Mod manager
+      options:
+        - Mod Organizer 2
+        - Vortex
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: dmenu_version
+    attributes:
+      label: dMenu NG version
+      placeholder: "Use the exact installed version"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the shortest numbered sequence that reliably demonstrates the issue.
+      placeholder: |
+        1. Load a save with ...
+        2. Open ...
+        3. Select ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Reproducibility/frequency
+      options:
+        - Every time
+        - Often
+        - Sometimes
+        - Once
+        - Not yet reproduced
+    validations:
+      required: true
+  - type: textarea
+    id: related_mods
+    attributes:
+      label: Relevant mod list details
+      description: List UI, input, controller, combat, animation, and Wheeler-related mods that could affect the behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Drag and drop `wheeler.log`, screenshots, or a link when relevant. Attach large files instead of pasting their full contents.
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and provided enough detail to reproduce this behavior.
+          required: true
