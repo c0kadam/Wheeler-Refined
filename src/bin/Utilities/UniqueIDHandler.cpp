@@ -4,6 +4,22 @@
 
 namespace
 {
+	constexpr std::size_t kExtraDataListLegacySize = 0x18;
+	constexpr std::size_t kExtraDataListPost629Size = 0x20;
+
+	constexpr std::size_t GetExtraDataListRuntimeSize(const REL::Version& a_runtime) noexcept
+	{
+		// The universal SE/AE representation does not match the loaded game's
+		// runtime layout, so sizeof(RE::ExtraDataList) is not valid here.
+		return a_runtime.compare(SKSE::RUNTIME_SSE_1_6_629) == std::strong_ordering::less ?
+		           kExtraDataListLegacySize :
+		           kExtraDataListPost629Size;
+	}
+
+	static_assert(GetExtraDataListRuntimeSize(SKSE::RUNTIME_SSE_1_5_97) == 0x18);
+	static_assert(GetExtraDataListRuntimeSize(SKSE::RUNTIME_SSE_1_6_1170) == 0x20);
+	static_assert(GetExtraDataListRuntimeSize(SKSE::RUNTIME_SSE_1_7_99) == 0x20);
+
 	inline RE::ExtraDataList* InitExtraDataList(RE::ExtraDataList* a_list)
 	{
 		using func_t = RE::ExtraDataList* (*)(RE::ExtraDataList*);
@@ -109,7 +125,8 @@ void UniqueIDHandler::EnsureXListUniqueness(RE::ExtraDataList*& a_extraList)
 	}
 
 	if (a_extraList == nullptr) {
-		a_extraList = static_cast<RE::ExtraDataList*>(Utils::Workaround::NiMemAlloc_1400F6B40(sizeof(RE::ExtraDataList)));
+		const auto runtimeSize = GetExtraDataListRuntimeSize(REL::Module::get().version());
+		a_extraList = static_cast<RE::ExtraDataList*>(Utils::Workaround::NiMemAlloc_1400F6B40(runtimeSize));
 		if (!a_extraList) {
 			return;
 		}
