@@ -14,9 +14,15 @@ public:
 	virtual void ActivateItemPrimary() override;
 
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
+	virtual RE::FormID GetFormID() const override { return _formID; }
+	virtual const char* GetItemTypeName() const override { return ITEM_TYPE_STR; }
+	virtual const char* GetItemName() const override { return _scroll ? _scroll->GetName() : "(deleted)"; }
+	virtual bool IsInventoryBacked() const override { return true; }
+	virtual bool IsInPlayerInventory() const override;
 
 	static inline const char* ITEM_TYPE_STR = "WheelItemScroll";
 
 private:
 	RE::ScrollItem* _scroll = nullptr;
+	RE::FormID _formID = 0;
 };

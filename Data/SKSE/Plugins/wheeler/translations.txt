@@ -1,0 +1,46 @@
+# Wheeler custom texts (example)
+AlchemyDynamicIDConsumptionWarning = This crafted potion is unique. Keep at least one copy if you want to reuse this slot.
+NoWheelPresent = No wheel layout is available. Enter edit mode and add a wheel first.
+
+
+; Wheeler Translation File
+; Format: Key = Translated Text
+; Lines starting with ; or # are comments.
+
+AlchemyDynamicIDConsumptionWarning = 
+NoWheelPresent = 
+EditHintTitle = Edit Mode Controls
+EditHintDeviceHeaderMkb = KB/M
+EditHintDeviceHeaderGamepad = Gamepad
+EditHintActionUsePlaceItem = Use / Place Item
+EditHintActionRemoveItemWheel = Remove Item / Wheel
+EditHintActionAddEmptySlot = Add Empty Slot
+EditHintActionAddWheel = Add Wheel
+EditHintActionNextWheel = Next Wheel
+EditHintActionPreviousWheel = Previous Wheel
+EditHintActionMoveSlotForward = Move Slot Forward
+EditHintActionMoveSlotBack = Move Slot Back
+EditHintActionMoveWheelForward = Move Wheel Forward
+EditHintActionMoveWheelBack = Move Wheel Back
+EditHintActionSettingsDMenu = Settings (dMenu)
+EditHintActionExitWheel = Exit Wheel
+EditHintNavToggleMkb = H for keybind hints
+EditHintNavToggleGamepad = Left Stick Button for keybind hints
+InsufficientMagickaForInstantCast = Not enough magicka for instant cast.
+
+; Notifications
+WheelBehaviorDefaultsSaved = Wheeler: Wheel Behavior defaults saved.
+WheelBehaviorRestoredToDefaults = Wheeler: Wheel Behavior restored to defaults.
+NoWheelBehaviorDefaultsSaved = Wheeler: No Wheel Behavior defaults saved yet (press Save once in the panel).
+PressKeyToBindAmmoWheel = Wheeler: press a key to bind Ammo Wheel.
+PressGamepadButtonToBindAmmoWheel = Wheeler: press a gamepad button to bind Ammo Wheel.
+KeybindCaptureCancelled = Wheeler: keybind capture cancelled.
+AmmoWheelKeybindsReset = Wheeler: Ammo Wheel keybinds reset.
+PressKeyToSetModifier = Wheeler: press a key to set as modifier (ESC to cancel).
+KeyboardModifierCleared = Wheeler: Keyboard modifier cleared.
+PressGamepadButtonToSetModifier = Wheeler: press a gamepad button to set as modifier.
+GamepadModifierCleared = Wheeler: Gamepad modifier cleared.
+ClickMouseButtonToBind = Wheeler: click a mouse button to bind.
+MouseToggleCleared = Wheeler: Mouse toggle cleared.
+AmmoWheelFactoryDefaultsRestored = Wheeler: Ammo Wheel restored to factory defaults.
+AmmoWheelFactoryDefaultsFailed = Wheeler: Failed to restore Ammo Wheel factory defaults.

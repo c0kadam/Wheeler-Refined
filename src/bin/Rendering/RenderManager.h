@@ -37,6 +37,7 @@ private:
 	RenderManager() = delete;
 
 	static void draw();
+	static void DrawGlyphTestOverlay();
 	static void MessageCallback(SKSE::MessagingInterface::Message* msg);
 
 	static inline bool ShowMeters = false;

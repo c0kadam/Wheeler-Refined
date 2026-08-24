@@ -1,6 +1,15 @@
 #pragma once
 #include <d3d11.h>
-// stole from lama's tinyhud
+
+// Texture/Image mapping and image-loading structure derived from LamasTinyHUD
+// revision dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited
+// through original Wheeler and subsequently adapted for Wheeler Refined.
+
+#include <filesystem>
+#include <map>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "imgui.h"
 
@@ -102,20 +111,37 @@ public:
 		slot_background,
 		slot_highlighted_background,
 		slot_active_background,
+		wheel_background,
+		wheel_indicator_active,
+		wheel_indicator_inactive,
 		total
 	};
 	static Image GetIconImage(icon_image_type a_imageType, RE::TESForm* a_form=nullptr);
+	static Image GetImageByPath(const std::string& a_path);
+	static Image GetExternalRasterImage(const std::string& a_path);
+	static Image GetSlotMaskedExternalRasterImage(const std::string& a_path);
+	static void InvalidateExternalRasterCache();
+
+	// Optional helpers for reskin-aware overlays/indicators.
+	// Outline points are normalized [0..1] in SVG space and oriented clockwise, starting at the top-most point.
+	static const std::vector<ImVec2>* GetSlotBackgroundOutline();
+	static Image GetSlotBackgroundMaskImage();
 	
 private:
 	static inline std::map<uint32_t, Image> icon_struct;
 
 	static inline std::map<RE::FormID, Image> icon_struct_formID;
 	static inline std::map<std::string, Image> icon_struct_keyword;
+	static inline std::unordered_map<std::string, Image> dynamic_image_struct;
+	static inline std::unordered_map<std::string, Image> external_raster_image_struct;
+	static inline std::unordered_map<std::string, Image> external_slot_masked_image_struct;
 
 	static bool load_texture_from_file(const char* filename,
 		ID3D11ShaderResourceView** out_srv,
 		int& out_width,
-		int& out_height);
+		int& out_height,
+		std::vector<ImVec2>* out_outline = nullptr,
+		ID3D11ShaderResourceView** out_mask_srv = nullptr);
 	template <typename T>
 	static void load_images(std::map<std::string, T>& a_map,
 		std::map<uint32_t, Image>& a_struct,
@@ -129,10 +155,22 @@ private:
 					continue;
 				}
 				const auto index = static_cast<int32_t>(a_map[entry.path().filename().string()]);
+				std::vector<ImVec2>* outlinePtr = nullptr;
+				ID3D11ShaderResourceView** maskPtr = nullptr;
+				if (index == static_cast<int32_t>(icon_image_type::slot_background)) {
+					outlinePtr = &slot_background_outline;
+					maskPtr = &slot_background_mask.texture;
+				}
 				if (load_texture_from_file(entry.path().string().c_str(),
 						&a_struct[index].texture,
 						a_struct[index].width,
-						a_struct[index].height)) {
+						a_struct[index].height,
+						outlinePtr,
+						maskPtr)) {
+					if (index == static_cast<int32_t>(icon_image_type::slot_background) && slot_background_mask.texture) {
+						slot_background_mask.width = a_struct[index].width;
+						slot_background_mask.height = a_struct[index].height;
+					}
 					//logger::trace("loading texture {}, type: {}, width: {}, height: {}"sv,
 					//	entry.path().filename().string().c_str(),
 					//	entry.path().filename().extension().string().c_str(),
@@ -150,9 +188,16 @@ private:
 
 	static void load_custom_icon_images();
 
-	static inline std::string icon_directory = R"(.\Data\SKSE\Plugins\Wheeler\resources\icons)";
-	static inline std::string img_directory = R"(.\Data\SKSE\Plugins\Wheeler\resources\img)";
-	static inline std::string icon_custom_directory = R"(.\Data\SKSE\Plugins\Wheeler\resources\icons_custom)";
+	static inline std::string icon_directory = R"(.\Data\SKSE\Plugins\wheeler\resources\icons)";
+	static inline std::string img_directory = R"(.\Data\SKSE\Plugins\wheeler\resources\img)";
+	static inline std::string icon_custom_directory = R"(.\Data\SKSE\Plugins\wheeler\resources\icons_custom)";
+
+	// Cached shape information for slot_background.svg (used by overlay/indicator drawing).
+	static inline std::vector<ImVec2> slot_background_outline;
+	static inline Image slot_background_mask;
+	static inline std::vector<unsigned char> slot_background_mask_alpha;
+	static inline int slot_background_mask_alpha_width = 0;
+	static inline int slot_background_mask_alpha_height = 0;
 
 	inline static std::map<std::string, icon_image_type> icon_type_name_map = { { R"(potion_health.svg)",
 																					icon_image_type::potion_health },
@@ -225,10 +270,18 @@ private:
 		{ R"(weapon_damage.svg)", icon_image_type::weapon_damage },
 
 		// Background textures
+
+		// slot background
 		{ R"(slot_background.svg)", icon_image_type::slot_background },
 		{ R"(slot_highlighted_background.svg)", icon_image_type::slot_highlighted_background },
-		{ R"(slot_active_background.svg)", icon_image_type::slot_active_background }
+		{ R"(slot_active_background.svg)", icon_image_type::slot_active_background },
+
+		// wheel background
+		{ R"(wheel_background.svg)", icon_image_type::wheel_background },
+
+		// wheel indicators
+		{ R"(wheel_indicator_active.svg)", icon_image_type::wheel_indicator_active },
+		{ R"(wheel_indicator_inactive.svg)", icon_image_type::wheel_indicator_inactive }
 
 	};
 };
-

@@ -2,6 +2,7 @@
 
 #include "SerializationEntry.h"
 #include "bin/Wheeler/Wheeler.h"
+#include "bin/API/WheelerAPI.h"
 
 namespace Serial
 {
@@ -31,6 +32,13 @@ namespace Serial
 		if (!a_interface->ReadRecordData(size)) {
 			return false;
 		}
+		// Bounds check: reject absurdly large sizes that indicate corrupted data
+		// Max reasonable size for Wheeler JSON is ~1MB (generous upper bound)
+		constexpr std::size_t MAX_REASONABLE_SIZE = 1024 * 1024;
+		if (size > MAX_REASONABLE_SIZE) {
+			INFO("Read: string size {} exceeds max {}, likely corrupted data", size, MAX_REASONABLE_SIZE);
+			return false;
+		}
 		if (size > 0) {
 			result.resize(size);
 			if (!a_interface->ReadRecordData(result.data(), static_cast<std::uint32_t>(size))) {
@@ -57,9 +65,10 @@ void SerializationEntry::Save(SKSE::SerializationInterface* a_intfc)
 	}
 	nlohmann::json j_wheeler;
 	Wheeler::SerializeIntoJsonObj(j_wheeler);
-	
+	const auto wheelCount = j_wheeler.contains("wheels") ? j_wheeler["wheels"].size() : 0;
+	const auto activeIdx = j_wheeler.value("activewheel", -1);
 	std::string writeBuffer = j_wheeler.dump();
-	INFO("Serializing following record: {}", writeBuffer);
+	INFO("Serializing record: wheels={}, activeWheel={}", wheelCount, activeIdx);
 	
 	Serial::Write(a_intfc, writeBuffer);
 
@@ -77,23 +86,38 @@ void SerializationEntry::Load(SKSE::SerializationInterface* a_intfc)
 		return;
 	}
 	if (version != SERIALIZER_VERSION) {
-		INFO("Load: wrong version, abort loading");
+		INFO("Load: wrong version (got {}, expected {}), clearing wheel state", version, SERIALIZER_VERSION);
+		Wheeler::Clear();
 		return;
 	}
 	std::string readBuffer;
 
-	Serial::Read(a_intfc, readBuffer);
-	INFO("Read str: {}", readBuffer);
-	try {
-		nlohmann::json j_wheeler = nlohmann::json::parse(readBuffer);
+	if (!Serial::Read(a_intfc, readBuffer)) {
+		INFO("Load: failed to read record data, clearing wheel state");
 		Wheeler::Clear();
-		Wheeler::SerializeFromJsonObj(j_wheeler, a_intfc);
-	} catch (const std::exception& e) {
-		INFO("Failed to parse json: {}", e.what());
 		return;
 	}
-
-
+	
+	INFO("Deserializing record (length={})", readBuffer.size());
+	try {
+		nlohmann::json j_wheeler = nlohmann::json::parse(readBuffer);
+		const auto wheelCount = j_wheeler.contains("wheels") ? j_wheeler["wheels"].size() : 0;
+		const auto activeIdx = j_wheeler.value("activewheel", -1);
+		INFO("Deserializing parsed data: wheels={}, activeWheel={}", wheelCount, activeIdx);
+		WheelerAPI::ClearManagedWheels();  // Clear managed wheel tracking before replacing wheel list
+		Wheeler::Clear();
+		Wheeler::SerializeFromJsonObj(j_wheeler, a_intfc);
+		INFO("Deserialization complete");
+	} catch (const nlohmann::json::exception& e) {
+		INFO("Deserialize failed (JSON error): {}, clearing wheel state", e.what());
+		Wheeler::Clear();
+	} catch (const std::exception& e) {
+		INFO("Deserialize failed: {}, clearing wheel state", e.what());
+		Wheeler::Clear();
+	} catch (...) {
+		INFO("Deserialize failed (unknown error), clearing wheel state");
+		Wheeler::Clear();
+	}
 }
 
 void SerializationEntry::Revert(SKSE::SerializationInterface* a_intfc)

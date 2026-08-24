@@ -14,6 +14,11 @@ public:
 	virtual void ActivateItemPrimary() override;
 
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
+	virtual bool IsInventoryBacked() const override { return true; }
+	virtual bool IsInPlayerInventory() const override;
+	virtual RE::FormID GetFormID() const override { return _light ? _light->GetFormID() : 0; }
+	virtual const char* GetItemTypeName() const override { return ITEM_TYPE_STR; }
+	virtual const char* GetItemName() const override { return _light ? _light->GetName() : "(deleted)"; }
 
 	static inline const char* ITEM_TYPE_STR = "WheelItemLight";
 

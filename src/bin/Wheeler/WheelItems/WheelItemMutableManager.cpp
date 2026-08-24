@@ -41,6 +41,11 @@ EventResult WheelItemMutableManager::ProcessEvent(const RE::TESUniqueIDChangeEve
 	}
 	uint16_t oldUniqueID = a_event->oldUniqueID;
 	uint16_t newUniqueID = a_event->newUniqueID;
+	if (oldUniqueID == 0) {
+		// UniqueID 0 can now intentionally mean a FavWheel-style form-level plain stack.
+		// Do not collapse those sentinel slots into the first concrete instance observed.
+		return EventResult::kContinue;
+	}
 	for (auto& item : this->_mutables) {
 		if (item->GetFormID() == form->GetFormID()) {
 			if (item->GetUniqueID() == oldUniqueID && newUniqueID != 0) {

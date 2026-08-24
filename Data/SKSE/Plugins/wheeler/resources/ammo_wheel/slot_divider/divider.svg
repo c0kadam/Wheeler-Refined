@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="512" viewBox="0 0 256 512" xmlns="http://www.w3.org/2000/svg">
+
+  <defs>
+    <!-- Metal Gradient -->
+    <linearGradient id="dividerMetal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e0c870"/>
+      <stop offset="50%" stop-color="#9a7b2f"/>
+      <stop offset="100%" stop-color="#e0c870"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Main Blade Shape -->
+  <path d="
+      M128 40
+      L140 160
+      L128 470
+      L116 160
+      Z"
+      fill="url(#dividerMetal)"/>
+
+  <!-- Dark Inner Carve -->
+  <path d="
+      M128 60
+      L134 170
+      L128 440
+      L122 170
+      Z"
+      fill="#3a2f15"
+      opacity="0.7"/>
+
+  <!-- Rune Cut -->
+  <line x1="128" y1="110" x2="128" y2="150"
+        stroke="#f2d98a"
+        stroke-width="3"
+        stroke-linecap="round"
+        opacity="0.8"/>
+
+</svg>

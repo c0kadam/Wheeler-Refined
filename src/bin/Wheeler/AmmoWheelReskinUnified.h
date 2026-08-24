@@ -1,13 +1,16 @@
 #pragma once
 #include <d3d11.h>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
+#include <array>
 #include <mutex>
 #include <atomic>
 #include <filesystem>
 #include <chrono>
 #include "imgui.h"
+#include "SimpleIni.h"
 
 namespace AmmoWheelReskinUnified
 {
@@ -45,8 +48,22 @@ namespace AmmoWheelReskinUnified
 		IndicatorCharge,
 		Popup,              // Slot hover overlay (inside wheel, at slot center)
 		PopupBubble,        // Popup bubble background (outside wheel, at popup center)
+		WheelBackdrop,      // Back-most wheel backdrop (behind WheelBackground)
 		WheelBackground,
 		CenterBackground,
+		WheelBorderRing,
+		SlotDivider,
+		NamePanelBackground,
+		SlotLabelText,
+		CursorIndicator,
+		LowAmmoIndicator,
+		PopupBubbleRim,
+		PopupBubbleGlow,
+		CenterPanelFrame,
+		CenterDescriptionText,
+		DamageDigits,
+		MaxDamageDigits,
+		AmmoCountDigits,
 		COUNT
 	};
 
@@ -70,7 +87,8 @@ namespace AmmoWheelReskinUnified
 	{
 		None = 0,      // Use primitive fallback
 		StaticPNG,     // Single PNG image
-		Flipbook       // Animated PNG sequence
+		Flipbook,      // Animated PNG sequence
+		AtlasSheet     // Sprite-sheet atlas (single texture with frame grid)
 	};
 
 	enum class BlendMode : uint8_t
@@ -108,6 +126,9 @@ namespace AmmoWheelReskinUnified
 		uint64_t bytesEstimate = 0;
 		std::chrono::steady_clock::time_point lastUsed;
 		bool valid = false;
+		bool hasContentBounds = false;
+		float contentCenterOffsetXNorm = 0.0f;  // [-0.5, 0.5], relative to full texture width
+		float contentCenterOffsetYNorm = 0.0f;  // [-0.5, 0.5], relative to full texture height
 
 		bool IsValid() const { return valid && srv != nullptr && width > 0 && height > 0; }
 	};
@@ -120,6 +141,7 @@ namespace AmmoWheelReskinUnified
 		float fps = DEFAULT_FPS;
 		bool loop = true;
 		bool pingPong = false;
+		bool progressDriven = false;  // If true, frame index can be driven by DrawContext::progress.
 		StartTimeMode startTimeMode = StartTimeMode::Global;
 	};
 
@@ -136,6 +158,13 @@ namespace AmmoWheelReskinUnified
 		
 		// For Flipbook
 		FlipbookDef flipbook;
+
+		// Atlas metadata.
+		// For AtlasSheet: frame grid and animation controls (via flipbook.*).
+		// For digit targets: glyph atlas layout (non-animated).
+		uint8_t atlasCols = 10;
+		uint8_t atlasRows = 1;
+		float digitSpacingPx = 0.0f;
 		
 		// Render parameters
 		BlendMode blendMode = BlendMode::Alpha;
@@ -229,6 +258,8 @@ namespace AmmoWheelReskinUnified
 		ImVec2 center;
 		float radius;
 		float slotAngleRad;        // For FollowSlot rotation
+		float maxFitSizePx = 0.0f; // Optional cap for FitInsideSlot draw size (slot span limit)
+		float sizeScale = 1.0f;    // Per-draw multiplicative scale (layout override aware)
 		float alphaMult = 1.0f;
 		int slotIndex = -1;
 		RE::FormID formID = 0;
@@ -236,6 +267,24 @@ namespace AmmoWheelReskinUnified
 		bool hovered = false;
 		bool selected = false;
 		bool active = false;
+		bool allowSelectedTintPulse = true;
+		bool autoCenterByAlphaBounds = false;
+	};
+
+	// Per-target layout tuning from AmmoWheel.ini:
+	// [Reskin.Layout.<TargetName>] Scale / OffsetX / OffsetY / OffsetRadial / OffsetTangential /
+	// AngleOffsetDeg / SelfRotationDeg / Opacity / DigitSpacingOffsetPx
+	struct LayoutOverride
+	{
+		float scale = 1.0f;
+		float offsetX = 0.0f;
+		float offsetY = 0.0f;
+		float offsetRadial = 0.0f;      // + outward, - inward (relative to slot angle)
+		float offsetTangential = 0.0f;  // + clockwise, - counter-clockwise (relative to slot angle)
+		float angleOffsetDeg = 0.0f;    // Additional rotation basis for FollowSlot assets
+		float selfRotationDeg = 0.0f;   // Extra self-rotation applied to asset regardless of rotation mode
+		float opacity = 1.0f;           // Extra alpha multiplier (0..1)
+		float digitSpacingOffsetPx = 0.0f;  // Digits-only: expands/contracts spacing between glyphs
 	};
 
 	// ========== DEBUG INFO ==========
@@ -284,6 +333,7 @@ namespace AmmoWheelReskinUnified
 		void Init(ID3D11Device* device);
 		void Shutdown();
 		void Reload();
+		void ReloadSmartFromIni();
 		
 		// Query state
 		bool IsEnabled() const { return _enabled; }
@@ -305,6 +355,11 @@ namespace AmmoWheelReskinUnified
 		// If returns false, caller should use primitive fallback.
 		bool DrawTarget(VisualTarget target, const ResolvedEntry& entry, 
 			const DrawContext& ctx, ImDrawList* drawList);
+		bool DrawDigitString(VisualTarget target, const ResolvedEntry& entry,
+			const DrawContext& baseCtx, std::string_view digitsOnly, float digitHeightPx,
+			ImDrawList* drawList, float* outTotalWidthPx = nullptr);
+		bool HasAssetForTarget(VisualTarget target, const ResolvedEntry& entry) const;
+		LayoutOverride GetLayoutOverrideSnapshot(VisualTarget target) const;
 		
 		// Get current debug info for overlay
 		DebugInfo GetDebugInfo(const ResolvedEntry* currentEntry = nullptr) const;
@@ -324,6 +379,7 @@ namespace AmmoWheelReskinUnified
 
 		// Loading
 		void LoadConfig();
+		void LoadLayoutOverrides(const CSimpleIniA& ini);
 		void LoadPresets();
 		void LoadMappings();
 		void BuildDefaultPreset();
@@ -340,8 +396,14 @@ namespace AmmoWheelReskinUnified
 		// Drawing helpers
 		void DrawStaticTexture(TextureHandle* tex, const AssetDef& asset, 
 			const DrawContext& ctx, ImDrawList* drawList);
+		void DrawStaticTextureRegion(TextureHandle* tex, const AssetDef& asset,
+			const DrawContext& ctx, ImDrawList* drawList,
+			ImVec2 uvMin, ImVec2 uvMax, float regionAspectRatio);
+		bool DrawAtlasTexture(TextureHandle* tex, const AssetDef& asset,
+			const DrawContext& ctx, ImDrawList* drawList);
 		bool DrawFlipbookTexture(const FlipbookDef& def, const AssetDef& asset,
 			const DrawContext& ctx, ImDrawList* drawList);
+		const LayoutOverride& GetLayoutOverride(VisualTarget target) const;
 		
 		// State
 		bool _enabled = false;
@@ -354,6 +416,7 @@ namespace AmmoWheelReskinUnified
 		// Presets
 		Preset _defaultPreset;
 		PrimitiveFallback _primitiveFallback;
+		std::array<LayoutOverride, static_cast<size_t>(VisualTarget::COUNT)> _layoutOverrides{};
 		std::unordered_map<std::string, Preset> _presets;
 		
 		// Mappings (from AMMO_KID.ini)

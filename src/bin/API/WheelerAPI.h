@@ -30,7 +30,7 @@
 namespace WheelerAPI
 {
 	// API version - bump on breaking changes
-	constexpr uint32_t API_VERSION = 1;
+	constexpr uint32_t API_VERSION = 2;
 	constexpr uint32_t INPUT_BROKER_API_VERSION = 1;
 
 	enum class InputBrokerDevice : uint32_t
@@ -76,6 +76,7 @@ namespace WheelerAPI
 		NotManagedWheel = -10,
 		InEditMode = -11,
 		EntryNotEmpty = -12,
+		InvalidArgument = -13,
 		InternalError = -100
 	};
 
@@ -90,6 +91,19 @@ namespace WheelerAPI
 		bool managed;            // If true, wheel is not saved to user config
 		const char* clientName;  // Name of the client managing this wheel (for display)
 		bool showLabel;          // If true, show "[Managed By: clientName]" label
+	};
+
+	struct ExternalHotkeyConfig
+	{
+		const char* sourceTag;      // Stable external ID for update/remove/layout persistence
+		const char* displayName;    // Slot label shown in Wheeler
+		uint32_t scanCode;          // DIK/scancode to dispatch
+		uint32_t modifier;          // Optional modifier scancode. For convenience 1/2/3 are also accepted as Alt/Ctrl/Shift.
+		const char* iconPath;       // Optional absolute or relative icon path
+		uint32_t iconTintARGB;      // Optional tint
+		int32_t wheelNumber;        // 1-based target wheel; 0 = auto
+		int32_t entryIndex;         // 0-based target slot; -1 = auto
+		uint32_t flags;             // Reserved for future use
 	};
 
 	// ============================================================================
@@ -178,6 +192,11 @@ namespace WheelerAPI
 		uint32_t (*GetItemFormID)(int32_t wheelIndex, int32_t entryIndex, int32_t itemIndex);
 		int32_t (*GetSelectedItemIndex)(int32_t wheelIndex, int32_t entryIndex);
 		Result (*SetSelectedItemIndex)(int32_t wheelIndex, int32_t entryIndex, int32_t itemIndex);
+
+		// --- External Hotkey Bridge ---
+		Result (*UpsertExternalHotkey)(const ExternalHotkeyConfig* config);
+		Result (*RemoveExternalHotkey)(const char* sourceTag);
+		void (*ClearExternalHotkeys)();
 
 		// --- Callbacks ---
 		// Pass nullptr to unregister a previously registered callback

@@ -2,4 +2,5 @@
 namespace Hooks
 {
 	void Install();
+	void InstallMutableInventoryHooksFromConfig();
 }

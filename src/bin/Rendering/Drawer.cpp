@@ -5,6 +5,52 @@
 
 #include "bin/Utilities/Utils.h"
 #include "bin/Config.h"
+
+void Drawer::draw_text_with_font(float a_x,
+	float a_y,
+	const char* a_text,
+	ImU32 a_color,
+	ImFont* a_font,
+	float a_font_size,
+	DrawArgs a_drawArgs,
+	bool a_center_text)
+{
+	ImFont* font = a_font ? a_font : ImGui::GetDefaultFont();
+
+	if (!a_text || !*a_text) {
+		return;
+	}
+
+	if (a_drawArgs.alphaMult == 0.f || a_font_size == 0) {
+		return;
+	}
+
+	Utils::Color::MultAlpha(a_color, a_drawArgs.alphaMult);
+
+	ImVec2 position = ImVec2(a_x, a_y);
+
+	if (a_center_text) {
+		const ImVec2 text_size = font->CalcTextSizeA(a_font_size, FLT_MAX, 0.0f, a_text);
+		position.x -= text_size.x * 0.5f;
+		position.y -= text_size.y * 0.5f;
+	}
+
+	auto drawList = ImGui::GetWindowDrawList();
+
+	ImVec2 shadowPos(position);
+	float shadowOffset = a_font_size * 0.05f;
+
+	shadowPos.x += shadowOffset;
+	shadowPos.y += shadowOffset;
+
+	ImU32 shadowCol = Config::Styling::Wheel::TextShadowColor;
+	Utils::Color::MultAlpha(shadowCol, a_drawArgs.alphaMult);
+	// draw shadow
+	drawList->AddText(font, a_font_size, shadowPos, shadowCol, a_text, nullptr, 0.0f, nullptr);
+	// lay text on top of shadow
+	drawList->AddText(font, a_font_size, position, a_color, a_text, nullptr, 0.0f, nullptr);
+}
+
 void Drawer::draw_text(float a_x,
 		float a_y,
 		const char* a_text,
@@ -161,6 +207,9 @@ void Drawer::draw_text_block(float a_x, float a_y, std::string& a_text, ImU32 a_
 
 
 
+// Derived from LamasTinyHUD's texture drawing implementation at revision
+// dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited through
+// original Wheeler and subsequently adapted for Wheeler Refined.
 void Drawer::draw_texture(ID3D11ShaderResourceView* a_texture,
 	ImVec2 a_center,
 	float a_offset_x,
@@ -169,6 +218,9 @@ void Drawer::draw_texture(ID3D11ShaderResourceView* a_texture,
 	ImU32 a_color,
 	DrawArgs a_drawArgs)
 {
+	if (!a_texture) {
+		return;  // safeguard against missing/failed texture loads
+	}
 	a_center = ImVec2(a_center.x + a_offset_x, a_center.y + a_offset_y);
 	const float cos_a = cosf(a_drawArgs.rotationOffset);
 	const float sin_a = sinf(a_drawArgs.rotationOffset);
@@ -181,8 +233,9 @@ void Drawer::draw_texture(ID3D11ShaderResourceView* a_texture,
 	ImVec2 uvs[4] = { ImVec2(0.0f, 0.0f), ImVec2(1.0f, 0.0f), ImVec2(1.0f, 1.0f), ImVec2(0.0f, 1.0f) };
 
 	Utils::Color::MultAlpha(a_color, a_drawArgs.alphaMult);
+	ImTextureID texId = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(a_texture));
 	ImGui::GetWindowDrawList()
-		->AddImageQuad(a_texture, pos[0], pos[1], pos[2], pos[3], uvs[0], uvs[1], uvs[2], uvs[3], a_color);
+		->AddImageQuad(texId, pos[0], pos[1], pos[2], pos[3], uvs[0], uvs[1], uvs[2], uvs[3], a_color);
 }
 
 void Drawer::draw_arc(ImVec2 center,
@@ -278,4 +331,3 @@ void Drawer::draw_triangle_filled(const ImVec2& p1, const ImVec2& p2, const ImVe
 	Utils::Color::MultAlpha(color, a_drawArgs.alphaMult);
 	ImGui::GetWindowDrawList()->AddTriangleFilled(p1, p2, p3, color);
 }
-

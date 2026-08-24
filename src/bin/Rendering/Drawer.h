@@ -22,6 +22,15 @@ namespace Drawer
 		float a_font_size,
 		DrawArgs a_drawArgs,
 		bool a_center_text = true);
+
+	void draw_text_with_font(float a_x,
+		float a_y,
+		const char* a_text,
+		ImU32 a_color,
+		ImFont* a_font,
+		float a_font_size,
+		DrawArgs a_drawArgs,
+		bool a_center_text = true);
 	
 	void draw_text_block(float a_x,
 		float a_y,

@@ -3,10 +3,67 @@
 #include "bin/UserInput/Input.h"
 #include "bin/Config.h"
 #include "bin/Wheeler/Wheeler.h"
+#include "RE/T/TESObjectWEAP.h"
+
+#include <atomic>
 namespace Hooks
 {
 	namespace
 	{
+		int GetRepresentedItemCount(RE::ExtraDataList* a_extraList)
+		{
+			if (!a_extraList) {
+				return 0;
+			}
+
+			const int count = a_extraList->GetCount();
+			// Single reference-backed items may report count=0 even though the list
+			// still represents one concrete inventory instance.
+			return count > 0 ? count : 1;
+		}
+
+		bool HasReferenceIdentityData(RE::ExtraDataList* a_extraList)
+		{
+			return a_extraList &&
+			       (a_extraList->HasType(RE::ExtraDataType::kReferenceHandle) ||
+			        a_extraList->HasType(RE::ExtraDataType::kOriginalReference) ||
+			        a_extraList->HasType(RE::ExtraDataType::kAliasInstanceArray));
+		}
+
+		bool IsTransientBoundWeapon(RE::TESBoundObject* a_object)
+		{
+			auto* weapon = a_object ? a_object->As<RE::TESObjectWEAP>() : nullptr;
+			return weapon && weapon->IsBound();
+		}
+
+		void LogBoundWeaponHookSkipOnce(RE::TESBoundObject* a_object, const char* a_source)
+		{
+			static std::atomic_bool logged{ false };
+			if (logged.exchange(true)) {
+				return;
+			}
+
+			logger::info(
+				"InventoryHook: skipping transient bound weapon in {} form={:08X} name={}",
+				a_source ? a_source : "unknown",
+				a_object ? a_object->GetFormID() : 0,
+				a_object ? a_object->GetName() : "");
+		}
+
+		bool ValidateCallHookSite(std::uintptr_t address, const char* label)
+		{
+			const auto opcode = *reinterpret_cast<std::uint8_t*>(address);
+			if (opcode != 0xE8) {
+				logger::warn("Hooks: {} hook site {:X} has unexpected opcode {:02X}; skipping install",
+					label,
+					address,
+					static_cast<std::uint32_t>(opcode));
+				return false;
+			}
+
+			return true;
+		}
+
 		////https://github.com/ahzaab/iEquipUtil/blob/master/src/BaseExtraListEX.cpp
 		
 		/// <summary>
@@ -39,17 +96,28 @@ namespace Hooks
 
 			void Hook_AddObjectToContainer(RE::TESBoundObject* a_object, RE::ExtraDataList* a_extraList, int32_t a_count, RE::TESObjectREFR* a_fromRefr)
 			{
+				if (!a_object || UniqueIDHandler::ShouldBypassInventoryHooks()) {
+					return _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr);
+				}
+
+				if (IsTransientBoundWeapon(a_object)) {
+					LogBoundWeaponHookSkipOnce(a_object, "AddObjectToContainer");
+					return _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr);
+				}
+
 				auto ft = a_object->GetFormType();
-				if (a_count <= 0 || !a_object || (ft != RE::FormType::Weapon && ft != RE::FormType::Armor) ) {
+				if (a_count <= 0 || (ft != RE::FormType::Weapon && ft != RE::FormType::Armor)) {
 					return _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr);
 				}
 
 				auto countLeft = a_count;
 
 				if (a_extraList) {
-					auto count = a_extraList->GetCount();
+					auto count = GetRepresentedItemCount(a_extraList);
 					countLeft -= count;
-					UniqueIDHandler::EnsureXListUniqueness(a_extraList);
+					if (!HasReferenceIdentityData(a_extraList)) {
+						UniqueIDHandler::EnsureXListUniqueness(a_extraList);
+					}
 					_AddObjectToContainer(this, a_object, a_extraList, count, a_fromRefr);
 				}
 
@@ -62,6 +130,10 @@ namespace Hooks
 
 				if (invChanges && invChanges->entryList) {
 					for (auto& entry : *invChanges->entryList) {
+						if (!entry) {
+							continue;
+						}
+
 						auto item = entry->object;
 
 						if (item == a_object) {
@@ -70,9 +142,11 @@ namespace Hooks
 							if (entry->extraLists) {
 								for (auto& xList : *entry->extraLists) {
 									if (xList) {
-										auto count = xList->GetCount();
+										auto count = GetRepresentedItemCount(xList);
 										rawCount -= count;
-										UniqueIDHandler::EnsureXListUniqueness(xList);
+										if (!HasReferenceIdentityData(xList)) {
+											UniqueIDHandler::EnsureXListUniqueness(xList);
+										}
 									}
 								}
 							}
@@ -81,7 +155,9 @@ namespace Hooks
 							while (rawCount-- > 0) {
 								xList = 0;
 								UniqueIDHandler::EnsureXListUniqueness(xList);
-								entry->AddExtraList(xList);
+								if (xList) {
+									entry->AddExtraList(xList);
+								}
 							}
 						}
 					}
@@ -98,7 +174,12 @@ namespace Hooks
 				if (!bo) {
 					return _PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
 				}
-				
+
+				if (IsTransientBoundWeapon(bo)) {
+					LogBoundWeaponHookSkipOnce(bo, "PickUpObject");
+					return _PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
+				}
+
 				auto ft = bo->GetFormType();
 
 				if (a_count <= 0 || (ft != RE::FormType::Weapon && ft != RE::FormType::Armor)) {
@@ -107,44 +188,15 @@ namespace Hooks
 				_PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
 				auto countLeft = a_count;
 
-				auto count = a_object->extraList.GetCount();
+				auto count = GetRepresentedItemCount(&a_object->extraList);
 				countLeft -= count;
 				auto ptr = &a_object->extraList;
-				UniqueIDHandler::EnsureXListUniqueness(ptr);
-				//manager->ActivateAndDispatch(a_object->GetBaseObject(), a_object->extraList, count);
-				//_PickUpObject(this, a_object, count, a_arg3, a_playSound);
-
-				while (countLeft-- > 0) { // why are we calling this?
-					_AddObjectToContainer(this, a_object->GetBaseObject(), nullptr, 1, nullptr);
+				if (!HasReferenceIdentityData(ptr)) {
+					UniqueIDHandler::EnsureXListUniqueness(ptr);
 				}
 
-				auto invChanges = this->GetInventoryChanges();
-
-				if (invChanges && invChanges->entryList) {
-					for (auto& entry : *invChanges->entryList) {
-						auto item = entry->object;
-
-						if (item == a_object->GetBaseObject()) {
-							auto rawCount = entry->countDelta;
-
-							if (entry->extraLists) {
-								for (auto& xList : *entry->extraLists) {
-									if (xList) {
-										auto count2 = xList->GetCount();
-										rawCount -= count2;
-										UniqueIDHandler::EnsureXListUniqueness(xList);
-									}
-								}
-							}
-
-							RE::ExtraDataList* xList;
-							while (rawCount-- > 0) {
-								xList = 0;
-								UniqueIDHandler::EnsureXListUniqueness(xList);
-								entry->AddExtraList(xList);
-							}
-						}
-					}
+				while (countLeft-- > 0) {
+					_AddObjectToContainer(this, a_object->GetBaseObject(), nullptr, 1, nullptr);
 				}
 			}
 		};
@@ -176,11 +228,17 @@ namespace Hooks
 	class OnInputEventDispatch
 	{
 	public:
-		static void Install()
+		static bool Install()
 		{
 			auto& trampoline = SKSE::GetTrampoline();
 			REL::Relocation<uintptr_t> caller{ RELOCATION_ID(67315, 68617) };
-			_DispatchInputEvent = trampoline.write_call<5>(caller.address() + RELOCATION_OFFSET(0x7B, 0x7B), DispatchInputEvent);
+			const auto hookSite = caller.address() + RELOCATION_OFFSET(0x7B, 0x7B);
+			if (!ValidateCallHookSite(hookSite, "InputDispatch")) {
+				return false;
+			}
+
+			_DispatchInputEvent = trampoline.write_call<5>(hookSite, DispatchInputEvent);
+			return true;
 		}
 
 	private:
@@ -227,11 +285,34 @@ namespace Hooks
 
 	void Install()
 	{
-		SKSE::AllocTrampoline(1 << 5);
+		static std::atomic_bool installed{ false };
+		if (installed.exchange(true)) {
+			logger::info("Hooks: Install called again, skipping");
+			return;
+		}
 
-		OnChangePlayerInventory::Install();
-		OnInputEventDispatch::Install();
+		if (!OnInputEventDispatch::Install()) {
+			logger::warn("Hooks: Input dispatch hook not installed due callsite mismatch");
+		}
 		//OnCameraUpdate::Install(); // hooking camera is a terrible idea
-		logger::info("Installed all hooks");
+		logger::info("Hooks: installed core hooks");
+	}
+
+	void InstallMutableInventoryHooksFromConfig()
+	{
+		static std::atomic_bool installed{ false };
+
+		if (!Config::WheelBehavior::MutableInventoryHooks) {
+			logger::info("Hooks: mutable inventory hooks disabled by config");
+			return;
+		}
+
+		if (installed.exchange(true)) {
+			logger::info("Hooks: mutable inventory hooks already installed, skipping");
+			return;
+		}
+
+		logger::warn("Hooks: mutable inventory hooks enabled by config; installing weapon/armor ExtraUniqueID hooks");
+		OnChangePlayerInventory::Install();
 	}
 }

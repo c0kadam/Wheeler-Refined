@@ -14,6 +14,13 @@ public:
 	virtual void ActivateItemPrimary() override;
 
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
+	virtual RE::FormID GetFormID() const override { return _miscItem ? _miscItem->GetFormID() : 0; }
+	virtual const char* GetItemTypeName() const override { return ITEM_TYPE_STR; }
+	virtual const char* GetItemName() const override { return _miscItem ? _miscItem->GetName() : "(deleted)"; }
+	
+	// Inventory sync overrides
+	virtual bool IsInventoryBacked() const override { return true; }
+	virtual bool IsInPlayerInventory() const override;
 
 	static inline const char* ITEM_TYPE_STR = "WheelItemMisc";
 
@@ -22,3 +29,13 @@ private:
 
 	void useItem();
 };
+
+namespace YpsItems
+{
+	bool IsYpsItem(RE::TESObjectMISC* a_item);
+}
+
+namespace ShovelItems
+{
+	bool IsShovelItem(RE::TESObjectMISC* a_item);
+}

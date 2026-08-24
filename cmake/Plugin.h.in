@@ -16,4 +16,10 @@ namespace Plugin
 	};
 
 	inline constexpr auto NAME = "@PROJECT_NAME@"sv;
+
+	// Wheeler Refined branding
+	inline constexpr auto DISPLAY_NAME = "Wheeler - Refined"sv;
+	inline constexpr auto DISPLAY_VERSION = "v1.3.3"sv;
+	inline constexpr auto AUTHOR = "C0kadam"sv;
+	inline constexpr auto BUILD_TIMESTAMP = "4/26/2026"sv;
 }

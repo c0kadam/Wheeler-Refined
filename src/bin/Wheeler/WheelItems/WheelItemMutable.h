@@ -26,6 +26,7 @@ class WheelItemMutable : public WheelItem
 {
 public:
 	uint16_t GetUniqueID();
+	uint16_t GetUniqueID() const;
 	void SetUniqueID(uint16_t a_id);
 	RE::FormID GetFormID();
 
@@ -41,6 +42,16 @@ public:
 		WheelItemMutableManager::GetSingleton()->Track(ret.get());
 		return ret;
 	}
+
+	// Inventory sync overrides
+	virtual bool IsInventoryBacked() const override { return true; }
+	virtual bool IsInPlayerInventory() const override;  // implemented in .cpp
+	virtual RE::FormID GetFormID() const override;  // override the base, use existing GetFormID()
+	virtual const char* GetItemName() const override;
+	virtual RE::TESForm* GetI4Form() const override { return _obj; }
+	virtual RE::TESBoundObject* GetI4BoundObject() const override { return _obj; }
+	virtual std::uint64_t GetI4Signature() const override { return static_cast<std::uint64_t>(GetUniqueID()); }
+	virtual bool SupportsPreciseHandIndicatorMatching(RE::TESObjectREFR::InventoryItemMap& a_inv) const override;
 
 
 protected:
@@ -61,14 +72,21 @@ protected:
 	/// <param name="a_inv"></param>
 	/// <returns>The # of available items with functionally identical extralists in the inventory.</returns>
 	std::pair<int, RE::ExtraDataList*> GetItemExtraDataAndCount(RE::TESObjectREFR::InventoryItemMap& a_inv);
+	bool CanUseGroupedEquipFallback(RE::TESObjectREFR::InventoryItemMap& a_inv, RE::ExtraDataList* a_targetExtraList, int a_count) const;
 
 	void GetItemEnchantment(RE::TESObjectREFR::InventoryItemMap& a_invMap, std::vector<RE::EnchantmentItem*>& r_enchantments);
 	void GetItemEnchantment(RE::InventoryEntryData* a_iData, std::vector<RE::EnchantmentItem*>& r_enchantments);
+	
+	/// <summary>
+	/// Gets the display name of the item from inventory data.
+	/// Returns custom name (e.g., "Hugh's Glass Dagger") if renamed, otherwise base form name.
+	/// </summary>
+	std::string GetDisplayName(RE::TESObjectREFR::InventoryItemMap& a_inv);
 
 	RE::TESBoundObject* _obj; // TESObjectWEAP or TESObjectARMO
 
 private:
 
 	uint16_t _uniqueID = 0;
-	std::mutex _uniqueIDLock;
+	mutable std::mutex _uniqueIDLock;
 };

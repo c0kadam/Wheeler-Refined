@@ -19,13 +19,21 @@ public:
 	};
 	void ActivateItemSecondary() override;
 	void ActivateItemPrimary() override;
+	virtual const char* GetItemTypeName() const override { return ITEM_TYPE_STR; }
+	std::optional<bool> MatchesEquippedHandIndicator(
+		RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::FormID a_handFormID,
+		std::uint64_t a_handSignature,
+		bool a_leftHand) const override;
 	
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
 
 
 	static inline const char* ITEM_TYPE_STR = "WheelItemWeapon";
+	static void ProcessIWSCompatTransfer();
 
 private:
-	void equipItem(bool a_toRight = true);
+	// Returns false when activation was safely deferred and owns post-equip draw restoration.
+	bool equipItem(bool a_toRight = true);
 	void unequipItem(const RE::BGSEquipSlot* a_slot);
 };

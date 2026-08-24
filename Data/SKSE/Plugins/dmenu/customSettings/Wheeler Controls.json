@@ -1,0 +1,912 @@
+{
+    "data":  [
+                 {
+                     "control":  {
+                                     "failAction":  "disable"
+                                 },
+                     "entries":  [
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "default":  15.0,
+                                         "ini":  {
+                                                     "id":  "CursorRadiusPerEntry",
+                                                     "section":  "Control.Wheel"
+                                                 },
+                                         "style":  {
+                                                       "max":  50.0,
+                                                       "min":  5.0,
+                                                       "step":  1.0
+                                                   },
+                                         "text":  {
+                                                      "desc":  "Radius of the area in which the invisible cursor in the center of the wheel moves. \nThe smaller the value, the more responsive the wheel is.",
+                                                      "name":  "Cursor Radius Per Entry"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "slider"
+                                     },
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "default":  0.2,
+                                         "ini":  {
+                                                     "id":  "ToggleHoldThreshold",
+                                                     "section":  "Control.Wheel"
+                                                 },
+                                         "style":  {
+                                                       "max":  0.5,
+                                                       "min":  0.0,
+                                                       "step":  0.009999999776482582
+                                                   },
+                                         "text":  {
+                                                      "desc":  "If you hold onto the toggle key longer than this time(seconds), \nwheel automatically closes once you release the key.",
+                                                      "name":  "Toggle Hold Threshold (seconds)"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "slider"
+                                     },
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "default":  true,
+                                         "ini":  {
+                                                     "id":  "BlockGameInputInEditMode",
+                                                     "section":  "Control.Wheel"
+                                                 },
+                                         "text":  {
+                                                      "desc":  "When ON, Wheeler disables gameplay controls while edit mode is active in Inventory/Magic/Favorites. Turn OFF to keep v1.3-like behavior and avoid ControlMap blocking.",
+                                                      "name":  "Block Game Input In Edit Mode"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "checkbox"
+                                     },
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "default":  true,
+                                         "ini":  {
+                                                     "id":  "EnableOpenInFavoritesMenu",
+                                                     "section":  "Control.Wheel"
+                                                 },
+                                         "text":  {
+                                                      "desc":  "When ON, Wheeler can open while the Favorites menu is open. Turn OFF to let Favorites menu inputs pass through without opening Wheeler.",
+                                                      "name":  "Open In Favorites Menu"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "checkbox"
+                                     },
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "default":  true,
+                                         "ini":  {
+                                                     "id":  "EnableEditModeInFavoritesMenu",
+                                                     "section":  "Control.Wheel"
+                                                 },
+                                         "text":  {
+                                                      "desc":  "When ON, opening Wheeler while the Favorites menu is open enters edit mode. Turn OFF to keep the Favorites menu from triggering Wheeler edit mode.",
+                                                      "name":  "Edit Mode In Favorites Menu"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "checkbox"
+                                     },
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "default":  true,
+                                         "ini":  {
+                                                     "id":  "HideGameUIInEditMode",
+                                                     "section":  "Control.Wheel"
+                                                 },
+                                         "text":  {
+                                                      "desc":  "When ON, Inventory/Magic/Favorites menus are hidden while Wheeler edit mode is active. Turn OFF to keep those menus visible behind Wheeler.",
+                                                      "name":  "Hide Game UI In Edit Mode"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "checkbox"
+                                     },
+                                     {
+                                         "control":  {
+                                                         "failAction":  "disable"
+                                                     },
+                                         "entries":  [
+                                                         {
+                                                             "control":  {
+                                                                             "failAction":  "disable"
+                                                                         },
+                                                             "entries":  [
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  34,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheel",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Press this key to open/close wheel.\nIf you hold this key for longer than \"Toggle Hold Threshold\" time,\nreleasing the key closes the wheel.",
+                                                                                              "name":  "Toggle Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  35,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleEditHints",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Show or hide the edit-mode hint panel while Wheeler edit mode is active. Set to 0 to disable this shortcut entirely.",
+                                                                                              "name":  "Toggle Edit Hints"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  15,
+                                                                                 "ini":  {
+                                                                                             "id":  "closeWheel",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Closes the wheel immediately. Set to 0 to disable this shortcut entirely.",
+                                                                                              "name":  "Exit Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  1,
+                                                                                 "ini":  {
+                                                                                             "id":  "closeWheelAlt",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Alternative immediate close shortcut. Set to 0 to disable this shortcut entirely.",
+                                                                                              "name":  "Exit Wheel Alt"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  0,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheelModifier",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "name":  "Toggle Wheel Modifier (optional)",
+                                                                                              "desc":  "Optional modifier for chord input. Hold modifier + this key/button to trigger the action (for example RB+X or Shift+Q). Leave unbound (0) to keep current behavior. When a Toggle Modifier is set, the base key can be reused for other Wheeler bindings."
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  264,
+                                                                                 "ini":  {
+                                                                                             "id":  "nextWheel",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Go to the next wheel in the set of available wheels.",
+                                                                                              "name":  "Next Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  265,
+                                                                                 "ini":  {
+                                                                                             "id":  "prevWheel",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Go to the previous wheel in the set of available wheels.",
+                                                                                              "name":  "Previous Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  18,
+                                                                                 "ini":  {
+                                                                                             "id":  "nextItem",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Switch to the next item in the current highlighted slot.",
+                                                                                              "name":  "Next Item"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  16,
+                                                                                 "ini":  {
+                                                                                             "id":  "prevItem",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Switch to the previous item in the current highlighted slot.",
+                                                                                              "name":  "Previous Item"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  256,
+                                                                                 "ini":  {
+                                                                                             "id":  "activatePrimary",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Activate the item using the \"primary\" input;\nThis usually equips the item to your right hand.\n\nUnder edit mode, this functions as the add button.",
+                                                                                              "name":  "Activate Primary"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  257,
+                                                                                 "ini":  {
+                                                                                             "id":  "activateSecondary",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Activate the item using the \"secondary\" input;\nThis usually equips the item to your right hand.\n\nUnder edit mode, this functions as the delete button.",
+                                                                                              "name":  "Activate Secondary"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  49,
+                                                                                 "ini":  {
+                                                                                             "id":  "addWheel",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Add an empty wheel to the set of wheels.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Add Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  50,
+                                                                                 "ini":  {
+                                                                                             "id":  "addEmptyEntry",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Add an empty entry to the current wheel.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Add Empty Entry"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  200,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveEntryForward",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently highlighted entry one slot forward.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Entry Forward"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  208,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveEntryBack",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently highlighted entry one slot back.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Entry Back"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  205,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveWheelForward",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently active wheel forward in the set of wheels.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Wheel Forward"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  203,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveWheelBack",
+                                                                                             "section":  "InputBindings.MKB"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently active wheel back in the set of wheels.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Wheel Back"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             }
+                                                                         ],
+                                                             "text":  {
+                                                                          "desc":  "",
+                                                                          "name":  "Mouse \u0026 Keyboard"
+                                                                      },
+                                                             "translation":  {
+                                                                                 "desc":  "",
+                                                                                 "name":  ""
+                                                                             },
+                                                             "type":  "group"
+                                                         },
+                                                         {
+                                                             "control":  {
+                                                                             "failAction":  "disable"
+                                                                         },
+                                                             "entries":  [
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  278,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheel",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Press this key to open/close wheel.\nIf you hold this key for longer than \"Toggle Hold Threshold\" time,\nreleasing the key closes the wheel.",
+                                                                                              "name":  "Toggle Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  272,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleEditHints",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Show or hide the edit-mode hint panel while Wheeler edit mode is active. Set to 0 to disable this shortcut entirely.",
+                                                                                              "name":  "Toggle Edit Hints"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  277,
+                                                                                 "ini":  {
+                                                                                             "id":  "exitWheel",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Closes the wheel immediately. Equivalent to vanilla Cancel.",
+                                                                                              "name":  "Exit Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  274,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheelModifier",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "name":  "Toggle Wheel Modifier (optional)",
+                                                                                              "desc":  "Optional modifier for chord input. Hold modifier + this key/button to trigger the action (for example RB+X or Shift+Q). Leave unbound (0) to keep current behavior. When a Toggle Modifier is set, the base key can be reused for other Wheeler bindings."
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  0,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheelIfInInventory",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "This key only functions when inventory/magic menu is opened.\nPress this key to open/close wheel.\nIf you hold this key for longer than \"Toggle Hold Threshold\" time,\nreleasing the key closes the wheel.",
+                                                                                              "name":  "Toggle Wheel In Inventory"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  0,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheelIfInInventoryModifier",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "name":  "Toggle Wheel In Inventory Modifier (optional)",
+                                                                                              "desc":  "Optional modifier for chord input. Hold modifier + this key/button to trigger the action (for example RB+X or Shift+Q). Leave unbound (0) to keep current behavior. When a Toggle Modifier is set, the base key can be reused for other Wheeler bindings."
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  0,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheelIfNotInInventory",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "This key only functions when inventory/magic menu is not opened.\nPress this key to open/close wheel.\nIf you hold this key for longer than \"Toggle Hold Threshold\" time,\nreleasing the key closes the wheel.",
+                                                                                              "name":  "Toggle Wheel Out Of Inventory"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  0,
+                                                                                 "ini":  {
+                                                                                             "id":  "toggleWheelIfNotInInventoryModifier",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "name":  "Toggle Wheel Out Of Inventory Modifier (optional)",
+                                                                                              "desc":  "Optional modifier for chord input. Hold modifier + this key/button to trigger the action (for example RB+X or Shift+Q). Leave unbound (0) to keep current behavior. When a Toggle Modifier is set, the base key can be reused for other Wheeler bindings."
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  281,
+                                                                                 "ini":  {
+                                                                                             "id":  "nextWheel",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Go to the next wheel in the set of available wheels.",
+                                                                                              "name":  "Next Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  280,
+                                                                                 "ini":  {
+                                                                                             "id":  "prevWheel",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Go to the previous wheel in the set of available wheels.",
+                                                                                              "name":  "Previous Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  269,
+                                                                                 "ini":  {
+                                                                                             "id":  "nextItem",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Switch to the next item in the current highlighted slot.",
+                                                                                              "name":  "Next Item"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  268,
+                                                                                 "ini":  {
+                                                                                             "id":  "prevItem",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Switch to the previous item in the current highlighted slot.",
+                                                                                              "name":  "Previous Item"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  275,
+                                                                                 "ini":  {
+                                                                                             "id":  "activatePrimary",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Activate the item using the \"primary\" input;\nThis usually equips the item to your right hand.\n\nUnder edit mode, this functions as the add button.",
+                                                                                              "name":  "Activate Primary"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  274,
+                                                                                 "ini":  {
+                                                                                             "id":  "activateSecondary",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Activate the item using the \"secondary\" input;\nThis usually equips the item to your right hand.\n\nUnder edit mode, this functions as the delete button.",
+                                                                                              "name":  "Activate Secondary"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  279,
+                                                                                 "ini":  {
+                                                                                             "id":  "addWheel",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Add an empty wheel to the set of wheels.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Add Wheel"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  276,
+                                                                                 "ini":  {
+                                                                                             "id":  "addEmptyEntry",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Add an empty entry to the current wheel.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Add Empty Entry"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  266,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveEntryForward",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently highlighted entry one slot forward.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Entry Forward"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  267,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveEntryBack",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently highlighted entry one slot back.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Entry Back"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  273,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveWheelForward",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently active wheel forward in the set of wheels.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Wheel Forward"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             },
+                                                                             {
+                                                                                 "control":  {
+                                                                                                 "failAction":  "disable"
+                                                                                             },
+                                                                                 "default":  272,
+                                                                                 "ini":  {
+                                                                                             "id":  "moveWheelBack",
+                                                                                             "section":  "InputBindings.GamePad"
+                                                                                         },
+                                                                                 "text":  {
+                                                                                              "desc":  "Move the currently active wheel back in the set of wheels.\nThis button is only functional under edit mode(i.e. when you\u0027re inside inventory or magic menu).",
+                                                                                              "name":  "Move Wheel Back"
+                                                                                          },
+                                                                                 "translation":  {
+                                                                                                     "desc":  "",
+                                                                                                     "name":  ""
+                                                                                                 },
+                                                                                 "type":  "keymap"
+                                                                             }
+                                                                         ],
+                                                             "text":  {
+                                                                          "desc":  "",
+                                                                          "name":  "Gamepad"
+                                                                      },
+                                                             "translation":  {
+                                                                                 "desc":  "",
+                                                                                 "name":  ""
+                                                                             },
+                                                             "type":  "group"
+                                                         }
+                                                     ],
+                                         "text":  {
+                                                      "desc":  "",
+                                                      "name":  "Input Binding"
+                                                  },
+                                         "translation":  {
+                                                             "desc":  "",
+                                                             "name":  ""
+                                                         },
+                                         "type":  "group"
+                                     }
+                                 ],
+                     "text":  {
+                                  "desc":  "",
+                                  "name":  "Control"
+                              },
+                     "translation":  {
+                                         "desc":  "",
+                                         "name":  ""
+                                     },
+                     "type":  "group"
+                 },
+                 {
+                     "control":  {
+                                     "failAction":  "disable"
+                                 },
+                     "id":  "wheeler_reset_all_wheels",
+                     "text":  {
+                                  "desc":  "Resets all wheels to the default configuration(2 wheels + 4 entries), removing all items.",
+                                  "name":  "Reset All Wheels"
+                              },
+                     "translation":  {
+                                         "desc":  "",
+                                         "name":  ""
+                                     },
+                     "type":  "button"
+                 }
+             ],
+    "ini":  "Data\\SKSE\\Plugins\\Wheeler\\Controls.ini",
+    "name":  "Wheeler Controls"
+}

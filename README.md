@@ -1,4 +1,4 @@
-# Wheeler
+# Wheeler Refined
 
 Most, if not all modern RPG games have some sort of wheel menu for quick actions. GTA5's wheel allows the player to quickly browse their military arsenal, Witcher's wheel allows to switch between magic signs and consumables, and Bethesda's own title, Fallout4, has a wheel for favorited item access. This mod aims to integrate this modern UI paradigm into Skyrim, and hopefully make its players' life easier.
 
@@ -97,6 +97,33 @@ Wheeler uses [dMenu](https://www.nexusmods.com/skyrimspecialedition/mods/97221) 
 
 ![dMenu editing](images/dmenu_editing.gif)
 
+# License and permissions
+
+Wheeler Refined is distributed as a combined work under the [GNU General Public License version 3 only](LICENSE) (`GPL-3.0-only`).
+
+Wheeler Refined is a modified derivative of [Wheeler](https://github.com/D7ry/wheeler) by dTry/D7ry. The original Wheeler source remains under its [BSD 3-Clause License](LICENSES/BSD-3-Clause-Wheeler.txt), copyright (c) 2024, dTry. The GPL-3.0-only selection for Wheeler Refined does not relicense the original Wheeler project or other third-party components.
+
+See [NOTICE.md](NOTICE.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and third-party terms.
+
+Redistributions of Wheeler Refined should include:
+
+- `LICENSE`
+- `LICENSES/BSD-3-Clause-Wheeler.txt`
+- `NOTICE.md`
+- `THIRD_PARTY_NOTICES.md`
+- third-party dependency license/copyright notices for bundled or linked dependencies
+
+## Config Packaging
+
+To keep user settings across updates, ship factory/default INIs and let dMenu write user overrides into the live INIs:
+
+- Ship: `Styles.defaults.ini`, `Controls.defaults.ini`, `wheelBehavior.factory.ini`, `AmmoWheel.defaults.ini`
+- Do not ship user override files in update archives: `Styles.ini`, `Controls.ini`, `wheelBehavior.ini`, `AmmoWheel.ini`
+
+Wheeler now loads config as `defaults/factory -> user override`, so new keys still get sane defaults on update while existing users keep their saved values.
+
+For a single main archive workflow, ship only the factory/default files above. On first run, Wheeler will automatically create the live user `*.ini` files if they are missing, so fresh installs still get working dMenu-backed configs without you shipping update-sensitive user override files.
+
 # FAQ
 Q: I can't add a weapon/armor to the wheel
 A: This is usually caused by an alternate start mod that adds random items to your inventory. This only happens to the set of starting items you have. To fix this issue, simply drop the item onto the ground and pick it again.
@@ -107,14 +134,42 @@ A: You will be able to replace item icon textures and even add custom textures f
 # Compatibility
 I haven't noticed any incompatibilities between Wheeler and any other UI mod, as Wheeler goes through its own rendering pipeline. Please let me know if you find any, which I will try my best to fix.
 
+# Optional I4 Icon Sync
+Wheeler includes optional integration with [Inventory Interface Information Injector (InventoryInjector / I4)] so wheel inventory items can resolve the same `iconSource`, `iconLabel`, and `iconColor` metadata used by SkyUI.
+
+- Default: ON (`I4.defaults.ini` enables the integration).
+- Requirement: `Data/SKSE/Plugins/InventoryInjector.dll` present at runtime.
+- Fallback behavior: if disabled, unavailable, or any resolve/render step fails, Wheeler uses its existing icon pipeline.
+
+Configure in `Data/SKSE/Plugins/wheeler/Styles.ini`:
+
+```ini
+[I4]
+Enabled = false
+PreferI4Icons = true
+UseAlternativePath = false
+CacheMaxEntries = 256
+DebugLog = false
+RenderSizePolicy = 0
+FixedRenderSize = 128
+ExtractionMode = false
+```
+
+Notes:
+- Runtime toggles are supported via config reload; Wheeler clears I4 caches/resources on setting changes.
+- Category toggles (`UseForWeapons`, `UseForArmor`, `UseForPotions`, etc.) control which item groups use I4.
+- `UseAlternativePath=true` also enables I4 attempts for non-inventory items (spell/shout/power). If I4 fails, Wheeler falls back automatically.
+- `ExtractionMode` is optional and experimental. It performs one-shot on-screen capture for unresolved SWF icons and caches the texture result.
+
 # Multi-lingual support
-If your language requires fonts other than English (for example, Russian, Korean, Japanese, etc...), navigate to "Wheeler\SKSE\Plugins\wheeler\resources\fonts," open "fontConfig.ini," and change the "font = English" to your language. Then, put the .ttf or .ttc font file into the corresponding language folder. (Japanese, English, and Chinese fonts are already included in the mod)
+If your language requires fonts other than English (for example, Russian, Korean, Japanese, etc...), navigate to "Wheeler\SKSE\Plugins\wheeler\resources\fonts," open "FontConfig.ini," and select the appropriate configured font entry. Install a compatible `.ttf` or `.ttc` file in the corresponding language folder; no font binaries are bundled in this source tree.
 
 # Source
-[Github](https://github.com/D7ry/wheeler)
+[Original Wheeler Github](https://github.com/D7ry/wheeler)
 [Script I used to generate this page from markdown](https://github.com/D7ry/markdown-to-nexus-bb-code)
 
 # Credits
+[dTry/D7ry](https://github.com/D7ry) for the original Wheeler project, BSD-3-Clause source release, and public mod-author permission statement.
 [LamasTinyHUD](https://www.nexusmods.com/skyrimspecialedition/mods/82545) and the author mlthelama. Referring to its ImGui codebase significantly helped me understand how to draw .svg files and much more. I can't stress how much the author's source has helped me  
 [DearImGui](https://github.com/ocornut/imgui) for its awesomeness  
 [Ryan](https://www.nexusmods.com/skyrimspecialedition/users/5687342) for clib  

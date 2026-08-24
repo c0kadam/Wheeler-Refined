@@ -2,3 +2,29 @@ build
 src/bin/_empty.cpp
 src/bin/_empty.h
 .vscode/settings.json
+
+# Local builds, binaries, and diagnostics
+/build/
+/build-*/
+/cmake-build-*/
+/artifacts/
+/logs/
+*.pdb
+*.dll
+*.exe
+stdout*.txt
+stderr*.txt
+temp_check.txt
+
+# Local reference trees and scratch work
+/.upstream-wheeler/
+/__favwheel_port_work/
+/__tmp_src_process.cpp
+/__tmp_tgt_process.cpp
+
+# Generated Python and archive outputs
+__pycache__/
+*.py[cod]
+*.zip
+*.7z
+*.rar

@@ -18,15 +18,30 @@ namespace Utils
 		void SGTM(float a_in);
 	}
 
+	namespace Player
+	{
+		bool IsMounted();
+		bool TryCaptureMountedVelocity(RE::NiPoint3& a_outVelocity, RE::FormID* a_outMountFormID = nullptr);
+		bool TryRestoreMountedVelocity(RE::FormID a_expectedMountFormID, const RE::NiPoint3& a_velocity, bool a_preserveCurrentVertical = true);
+	}
+
 	namespace Magic
 	{
 		void GetMagicItemDescription(RE::ItemCard* a_itemCard, RE::MagicItem* a_magicItem, RE::BSString& a_str);
 
 		void GetMagicItemDescription(RE::MagicItem* a_magicItem, std::string& a_buf);
+		
+		/// Returns true if the spell has at least one effect with a summon-type archetype
+		bool IsSummonSpell(RE::SpellItem* a_spell);
+		
+		/// Counts how many active effects the player has from the given spell
+		int CountActiveEffectsFromSpell(RE::FormID a_spellFormID);
 	}
 
 	namespace Inventory
 	{
+		bool TryGetInventorySnapshot(RE::PlayerCharacter* a_player, RE::TESObjectREFR::InventoryItemMap& a_outInventory, std::string_view a_context = {});
+
 		std::pair<RE::EnchantmentItem*, float> GetEntryEnchantAndHealth(const std::unique_ptr<RE::InventoryEntryData>& a_invEntry);
 
 		void GetEntryExtraDataLists(std::vector<RE::ExtraDataList*>& r_ret, const std::unique_ptr<RE::InventoryEntryData>& a_invEntry);
@@ -42,6 +57,15 @@ namespace Utils
 
 		RE::InventoryEntryData* GetSelectedItemIninventory(RE::InventoryMenu* a_invMenu);
 		RE::TESForm* GetSelectedFormInMagicMenu(RE::MagicMenu* a_magMen);
+		RE::TESForm* GetSelectedFormInFavoritesMenu(RE::FavoritesMenu* a_favMenu);
+		
+		// FavoritesMenu selection cache - call CaptureSelection at wheel toggle time
+		namespace FavoritesSelectionCache
+		{
+			bool CaptureSelection(RE::FavoritesMenu* a_favMenu);
+			RE::FormID GetCachedFormID();
+			void Invalidate();
+		}
 
 		static inline RE::InventoryEntryData* sub_1401d5ba0(RE::InventoryEntryData* a_ptr, RE::TESBoundObject* a_obj, int count)
 		{
@@ -61,11 +85,10 @@ namespace Utils
 	
 	namespace Workaround
 	{
-		inline void* NiMemAlloc_1400F6B40(int size)
+		inline void* NiMemAlloc_1400F6B40(std::size_t size)
 		{
-			using func_t = void* (*)(int);
-			REL::Relocation<func_t> func{ RELOCATION_ID(10798, 10854) };
-			return func(size);
+			auto* memoryManager = RE::MemoryManager::GetSingleton();
+			return memoryManager ? memoryManager->Allocate(size, 0, true) : nullptr;
 		}
 	}
 

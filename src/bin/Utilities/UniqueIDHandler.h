@@ -1,4 +1,5 @@
 #pragma once
+#include <string_view>
 class UniqueIDHandler
 {
 public:
@@ -11,4 +12,9 @@ public:
 	/// <param name="a_extraList"></param>
 	/// <param name="a_count"></param>
 	static void EnsureXListUniqueness(RE::ExtraDataList*& a_extraList);
+	static std::uint16_t RetagXListUniqueID(RE::ExtraDataList* a_extraList);
+
+	// Compatibility shims for newer call sites that remain outside the weapon rollback scope.
+	static bool ShouldBypassInventoryHooks();
+	static void QueuePostLoadInventoryRepair(std::string_view a_reason = {});
 };

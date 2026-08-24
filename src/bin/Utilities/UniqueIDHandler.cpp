@@ -1,5 +1,41 @@
 #include "UniqueIDHandler.h"
 #include "Utils.h"
+#include "RE/T/TESObjectWEAP.h"
+
+namespace
+{
+	inline RE::ExtraDataList* InitExtraDataList(RE::ExtraDataList* a_list)
+	{
+		using func_t = RE::ExtraDataList* (*)(RE::ExtraDataList*);
+		REL::Relocation<func_t> func{ RELOCATION_ID(11437, 11583) };
+		return func(a_list);
+	}
+
+	int GetRepresentedItemCount(RE::ExtraDataList* a_list)
+	{
+		if (!a_list) {
+			return 0;
+		}
+
+		const int count = a_list->GetCount();
+		return count > 0 ? count : 1;
+	}
+
+	bool HasReferenceIdentityData(RE::ExtraDataList* a_list)
+	{
+		return a_list &&
+		       (a_list->HasType(RE::ExtraDataType::kReferenceHandle) ||
+		        a_list->HasType(RE::ExtraDataType::kOriginalReference) ||
+		        a_list->HasType(RE::ExtraDataType::kAliasInstanceArray));
+	}
+
+	bool IsTransientBoundWeapon(RE::TESBoundObject* a_object)
+	{
+		auto* weapon = a_object ? a_object->As<RE::TESObjectWEAP>() : nullptr;
+		return weapon && weapon->IsBound();
+	}
+}
+
 void UniqueIDHandler::EnsureXListUniquenessInPcInventory()
 {
 	try {
@@ -7,40 +43,62 @@ void UniqueIDHandler::EnsureXListUniquenessInPcInventory()
 		if (!pc) {
 			return;
 		}
-		auto inv = pc->GetInventory();
+		RE::TESObjectREFR::InventoryItemMap inv;
+		if (!Utils::Inventory::TryGetInventorySnapshot(pc, inv, "EnsureXListUniquenessInPcInventory")) {
+			return;
+		}
 		for (auto& [boundObj, data] : inv) {
 			auto rawCount = data.first;
 			auto& entryData = data.second;
-			auto ft = entryData.get()->GetObject__()->GetFormType();
+
+#undef GetObject
+			auto* object = entryData ? entryData->GetObject() : nullptr;
+			if (!object || IsTransientBoundWeapon(object)) {
+				continue;
+			}
+
+			auto ft = object->GetFormType();
 			if (ft != RE::FormType::Armor && ft != RE::FormType::Weapon) {
 				continue;
 			}
+
 			if (entryData->extraLists) {
 				for (auto& xList : *entryData->extraLists) {
 					if (xList) {
-						auto count = xList->GetCount();
+						auto count = GetRepresentedItemCount(xList);
 						rawCount -= count;
 						try {
-							EnsureXListUniqueness(xList);
-						} catch (std::exception exception) {
-							logger::error("Error occured when ensuring extraDataList uniqueness: {}, item: {}",
-								exception.what(), entryData->GetObject__() ? entryData->GetObject__()->GetName() : "unknown");
+							if (!HasReferenceIdentityData(xList)) {
+								EnsureXListUniqueness(xList);
+							}
+						} catch (std::exception& exception) {
+							logger::error(
+								"Error occured when ensuring extraDataList uniqueness: {}, item: {}",
+								exception.what(),
+								entryData->GetObject() ? entryData->GetObject()->GetName() : "unknown");
+#ifdef UNICODE
+#	define GetObject GetObjectW
+#else
+#	define GetObject GetObjectA
+#endif	// !UNICODE
 						}
 					}
 				}
 			}
-			RE::ExtraDataList* xList = nullptr;  // extra data list to be added
+
+			// Avoid remove/re-add inventory writes here; they can trigger UI "item added"
+			// style notifications. We can attach synthetic extra lists directly.
 			while (rawCount-- > 0) {
-				// workaround: directly adding the extradatalist doesn't work. instead we remove the item with the removal target
-				// set to pc, and the hook on addItem will append the extraDatalist.
-				pc->RemoveItem(boundObj, 1, RE::ITEM_REMOVE_REASON::kStoreInContainer, xList, pc);
+				RE::ExtraDataList* xList = nullptr;
+				EnsureXListUniqueness(xList);
+				if (xList) {
+					entryData->AddExtraList(xList);
+				}
 			}
 		}
-	}
-	catch (std::exception exception) {
+	} catch (std::exception& exception) {
 		logger::error("Error occured when scanning player inventory extraDataList: {}", exception.what());
 	}
-	
 }
 
 void UniqueIDHandler::EnsureXListUniqueness(RE::ExtraDataList*& a_extraList)
@@ -49,14 +107,22 @@ void UniqueIDHandler::EnsureXListUniqueness(RE::ExtraDataList*& a_extraList)
 	if (!pc) {
 		return;
 	}
-	auto invChanges = pc->GetInventoryChanges();
-	if (!invChanges) {
-		return;
-	}
 
 	if (a_extraList == nullptr) {
-		a_extraList = (RE::ExtraDataList*)Utils::Workaround::NiMemAlloc_1400F6B40(24);
-		RE::ExtraDataList::InitExtraDataList(a_extraList);
+		a_extraList = static_cast<RE::ExtraDataList*>(Utils::Workaround::NiMemAlloc_1400F6B40(sizeof(RE::ExtraDataList)));
+		if (!a_extraList) {
+			return;
+		}
+		a_extraList = InitExtraDataList(a_extraList);
+		if (!a_extraList) {
+			return;
+		}
+	}
+
+	auto invChanges = pc->GetInventoryChanges();
+	if (!invChanges) {
+		// Fallback: keep a valid extra list even if uniqueID allocation is unavailable right now.
+		return;
 	}
 
 	if (!a_extraList->HasType(RE::ExtraDataType::kUniqueID)) {
@@ -64,4 +130,49 @@ void UniqueIDHandler::EnsureXListUniqueness(RE::ExtraDataList*& a_extraList)
 		auto xID = new RE::ExtraUniqueID(0x14, nextID);
 		a_extraList->Add(xID);
 	}
+}
+
+std::uint16_t UniqueIDHandler::RetagXListUniqueID(RE::ExtraDataList* a_extraList)
+{
+	if (!a_extraList) {
+		return 0;
+	}
+
+	auto pc = RE::PlayerCharacter::GetSingleton();
+	if (!pc) {
+		return 0;
+	}
+
+	auto invChanges = pc->GetInventoryChanges();
+	if (!invChanges) {
+		return 0;
+	}
+
+	const std::uint16_t nextID = invChanges->GetNextUniqueID();
+	if (nextID == 0) {
+		return 0;
+	}
+
+	if (auto* uniqueIDData = a_extraList->GetByType<RE::ExtraUniqueID>()) {
+		uniqueIDData->uniqueID = nextID;
+		return nextID;
+	}
+
+	auto* xID = new RE::ExtraUniqueID(0x14, nextID);
+	if (!xID) {
+		return 0;
+	}
+
+	a_extraList->Add(xID);
+	return nextID;
+}
+
+bool UniqueIDHandler::ShouldBypassInventoryHooks()
+{
+	return false;
+}
+
+void UniqueIDHandler::QueuePostLoadInventoryRepair(std::string_view)
+{
+	// FavWheel-style weapon core does not use Wheeler's older deferred post-load repair path.
 }

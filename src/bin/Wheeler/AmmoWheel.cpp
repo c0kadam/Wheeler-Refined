@@ -1,12 +1,15 @@
 #include "AmmoWheel.h"
 #include "AmmoWheelReskin.h"
 #include "AmmoWheelReskinUnified.h"
+#include "bin/API/WheelerAPI.h"
 #include "bin/Config.h"
+#include "bin/Integrations/ExternalFavWheelState.h"
 #include "bin/InputBroker.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Rendering/ResolutionScaleContext.h"
 #include "bin/Rendering/TextureManager.h"
 #include "bin/UserInput/Controls.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Utilities/Utils.h"
 #include <cctype>
 #include <cstring>
@@ -14,34 +17,10 @@
 #include <fstream>
 #include <set>
 #include <chrono>
+#include <vector>
 #include <SimpleIni.h>
 #include "include/lib/nanosvg.h"
 #include "include/lib/nanosvgrast.h"
-
-// ========== AMMOWHEEL CONFIG AUDIT (Phase 2) ==========
-// A) CountFontSize: FIXED - CountFontPx used in drawAmmoCount(), loaded from [Text] section
-// B) IconRadiusRatio/IconSizePx/IconRadialOffset: FIXED - OnConfigChanged() now uses all three
-// C) TextRadialOffsetPx range: FIXED - Extended to -200..+400 in OnConfigChanged() and dMenu JSON
-// D) PopupCountFontPx: FIXED - Used in drawHoverPopup(), loaded from [Popup] section
-// E) PopupPaddingPx: FIXED - Now affects content layout in drawHoverPopup()
-// F) AnimationSpeed: FIXED - PopupAnimationSpeed controls popup open/close animation
-// G) CustomOpacity: FIXED - Applied to alphaMult in Update() draw setup
-// H) BackgroundOpacity: VERIFIED - Used in draw() for arc background alpha
-// I) BorderInnerScale/BorderOuterScale: VERIFIED - Used in draw() for border ring
-// J) SlotShadow: VERIFIED - Used in drawSlot() with stable params
-// K) SlotHighlight: VERIFIED - Enable/Disable, Thickness, Alpha all wired in drawSlot()
-// L) HoverPulse: FIXED - Implemented pulsing glow ring in drawSlot()
-// M) SelectedIndicatorThickness: VERIFIED - Used via Skin::SelectedThicknessPx in drawSlot()
-// N) CenterPanel LayoutMode/MaxLines/MinFontSize/MaxTextWidthRatio: VERIFIED - Used in drawCenterPanel()
-// O) ShowDescription/MaxDescriptionLines: VERIFIED - Wired in drawCenterPanel()
-
-// ========== PHASE 5: DEAD/UNCLEAR FEATURES AUDIT ==========
-// - Icon Rotation: IMPLEMENTED - IconRotationMode (0=FollowSlot, 1=Upright, 2=Fixed) works via DrawRotatedTexture
-// - Active Indicator: NOT IMPLEMENTED - Config exists but no draw code. Intended for activation feedback.
-//   Decision: Keep in UI with tooltip explaining it's for future RTU activation visual feedback.
-// - Charge Indicator: NOT IMPLEMENTED - Config exists but no draw code. Intended for hover-delay charge.
-//   Decision: Keep in UI with tooltip explaining it's for future RTU charge progress visual.
-// - Hovered Indicator Style: IMPLEMENTED - Uses preset system with configurable arc/glow styles.
 
 static const char* AMMO_WHEEL_POPUP_ID = "##AmmoWheel";
 static const char* AMMO_WHEEL_INI_PATH = "Data\\SKSE\\Plugins\\wheeler\\AmmoWheel.ini";
@@ -49,6 +28,105 @@ static const char* AMMO_KID_INI_PATH = "Data\\SKSE\\Plugins\\wheeler\\AMMO_KID.i
 
 namespace
 {
+	InventorySnapshotCache g_ammoWheelInventorySnapshot;
+	constexpr double kAmmoWheelInventorySnapshotIntervalSeconds = 0.25;
+	constexpr double kAmmoWheelMountedMomentumAssistSeconds = 1.00;
+	constexpr float kAmmoWheelMountedMinimumSlowScale = 0.35f;
+	constexpr float kAmmoDamageEpsilon = 0.01f;
+
+	class AmmoWheelPauseMenu : public RE::IMenu
+	{
+	public:
+		static constexpr std::string_view MENU_NAME = "AmmoWheelPauseMenu";
+
+		AmmoWheelPauseMenu()
+		{
+			menuFlags.set(RE::UI_MENU_FLAGS::kPausesGame);
+			// Keep non-modal/non-cursor behavior to preserve normal wheel input handling.
+			depthPriority = 0;
+		}
+
+		RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage&) override
+		{
+			return RE::UI_MESSAGE_RESULTS::kPassOn;
+		}
+	};
+
+	void EnsureAmmoWheelPauseMenuRegistered()
+	{
+		static bool s_registered = false;
+		if (s_registered) {
+			return;
+		}
+
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui) {
+			return;
+		}
+
+		ui->Register(AmmoWheelPauseMenu::MENU_NAME.data(), []() -> RE::IMenu* {
+			return new AmmoWheelPauseMenu();
+		});
+		s_registered = true;
+		logger::info("[PauseMenu] Registered AmmoWheelPauseMenu");
+	}
+
+	void OpenAmmoWheelPauseMenu()
+	{
+		EnsureAmmoWheelPauseMenuRegistered();
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui) {
+			return;
+		}
+
+		if (!ui->IsMenuOpen(AmmoWheelPauseMenu::MENU_NAME.data())) {
+			RE::UIMessageQueue::GetSingleton()->AddMessage(
+				AmmoWheelPauseMenu::MENU_NAME.data(), RE::UI_MESSAGE_TYPE::kShow, nullptr);
+		}
+	}
+
+	void CloseAmmoWheelPauseMenu()
+	{
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui) {
+			return;
+		}
+
+		if (ui->IsMenuOpen(AmmoWheelPauseMenu::MENU_NAME.data())) {
+			RE::UIMessageQueue::GetSingleton()->AddMessage(
+				AmmoWheelPauseMenu::MENU_NAME.data(), RE::UI_MESSAGE_TYPE::kHide, nullptr);
+		}
+	}
+
+	std::string NormalizeCenterDescriptionText(std::string text)
+	{
+		for (char& ch : text) {
+			if (ch == '\n' || ch == '\r' || ch == '\t') {
+				ch = ' ';
+			}
+		}
+
+		std::string out;
+		out.reserve(text.size());
+		bool prevSpace = true;
+		for (char ch : text) {
+			if (std::isspace(static_cast<unsigned char>(ch))) {
+				if (!prevSpace) {
+					out.push_back(' ');
+					prevSpace = true;
+				}
+			} else {
+				out.push_back(ch);
+				prevSpace = false;
+			}
+		}
+
+		while (!out.empty() && out.back() == ' ') {
+			out.pop_back();
+		}
+		return out;
+	}
+
 	const char* GetResolutionFixModeName(Config::ResolutionFix::Mode mode)
 	{
 		switch (mode) {
@@ -60,6 +138,192 @@ namespace
 		default:
 			return "Auto";
 		}
+	}
+
+	bool IsActionHotkeysModuleLoaded()
+	{
+		return ::GetModuleHandleW(L"ActionHotkeys.dll") != nullptr;
+	}
+
+	bool IsActionHotkeysOverlayLikelyVisible()
+	{
+		if (!IsActionHotkeysModuleLoaded()) {
+			return false;
+		}
+
+		auto* controls = RE::PlayerControls::GetSingleton();
+		if (!controls || !controls->lookHandler || !controls->movementHandler || !controls->attackBlockHandler) {
+			return false;
+		}
+
+		return !controls->lookHandler->IsInputEventHandlingEnabled() &&
+		       !controls->movementHandler->IsInputEventHandlingEnabled() &&
+		       !controls->attackBlockHandler->IsInputEventHandlingEnabled();
+	}
+
+	bool IsExternalFavWheelOpen()
+	{
+		return ExternalFavWheelState::Query(ExternalFavWheelState::ProbeOwner::AmmoWheel).open;
+	}
+
+	bool TryGetExternalWheelBlockingReason(std::string_view& outReason)
+	{
+		if (InputBroker::IsBlockedByActiveOwner(InputBroker::kWheelerRefinedPluginId)) {
+			outReason = "InputBrokerActiveOwner";
+			return true;
+		}
+		if (IsExternalFavWheelOpen()) {
+			outReason = "FavWheelOpen";
+			return true;
+		}
+		return false;
+	}
+
+	constexpr std::array<std::string_view, 8> kAmmoWheelPassiveOverlayMenus{
+		RE::HUDMenu::MENU_NAME,
+		RE::CursorMenu::MENU_NAME,
+		"Fader Menu",
+		"Mist Menu",
+		"TrueHUD",
+		"CombatAlertOverlayMenu",
+		AmmoWheelPauseMenu::MENU_NAME,
+		"WheelerPauseMenu"
+	};
+
+	template <std::size_t N>
+	bool ContainsMenuName(const std::array<std::string_view, N>& menuNames, std::string_view menuName)
+	{
+		return std::find(menuNames.begin(), menuNames.end(), menuName) != menuNames.end();
+	}
+
+	bool HasMenuMovie(const RE::IMenu* menu)
+	{
+		return menu && menu->uiMovie.get() != nullptr;
+	}
+
+	bool IsMenuMovieVisible(const RE::IMenu* menu)
+	{
+		return HasMenuMovie(menu) && menu->uiMovie->GetVisible();
+	}
+
+	bool HasActiveInteractionFlags(const RE::IMenu* menu)
+	{
+		if (!menu) {
+			return false;
+		}
+
+		return menu->UsesCursor() ||
+		       menu->UpdateUsesCursor() ||
+		       menu->UsesMenuContext() ||
+		       menu->Modal() ||
+		       menu->ApplicationMenu() ||
+		       menu->InventoryItemMenu();
+	}
+
+	bool IsLikelyPassiveAlwaysOpenOverlay(const RE::IMenu* menu)
+	{
+		if (!menu) {
+			return false;
+		}
+
+		return menu->AlwaysOpen() && !HasActiveInteractionFlags(menu);
+	}
+
+	bool TryGetGenericBlockingMenu(RE::UI* ui, std::string_view& outMenuName)
+	{
+		if (!ui) {
+			return false;
+		}
+
+		for (const auto& [menuKey, menuEntry] : ui->menuMap) {
+			const auto* menu = menuEntry.menu.get();
+			if (!menu || !menu->OnStack()) {
+				continue;
+			}
+
+			const char* rawName = menuKey.c_str();
+			const std::string_view menuName =
+				(rawName && rawName[0] != '\0') ? std::string_view(rawName) : std::string_view("<unnamed>");
+
+			if (ContainsMenuName(kAmmoWheelPassiveOverlayMenus, menuName)) {
+				continue;
+			}
+			if (!IsMenuMovieVisible(menu)) {
+				continue;
+			}
+			if (IsLikelyPassiveAlwaysOpenOverlay(menu)) {
+				continue;
+			}
+			if (!HasActiveInteractionFlags(menu)) {
+				continue;
+			}
+
+			outMenuName = menuName;
+			return true;
+		}
+
+		return false;
+	}
+
+	RE::TESAmmo* LookupOwnedAmmoByFormID(RE::PlayerCharacter* player, RE::FormID ammoID)
+	{
+		if (!player || ammoID == 0) {
+			return nullptr;
+		}
+
+		auto* ammo = RE::TESForm::LookupByID<RE::TESAmmo>(ammoID);
+		if (!ammo) {
+			return nullptr;
+		}
+
+		const auto inventoryCounts = player->GetInventoryCounts();
+		auto it = inventoryCounts.find(ammo);
+		if (it == inventoryCounts.end() || it->second <= 0) {
+			return nullptr;
+		}
+
+		return ammo;
+	}
+
+	bool CanAutoRestoreAmmoWheelSelectionNow()
+	{
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui) {
+			return false;
+		}
+
+		static constexpr std::array<std::string_view, 13> blockingMenus{
+			RE::LoadingMenu::MENU_NAME,
+			RE::InventoryMenu::MENU_NAME,
+			RE::MagicMenu::MENU_NAME,
+			RE::FavoritesMenu::MENU_NAME,
+			RE::ContainerMenu::MENU_NAME,
+			RE::BarterMenu::MENU_NAME,
+			RE::CraftingMenu::MENU_NAME,
+			RE::GiftMenu::MENU_NAME,
+			RE::TweenMenu::MENU_NAME,
+			RE::JournalMenu::MENU_NAME,
+			"LootMenu",
+			"LootMenuCF",
+			"dmenu"
+		};
+
+		for (std::string_view menuName : blockingMenus) {
+			if (ui->IsMenuOpen(menuName)) {
+				return false;
+			}
+		}
+
+		if (IsActionHotkeysOverlayLikelyVisible()) {
+			return false;
+		}
+
+		std::string_view genericBlockedMenu;
+		if (TryGetGenericBlockingMenu(ui, genericBlockedMenu)) {
+			return false;
+		}
+
+		return true;
 	}
 }
 
@@ -341,11 +605,6 @@ namespace {
 
 			auto start = std::chrono::steady_clock::now();
 			
-			// Use Texture's load function (nanosvg-based)
-			// Note: We need to access the private load_texture_from_file - use a workaround
-			// by loading via nanosvg directly or making a public wrapper
-			// For now, we'll use the existing Texture system indirectly
-			
 			// Load SVG using nanosvg with deterministic sizing
 			SvgSizeInfo svgInfo{};
 			auto* svg = ParseSvgFromFileNormalized(path, svgInfo);
@@ -539,7 +798,7 @@ namespace {
 		return result;
 	}
 
-	// ========== ROTATED QUAD RENDERING (PHASE 2) ==========
+	// ========== ROTATED QUAD RENDERING ==========
 	// Rotate a 2D point around origin by angle (radians)
 	ImVec2 RotatePoint(float x, float y, float cosA, float sinA) {
 		return ImVec2(x * cosA - y * sinA, x * sinA + y * cosA);
@@ -664,7 +923,7 @@ namespace {
 		return result;
 	}
 
-	// ========== INDICATOR RENDERING (PHASE 3) ==========
+	// ========== INDICATOR RENDERING ==========
 	// Draw an arc indicator with configurable style
 	void DrawIndicatorArc(
 		ImDrawList* drawList,
@@ -727,14 +986,53 @@ AmmoWheel::~AmmoWheel()
 	RestoreTimescale();
 }
 
+void AmmoWheel::ResetMountedVelocityRestoreState()
+{
+	_ammoWheelRestoreMountedVelocityOnClose = false;
+	_ammoWheelMountedVelocityMountFormID = 0;
+	_ammoWheelMountedVelocitySnapshot = RE::NiPoint3{ 0.0f, 0.0f, 0.0f };
+	_ammoWheelMountedMomentumAssistUntil = 0.0;
+}
+
+void AmmoWheel::TryRestoreMountedVelocityAfterTimeRestore(const char* a_reason)
+{
+	if (!_ammoWheelRestoreMountedVelocityOnClose) {
+		return;
+	}
+
+	const bool restored = Utils::Player::TryRestoreMountedVelocity(
+		_ammoWheelMountedVelocityMountFormID,
+		_ammoWheelMountedVelocitySnapshot,
+		true);
+
+	logger::info("[TimeDilation] AmmoWheel mounted velocity restore ({}): ok={}, mount={:08X}, v=({:.2f},{:.2f},{:.2f})",
+		a_reason ? a_reason : "unknown",
+		restored,
+		_ammoWheelMountedVelocityMountFormID,
+		_ammoWheelMountedVelocitySnapshot.x,
+		_ammoWheelMountedVelocitySnapshot.y,
+		_ammoWheelMountedVelocitySnapshot.z);
+
+	const double now = ImGui::GetTime();
+	_ammoWheelMountedMomentumAssistUntil = (std::max)(_ammoWheelMountedMomentumAssistUntil, now + kAmmoWheelMountedMomentumAssistSeconds);
+	logger::info("[TimeDilation] AmmoWheel mounted momentum assist: duration={:.2f}s, until={:.3f}", kAmmoWheelMountedMomentumAssistSeconds, _ammoWheelMountedMomentumAssistUntil);
+}
+
 void AmmoWheel::RestoreTimescale()
 {
+	if (_ammoWheelOwnedPauseMenu) {
+		logger::info("[TimeDilation] AmmoWheel restore: closing owned pause menu");
+		CloseAmmoWheelPauseMenu();
+		_ammoWheelOwnedPauseMenu = false;
+	}
+
 	if (_ammoWheelModifiedTimeScale) {
 		float current = Utils::Time::GGTM();
 		logger::info("[TimeDilation] AmmoWheel restore: current={:.3f}, restoreTo={:.3f}", 
 			current, _preAmmoWheelTimeScale);
 		Utils::Time::SGTM(_preAmmoWheelTimeScale);
 		_ammoWheelModifiedTimeScale = false;
+		TryRestoreMountedVelocityAfterTimeRestore("RestoreTimescale");
 	}
 }
 
@@ -762,9 +1060,25 @@ void AmmoWheel::ForceClose()
 	if (_state != WheelState::Closed) {
 		logger::info("AmmoWheel: ForceClose (was state={})", static_cast<int>(_state));
 	}
+
+	if (_ammoWheelOwnedPauseMenu) {
+		logger::info("[TimeDilation] AmmoWheel restore: force-close owned pause menu");
+		CloseAmmoWheelPauseMenu();
+		_ammoWheelOwnedPauseMenu = false;
+	}
+
 	if (_ammoWheelModifiedTimeScale) {
 		Utils::Time::SGTM(_preAmmoWheelTimeScale);
 		_ammoWheelModifiedTimeScale = false;
+		TryRestoreMountedVelocityAfterTimeRestore("ForceClose");
+	}
+
+	if (ImGui::GetCurrentContext() && ImGui::IsPopupOpen(AMMO_WHEEL_POPUP_ID)) {
+		ImGui::SetNextWindowPos(ImVec2(-100.0f, -100.0f));
+		if (ImGui::BeginPopup(AMMO_WHEEL_POPUP_ID)) {
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
 	}
 	
 	_state = WheelState::Closed;
@@ -772,11 +1086,19 @@ void AmmoWheel::ForceClose()
 	_prevHoveredIndex = -1;  // Reset hysteresis state
 	_hoveredTime = 0.f;
 	_cursorPos = { 0, 0 };
+	_mousePendingHoverIndex = -1;
+	_mouseAccumulatedDelta = { 0.0f, 0.0f };
+	_mouseAccumulatedPeak = 0.0f;
+	_mouseSlotCarry = 0.0f;
+	_mouseStepLatchDirection = 0;
+	_pendingCloseOnReleaseButton = -1;
 	_openTimer = 0.f;
 	_closeTimer = 0.f;
 	_blockMainWheel = false;
 	_activationConsumed = false;  // Reset debounce
 	InputBroker::ClearActiveOwner(InputBroker::kWheelerRefinedPluginId);
+	g_ammoWheelInventorySnapshot.Invalidate();
+	InvalidateRuntimeCaches();
 }
 
 RE::FormID AmmoWheel::getEquippedAmmoFormID() const
@@ -793,14 +1115,136 @@ RE::FormID AmmoWheel::getEquippedAmmoFormID() const
 	return 0;
 }
 
+bool AmmoWheel::IsAmmoCompatibleWithWeaponType(RE::TESAmmo* a_ammo, WeaponType a_weaponType) const
+{
+	if (!a_ammo) {
+		return false;
+	}
+
+	switch (a_weaponType) {
+	case WeaponType::Bow:
+		return !a_ammo->IsBolt();
+	case WeaponType::Crossbow:
+		return a_ammo->IsBolt();
+	default:
+		return false;
+	}
+}
+
+bool AmmoWheel::IsAmmoCompatibleWithWeaponType(RE::FormID a_ammoID, WeaponType a_weaponType) const
+{
+	if (a_ammoID == 0) {
+		return false;
+	}
+
+	return IsAmmoCompatibleWithWeaponType(RE::TESForm::LookupByID<RE::TESAmmo>(a_ammoID), a_weaponType);
+}
+
+RE::FormID AmmoWheel::GetRememberedAmmoForWeaponType(WeaponType a_weaponType) const
+{
+	switch (a_weaponType) {
+	case WeaponType::Bow:
+		return _rememberedBowAmmoID;
+	case WeaponType::Crossbow:
+		return _rememberedCrossbowAmmoID;
+	default:
+		return 0;
+	}
+}
+
+void AmmoWheel::SetRememberedAmmoForWeaponType(WeaponType a_weaponType, RE::FormID a_ammoID)
+{
+	switch (a_weaponType) {
+	case WeaponType::Bow:
+		_rememberedBowAmmoID = a_ammoID;
+		break;
+	case WeaponType::Crossbow:
+		_rememberedCrossbowAmmoID = a_ammoID;
+		break;
+	default:
+		break;
+	}
+}
+
+void AmmoWheel::SyncRememberedAmmoForWeaponType(WeaponType a_weaponType, RE::FormID a_ammoID, const char* a_reason)
+{
+	if (a_weaponType == WeaponType::None || !IsAmmoCompatibleWithWeaponType(a_ammoID, a_weaponType)) {
+		return;
+	}
+
+	const RE::FormID previousAmmoID = GetRememberedAmmoForWeaponType(a_weaponType);
+	if (previousAmmoID == a_ammoID) {
+		return;
+	}
+
+	SetRememberedAmmoForWeaponType(a_weaponType, a_ammoID);
+	logger::info("AmmoWheel: remembered {} ammo {:08X} -> {:08X} ({})",
+		a_weaponType == WeaponType::Bow ? "bow" : "crossbow",
+		previousAmmoID,
+		a_ammoID,
+		a_reason ? a_reason : "unknown");
+}
+
+bool AmmoWheel::TryRestoreRememberedAmmoForWeaponType(WeaponType a_weaponType, RE::FormID a_currentAmmoID)
+{
+	if (a_weaponType == WeaponType::None) {
+		return true;
+	}
+	if (_state != WheelState::Closed) {
+		return false;
+	}
+	if (!CanAutoRestoreAmmoWheelSelectionNow()) {
+		return false;
+	}
+
+	const RE::FormID rememberedAmmoID = GetRememberedAmmoForWeaponType(a_weaponType);
+	if (rememberedAmmoID == 0) {
+		return true;
+	}
+	if (a_currentAmmoID == rememberedAmmoID) {
+		return true;
+	}
+	if (!IsAmmoCompatibleWithWeaponType(rememberedAmmoID, a_weaponType)) {
+		return true;
+	}
+
+	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* equipManager = RE::ActorEquipManager::GetSingleton();
+	if (!player || !equipManager) {
+		return false;
+	}
+
+	RE::TESAmmo* rememberedAmmo = LookupOwnedAmmoByFormID(player, rememberedAmmoID);
+	if (!rememberedAmmo) {
+		logger::info("AmmoWheel: skipped {} ammo restore remembered={:08X} reason=not_owned",
+			a_weaponType == WeaponType::Bow ? "bow" : "crossbow",
+			rememberedAmmoID);
+		return true;
+	}
+
+	equipManager->EquipObject(player, rememberedAmmo);
+	logger::info("AmmoWheel: restored {} ammo memory current={:08X} restored={:08X}",
+		a_weaponType == WeaponType::Bow ? "bow" : "crossbow",
+		a_currentAmmoID,
+		rememberedAmmoID);
+	return true;
+}
+
 int AmmoWheel::FindInitialHoverIndex()
 {
 	if (_ammoEntries.empty()) return -1;
 	
 	// 1. Priority: Try to restore last selected specific ammo (most intuitive)
-	if (_lastSelectedAmmoID != 0) {
+	RE::FormID preferredAmmoID = _lastSelectedAmmoID;
+	if (Config::AmmoWheel::Sort::RememberAmmoByWeaponType) {
+		if (const RE::FormID rememberedAmmoID = GetRememberedAmmoForWeaponType(_currentWeaponType);
+			rememberedAmmoID != 0) {
+			preferredAmmoID = rememberedAmmoID;
+		}
+	}
+	if (preferredAmmoID != 0) {
 		for (int i = 0; i < static_cast<int>(_ammoEntries.size()); i++) {
-			if (_ammoEntries[i].ammo && _ammoEntries[i].ammo->GetFormID() == _lastSelectedAmmoID) {
+			if (_ammoEntries[i].ammo && _ammoEntries[i].ammo->GetFormID() == preferredAmmoID) {
 				// Verify count is sufficient if we filter by count? 
 				// The list is already refreshed/filtered, so if it's here, it's valid.
 				logger::info("AmmoWheel: Restored last selection '{}' at index {}", _ammoEntries[i].ammo->GetName(), i);
@@ -837,9 +1281,8 @@ bool AmmoWheel::ProcessInput()
 		return false;
 	}
 	
-	// Check for valid weapon
-	bool hasValidWeapon = (_currentWeaponType != WeaponType::None);
-	if (!hasValidWeapon && Config::AmmoWheel::RequireWeaponEquipped) {
+	// AmmoWheel is gameplay-only and should never stay active without a ranged weapon.
+	if (!ShouldBeAvailable()) {
 		if (_state != WheelState::Closed) {
 			logger::info("AmmoWheel: CLOSE (no valid weapon)");
 			ForceClose();
@@ -860,8 +1303,7 @@ bool AmmoWheel::ProcessInput()
 		// This is a simplified check - the full implementation would use proper input hooks
 		modDown = false;  // Will be set true if modifier is detected
 		
-		// For now, if a modifier is configured, we require it to be the same as toggleAmmoWheel
-		// This means the user must configure a separate modifier key
+		// Modifier-key state is not available through this input path.
 		// TODO: Implement proper modifier key checking via input hooks
 	}
 	
@@ -913,7 +1355,6 @@ void AmmoWheel::Update(float a_deltaTime)
 						RefreshAmmoList();
 					}
 					
-					_configRevision++;
 					logger::info("AmmoWheel: Config reloaded (rev {}), Enabled={}, Radius={:.0f}, Anchor={}, Theme={}",
 						_configRevision, _enabled, Config::AmmoWheel::WheelRadius, 
 						Config::AmmoWheel::ScreenAnchorIndex,
@@ -948,9 +1389,39 @@ void AmmoWheel::Update(float a_deltaTime)
 
 	// Update weapon state each frame
 	UpdateWeaponState();
+	if ((_state == WheelState::Opened || _state == WheelState::Opening) && !CanOpen()) {
+		logger::info("AmmoWheel: CLOSE (gameplay context lost)");
+		ForceClose();
+		return;
+	}
+
+	// Keep mount momentum continuous while timeslow is active and briefly after release.
+	if (_ammoWheelRestoreMountedVelocityOnClose) {
+		const double now = ImGui::GetTime();
+		const bool assistActive = _ammoWheelModifiedTimeScale || (now < _ammoWheelMountedMomentumAssistUntil);
+		if (assistActive) {
+			Utils::Player::TryRestoreMountedVelocity(
+				_ammoWheelMountedVelocityMountFormID,
+				_ammoWheelMountedVelocitySnapshot,
+				true);
+		} else {
+			ResetMountedVelocityRestoreState();
+		}
+	}
 
 	// Handle closed state - close popup if open
 	if (_state == WheelState::Closed) {
+		// SAFETY: if wheel is closed but time-state flags are still set, restore immediately.
+		if (_ammoWheelModifiedTimeScale || _ammoWheelOwnedPauseMenu) {
+			if (_ammoWheelModifiedTimeScale) {
+				logger::warn("[TimeDilation] Safety restore: AmmoWheel closed but timescale flag was stuck");
+			}
+			if (_ammoWheelOwnedPauseMenu) {
+				logger::warn("[TimeDilation] Safety restore: AmmoWheel closed but pause menu ownership was stuck");
+			}
+			RestoreTimescale();
+		}
+
 		if (ImGui::IsPopupOpen(AMMO_WHEEL_POPUP_ID)) {
 			ImGui::SetNextWindowPos(ImVec2(-100, -100));
 			ImGui::BeginPopup(AMMO_WHEEL_POPUP_ID);
@@ -991,6 +1462,8 @@ void AmmoWheel::Update(float a_deltaTime)
 				_state = WheelState::Closed;
 				_closeTimer = 0.f;
 				InputBroker::ClearActiveOwner(InputBroker::kWheelerRefinedPluginId);
+				g_ammoWheelInventorySnapshot.Invalidate();
+				InvalidateRuntimeCaches();
 			}
 			break;
 		default:
@@ -998,7 +1471,7 @@ void AmmoWheel::Update(float a_deltaTime)
 		}
 
 		DrawArgs drawArgs;
-		// Phase 2G: Apply CustomOpacity to final alpha
+		// Apply CustomOpacity to the final alpha.
 		float customOpacity = std::clamp(Config::AmmoWheel::CustomOpacity, 0.0f, 1.0f);
 		drawArgs.alphaMult = fadeLerp * customOpacity;
 
@@ -1011,6 +1484,9 @@ void AmmoWheel::Update(float a_deltaTime)
 
 void AmmoWheel::OnConfigChanged()
 {
+	// Any layout-affecting setting update should force cached label/center rebuild.
+	_configRevision++;
+
 	Config::OffsetAmmoWheelSizingToViewport();
 	const auto& layoutState = Config::AmmoWheel::LayoutScaling::Runtime;
 
@@ -1057,12 +1533,13 @@ void AmmoWheel::OnConfigChanged()
 		}
 	}
 	
-	// ========== PHASE 3: VALIDATE VISUAL POLISH SETTINGS ==========
+	// ========== VALIDATE VISUAL POLISH SETTINGS ==========
 	// Clamp visual polish values to safe ranges to prevent rendering issues
 	Config::AmmoWheel::BorderInnerScale = std::clamp(Config::AmmoWheel::BorderInnerScale, 0.9f, 1.5f);
 	Config::AmmoWheel::BorderOuterScale = std::clamp(Config::AmmoWheel::BorderOuterScale, 0.95f, 1.6f);
 	Config::AmmoWheel::BackgroundRadiusScale = std::clamp(Config::AmmoWheel::BackgroundRadiusScale, 0.8f, 1.5f);
 	Config::AmmoWheel::BackgroundOpacity = std::clamp(Config::AmmoWheel::BackgroundOpacity, 0.0f, 1.0f);
+	Config::AmmoWheel::BackgroundSoftEdgeRatio = std::clamp(Config::AmmoWheel::BackgroundSoftEdgeRatio, 0.0f, 0.95f);
 	Config::AmmoWheel::CustomOpacity = std::clamp(Config::AmmoWheel::CustomOpacity, 0.1f, 1.0f);
 	
 	// Ensure border scales are ordered correctly (inner < outer)
@@ -1073,8 +1550,49 @@ void AmmoWheel::OnConfigChanged()
 		}
 	}
 	
-	// Reset navigation filters if ApplyMode is Live (0) and settings changed
-	if (Config::AmmoWheel::NavigationApplyMode == 0) {
+	// Reset navigation filters only when navigation settings changed in Live mode.
+	// Avoid resetting cursor/hover during unrelated visual slider updates.
+	struct NavConfigSnapshot
+	{
+		float mouseDeadzone{ 0.0f };
+		float mouseSmoothing{ 0.0f };
+		float gamepadDeadzone{ 0.0f };
+		float gamepadSmoothing{ 0.0f };
+		float arcDeadbandDeg{ 0.0f };
+		float gamepadHysteresisDeg{ 0.0f };
+		int halfWheelClampMode{ 0 };
+		int applyMode{ 0 };
+	};
+	auto buildNavSnapshot = []() -> NavConfigSnapshot {
+		return NavConfigSnapshot{
+			Config::AmmoWheel::MouseDeadzone,
+			Config::AmmoWheel::MouseSmoothingSpeed,
+			Config::AmmoWheel::GamepadDeadzone,
+			Config::AmmoWheel::GamepadSmoothingSpeed,
+			Config::AmmoWheel::ArcSelectionDeadbandDeg,
+			Config::AmmoWheel::GamepadHoverHysteresisDeg,
+			Config::AmmoWheel::HalfWheelClampMode,
+			Config::AmmoWheel::NavigationApplyMode
+		};
+	};
+	auto navDiffers = [](const NavConfigSnapshot& a, const NavConfigSnapshot& b) {
+		constexpr float eps = 0.001f;
+		return std::fabs(a.mouseDeadzone - b.mouseDeadzone) > eps ||
+			std::fabs(a.mouseSmoothing - b.mouseSmoothing) > eps ||
+			std::fabs(a.gamepadDeadzone - b.gamepadDeadzone) > eps ||
+			std::fabs(a.gamepadSmoothing - b.gamepadSmoothing) > eps ||
+			std::fabs(a.arcDeadbandDeg - b.arcDeadbandDeg) > eps ||
+			std::fabs(a.gamepadHysteresisDeg - b.gamepadHysteresisDeg) > eps ||
+			a.halfWheelClampMode != b.halfWheelClampMode ||
+			a.applyMode != b.applyMode;
+	};
+	static bool s_navSnapshotValid = false;
+	static NavConfigSnapshot s_lastNavSnapshot{};
+	const NavConfigSnapshot navSnapshotNow = buildNavSnapshot();
+	const bool navSettingsChanged = s_navSnapshotValid && navDiffers(navSnapshotNow, s_lastNavSnapshot);
+	s_lastNavSnapshot = navSnapshotNow;
+	s_navSnapshotValid = true;
+	if (Config::AmmoWheel::NavigationApplyMode == 0 && navSettingsChanged) {
 		ResetNavigationFilters();
 	}
 	
@@ -1137,27 +1655,51 @@ bool AmmoWheel::CanOpen() const
 		return false;
 	}
 
-	// List of menus that conflict with opening the ammo wheel
-	static constexpr std::array<std::string_view, 19> conflictingMenus({
+	std::string_view externalWheelReason;
+	if (TryGetExternalWheelBlockingReason(externalWheelReason)) {
+		logger::debug("AmmoWheel::CanOpen rejected: external wheel is active ({})", externalWheelReason);
+		return false;
+	}
+
+	// AmmoWheel is gameplay-only. Use an explicit blacklist here; unknown overlays are
+	// intentionally ignored so hidden/passive HUD-style SKSE/ImGui menus cannot block open.
+	// Pure ImGui overlays that do not register RE::UI menu names need a plugin-specific guard.
+	static constexpr std::array<std::string_view, 35> conflictingMenus({
 		RE::BookMenu::MENU_NAME,
 		RE::BarterMenu::MENU_NAME,
 		RE::CraftingMenu::MENU_NAME,
+		RE::InventoryMenu::MENU_NAME,
 		RE::JournalMenu::MENU_NAME,
 		RE::LevelUpMenu::MENU_NAME,
 		RE::LockpickingMenu::MENU_NAME,
 		RE::LoadingMenu::MENU_NAME,
 		RE::MainMenu::MENU_NAME,
 		RE::MapMenu::MENU_NAME,
+		RE::MessageBoxMenu::MENU_NAME,
 		RE::RaceSexMenu::MENU_NAME,
 		RE::SleepWaitMenu::MENU_NAME,
 		RE::StatsMenu::MENU_NAME,
+		RE::TrainingMenu::MENU_NAME,
 		RE::TweenMenu::MENU_NAME,
+		RE::TutorialMenu::MENU_NAME,
 		RE::Console::MENU_NAME,
+		RE::ConsoleNativeUIMenu::MENU_NAME,
 		RE::DialogueMenu::MENU_NAME,
 		RE::GiftMenu::MENU_NAME,
+		RE::MagicMenu::MENU_NAME,
 		RE::ModManagerMenu::MENU_NAME,
+		RE::FavoritesMenu::MENU_NAME,
 		RE::ContainerMenu::MENU_NAME,
-		"LootMenu"
+		"LootMenu",
+		"LootMenuCF",
+		"BestiaryMenu",
+		"CustomMenu",
+		"RaceMenu",
+		"ShowStats",
+		"dmenu",
+		"dmenu_Main",
+		"dMenu",
+		"dMenu_Main"
 	});
 
 	for (std::string_view menuName : conflictingMenus) {
@@ -1167,8 +1709,21 @@ bool AmmoWheel::CanOpen() const
 		}
 	}
 
-	// Check if ranged weapon is equipped (unless config allows opening without)
-	if (Config::AmmoWheel::RequireWeaponEquipped && _currentWeaponType == WeaponType::None) {
+	// Action Hotkeys uses pure ImGui windows, so there is no RE::UI menu name to blacklist.
+	// It disables gameplay handlers while its grid is visible; use that plugin-specific signal.
+	if (IsActionHotkeysOverlayLikelyVisible()) {
+		logger::debug("AmmoWheel::CanOpen rejected: Action Hotkeys overlay is visible");
+		return false;
+	}
+
+	std::string_view genericBlockedMenu;
+	if (TryGetGenericBlockingMenu(ui, genericBlockedMenu)) {
+		logger::debug("AmmoWheel::CanOpen rejected: active menu '{}' is open", genericBlockedMenu);
+		return false;
+	}
+
+	// AmmoWheel is only available when the player is actively holding a ranged weapon.
+	if (!ShouldBeAvailable()) {
 		logger::debug("AmmoWheel::CanOpen rejected: no ranged weapon equipped");
 		return false;
 	}
@@ -1178,9 +1733,11 @@ bool AmmoWheel::CanOpen() const
 
 void AmmoWheel::UpdateWeaponState()
 {
+	const WeaponType previousWeaponType = _currentWeaponType;
 	auto player = RE::PlayerCharacter::GetSingleton();
 	if (!player) {
 		_currentWeaponType = WeaponType::None;
+		_pendingRememberedAmmoRestoreType = WeaponType::None;
 		return;
 	}
 
@@ -1198,6 +1755,7 @@ void AmmoWheel::UpdateWeaponState()
 
 	if (!weapon) {
 		_currentWeaponType = WeaponType::None;
+		_pendingRememberedAmmoRestoreType = WeaponType::None;
 		return;
 	}
 
@@ -1209,6 +1767,31 @@ void AmmoWheel::UpdateWeaponState()
 		_currentWeaponType = WeaponType::Crossbow;
 	} else {
 		_currentWeaponType = WeaponType::None;
+	}
+
+	if (!Config::AmmoWheel::Sort::RememberAmmoByWeaponType) {
+		_pendingRememberedAmmoRestoreType = WeaponType::None;
+		return;
+	}
+
+	const bool weaponTypeChanged = previousWeaponType != _currentWeaponType;
+	if (_currentWeaponType == WeaponType::None) {
+		_pendingRememberedAmmoRestoreType = WeaponType::None;
+		return;
+	}
+	if (weaponTypeChanged) {
+		_pendingRememberedAmmoRestoreType = _currentWeaponType;
+	}
+
+	const RE::FormID currentAmmoIDBeforeRestore = getEquippedAmmoFormID();
+	if (_pendingRememberedAmmoRestoreType == _currentWeaponType) {
+		if (TryRestoreRememberedAmmoForWeaponType(_currentWeaponType, currentAmmoIDBeforeRestore)) {
+			_pendingRememberedAmmoRestoreType = WeaponType::None;
+		}
+	}
+
+	if (_pendingRememberedAmmoRestoreType != _currentWeaponType) {
+		SyncRememberedAmmoForWeaponType(_currentWeaponType, getEquippedAmmoFormID(), "UpdateWeaponState");
 	}
 }
 
@@ -1844,10 +2427,595 @@ std::string AmmoWheel::TruncateTextToFit(const char* text, float maxWidth, float
 	return "..";  // Ultimate fallback
 }
 
+void AmmoWheel::InvalidateRuntimeCaches()
+{
+	_damageCacheValid = false;
+	_cachedMaxDamage = 0.0f;
+	_cachedMaxDamageTies = 0;
+	_damageCacheRevision++;
+	_centerPanelCache = CenterPanelCache{};
+	_centerPanelStableWidth = 0.0f;
+	_centerPanelStableHeight = 0.0f;
+	_centerPanelStableConfigRevision = 0;
+	_centerPanelStableViewport = { 0, 0 };
+	_damageRebuildMsAccum = 0.0;
+	_damageRebuildCount = 0;
+	_labelRebuildMsAccum = 0.0;
+	_labelRebuildCount = 0;
+	_centerRebuildMsAccum = 0.0;
+	_centerRebuildCount = 0;
+
+	for (auto& entry : _ammoEntries) {
+		entry.cachedDamage = entry.ammo ? entry.ammo->data.damage : 0.0f;
+		entry.damageValid = false;
+
+		entry.labelDisplayNameCached.clear();
+		entry.labelLayoutCached = TextLayout{};
+		entry.labelFontSizeCached = 0.0f;
+		entry.labelAvailWidthCached = 0.0f;
+		entry.labelLineSpacingCached = 0.0f;
+		entry.labelTotalTextHeightCached = 0.0f;
+		entry.labelClipHalfWidthCached = 0.0f;
+		entry.labelClipHalfHeightCached = 0.0f;
+		entry.labelBgHalfWidthCached = 0.0f;
+		entry.labelUsesReskinPathCached = false;
+		entry.labelLayoutValid = false;
+		entry.labelLayoutRevision = 0;
+		entry.labelLayoutViewport = { 0, 0 };
+		entry.labelLayoutWheelCenterX = 0.0f;
+	}
+}
+
+void AmmoWheel::EnsureCenterFieldOrderCache()
+{
+	if (_centerFieldOrderRevision == _configRevision && !_centerFieldOrderCache.empty()) {
+		return;
+	}
+
+	_centerFieldOrderCache.clear();
+	std::string orderStr = Config::AmmoWheel::CenterFields::Order;
+	size_t start = 0;
+	while (start <= orderStr.size()) {
+		size_t comma = orderStr.find(',', start);
+		size_t end = (comma == std::string::npos) ? orderStr.size() : comma;
+		std::string token = orderStr.substr(start, end - start);
+
+		// Trim whitespace around each field token.
+		size_t left = token.find_first_not_of(" \t\r\n");
+		size_t right = token.find_last_not_of(" \t\r\n");
+		if (left != std::string::npos && right != std::string::npos) {
+			token = token.substr(left, right - left + 1);
+			if (!token.empty()) {
+				_centerFieldOrderCache.push_back(token);
+			}
+		}
+
+		if (comma == std::string::npos) {
+			break;
+		}
+		start = comma + 1;
+	}
+
+	if (_centerFieldOrderCache.empty()) {
+		_centerFieldOrderCache = { "Name", "Damage", "Type", "Count", "Source" };
+	}
+
+	_centerFieldOrderRevision = _configRevision;
+}
+
+bool AmmoWheel::RebuildDamageCache(const RE::TESObjectREFR::InventoryItemMap& a_imap)
+{
+	const bool needsDamageCache = Config::AmmoWheel::CenterEnabled && Config::AmmoWheel::CenterFields::ShowDamage;
+	if (!needsDamageCache) {
+		if (_damageCacheValid) {
+			return false;
+		}
+		for (auto& entry : _ammoEntries) {
+			entry.cachedDamage = entry.ammo ? entry.ammo->data.damage : 0.0f;
+			entry.damageValid = true;
+		}
+		_cachedMaxDamage = 0.0f;
+		_cachedMaxDamageTies = 0;
+		_damageCacheValid = true;
+		_damageCacheRevision++;
+		_centerPanelCache.valid = false;
+		return true;
+	}
+
+	auto* player = RE::PlayerCharacter::GetSingleton();
+	float maxDamage = 0.0f;
+	int ties = 0;
+
+	for (auto& entry : _ammoEntries) {
+		if (!entry.ammo) {
+			entry.cachedDamage = 0.0f;
+			entry.damageValid = false;
+			continue;
+		}
+
+		float damage = entry.ammo->data.damage;
+		auto it = a_imap.find(entry.ammo);
+		if (it != a_imap.end() && it->second.second && player) {
+			if (auto* invEntry = it->second.second.get()) {
+				damage = player->GetDamage(invEntry);
+			}
+		}
+
+		entry.cachedDamage = damage;
+		entry.damageValid = true;
+
+		if (damage > maxDamage + kAmmoDamageEpsilon) {
+			maxDamage = damage;
+			ties = 1;
+		} else if (std::abs(damage - maxDamage) <= kAmmoDamageEpsilon) {
+			ties++;
+		}
+	}
+
+	_cachedMaxDamage = maxDamage;
+	_cachedMaxDamageTies = ties;
+	_damageCacheValid = true;
+	_damageCacheRevision++;
+	_centerPanelCache.valid = false;
+	return true;
+}
+
+bool AmmoWheel::RebuildLabelLayouts(ImVec2 a_wheelCenter, float a_startAngle, float a_slotAngle)
+{
+	if (!Config::AmmoWheel::LabelShow || _ammoEntries.empty()) {
+		return false;
+	}
+
+	const ImVec2 viewport = ResolutionScale::Context::GetSingleton().GetRenderSize();
+	auto& reskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+	const float margin = Config::AmmoWheel::NameMarginPx;
+	const float padding = Config::AmmoWheel::NamePanelPaddingPx;
+
+	bool needsRebuild = false;
+	for (const auto& entry : _ammoEntries) {
+		const bool useReskinPath = reskinSystem.IsEnabled() && entry.reskinEntry.preset;
+		if (!entry.labelLayoutValid ||
+			entry.labelLayoutRevision != _configRevision ||
+			entry.labelLayoutViewport.x != viewport.x ||
+			entry.labelLayoutViewport.y != viewport.y ||
+			std::abs(entry.labelLayoutWheelCenterX - a_wheelCenter.x) > 0.5f ||
+			entry.labelUsesReskinPathCached != useReskinPath) {
+			needsRebuild = true;
+			break;
+		}
+	}
+
+	if (!needsRebuild) {
+		return false;
+	}
+
+	ImFont* font = ImGui::GetFont();
+	for (int i = 0; i < static_cast<int>(_ammoEntries.size()); ++i) {
+		auto& entry = _ammoEntries[i];
+
+		entry.labelDisplayNameCached.clear();
+		entry.labelLayoutCached = TextLayout{};
+		entry.labelFontSizeCached = 0.0f;
+		entry.labelAvailWidthCached = 0.0f;
+		entry.labelLineSpacingCached = 0.0f;
+		entry.labelTotalTextHeightCached = 0.0f;
+		entry.labelClipHalfWidthCached = 0.0f;
+		entry.labelClipHalfHeightCached = 0.0f;
+		entry.labelBgHalfWidthCached = 0.0f;
+		entry.labelUsesReskinPathCached = false;
+		entry.labelLayoutValid = false;
+		entry.labelLayoutRevision = _configRevision;
+		entry.labelLayoutViewport = viewport;
+		entry.labelLayoutWheelCenterX = a_wheelCenter.x;
+
+		if (!entry.ammo) {
+			continue;
+		}
+
+		const bool useReskinPath = reskinSystem.IsEnabled() && entry.reskinEntry.preset;
+		entry.labelUsesReskinPathCached = useReskinPath;
+
+		const float slotStartAngle = a_startAngle + i * a_slotAngle;
+		const float slotEndAngle = slotStartAngle + a_slotAngle;
+		const float midAngle = (slotStartAngle + slotEndAngle) * 0.5f;
+
+		const char* originalName = entry.ammo->GetName();
+		std::string displayName = originalName ? originalName : "";
+		if (useReskinPath && Config::AmmoWheel::LabelTruncateLength > 0 &&
+			displayName.length() > static_cast<size_t>(Config::AmmoWheel::LabelTruncateLength)) {
+			if (Config::AmmoWheel::LabelAbbreviate && Config::AmmoWheel::LabelTruncateLength > 3) {
+				displayName = displayName.substr(0, Config::AmmoWheel::LabelTruncateLength - 3) + "...";
+			} else {
+				displayName = displayName.substr(0, Config::AmmoWheel::LabelTruncateLength);
+			}
+		}
+
+		float textSize = Config::AmmoWheel::NameFontPx * Config::AmmoWheel::NameTextScale;
+		float availWidth = 0.0f;
+		if (Config::AmmoWheel::NameLayoutMode > 0) {
+			const bool labelOnLeft = (a_wheelCenter.x > viewport.x * 0.5f);
+			if (useReskinPath) {
+				availWidth = labelOnLeft ?
+					(a_wheelCenter.x - margin - padding) :
+					(viewport.x - a_wheelCenter.x - margin - padding);
+				availWidth = (std::max)(availWidth, 60.0f);
+			} else {
+				const float wheelOuterRadius = Config::AmmoWheel::WheelRadius;
+				const float wheelLeft = a_wheelCenter.x - wheelOuterRadius;
+				const float wheelRight = a_wheelCenter.x + wheelOuterRadius;
+				availWidth = labelOnLeft ?
+					(wheelLeft - margin - padding) :
+					(viewport.x - wheelRight - margin - padding);
+				availWidth = (std::max)(availWidth, 120.0f);
+			}
+			if (Config::AmmoWheel::NameMaxWidthPx > 0.0f) {
+				availWidth = (std::min)(availWidth, Config::AmmoWheel::NameMaxWidthPx);
+			}
+		} else {
+			const float slotArcLength = (slotEndAngle - slotStartAngle) * _cachedTextRadius;
+			availWidth = slotArcLength * Config::AmmoWheel::LabelMaxSlotArcRatio;
+			availWidth = (std::max)(availWidth, 60.0f);
+		}
+
+		TextLayout layout;
+		const int maxLines = Config::AmmoWheel::NameMaxLines;
+		switch (Config::AmmoWheel::NameLayoutMode) {
+		case 0:
+		{
+			int legacyMaxLines = 1;
+			if (Config::AmmoWheel::LabelMultiLine) {
+				float absU = 0.0f;
+				if (useReskinPath) {
+					absU = std::abs(std::cos(midAngle));
+				} else {
+					const float arcSpan = getArcAngleRad();
+					const float arcMidAngle = getStartAngleRad() + arcSpan * 0.5f;
+					float u = 0.0f;
+					if (arcSpan > 0.01f) {
+						u = (midAngle - arcMidAngle) / (arcSpan * 0.5f);
+						u = std::clamp(u, -1.0f, 1.0f);
+					}
+					absU = std::abs(u);
+				}
+				if (absU >= 0.70f) {
+					legacyMaxLines = 3;
+				} else if (absU >= 0.35f) {
+					legacyMaxLines = 2;
+				}
+			}
+			layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, legacyMaxLines);
+			break;
+		}
+		case 1:
+			layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, maxLines);
+			break;
+		case 2:
+		{
+			if (font) {
+				ImVec2 size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, displayName.c_str());
+				const float minFont = Config::AmmoWheel::NameMinFontPx;
+				while (size.x > availWidth && textSize > minFont) {
+					textSize -= 1.0f;
+					size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, displayName.c_str());
+				}
+				if (!useReskinPath && size.x > availWidth) {
+					layout.lines.push_back(TruncateTextToFit(displayName.c_str(), availWidth, textSize));
+				} else {
+					layout.lines.push_back(displayName);
+				}
+			} else {
+				layout.lines.push_back(displayName);
+			}
+			break;
+		}
+		case 3:
+		{
+			layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, maxLines);
+			if (font && !layout.lines.empty()) {
+				ImVec2 lastLineSize = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, layout.lines.back().c_str());
+				if (lastLineSize.x > availWidth) {
+					const float minFont = Config::AmmoWheel::NameMinFontPx;
+					float trySize = textSize;
+					while (trySize > minFont) {
+						trySize -= 1.0f;
+						if (useReskinPath) {
+							ImVec2 testSize = font->CalcTextSizeA(trySize, FLT_MAX, 0.0f, layout.lines.back().c_str());
+							if (testSize.x <= availWidth) {
+								textSize = trySize;
+								break;
+							}
+						} else {
+							TextLayout tryLayout = wrapTextForSlot(displayName.c_str(), availWidth, trySize, maxLines);
+							bool allFit = true;
+							for (const auto& line : tryLayout.lines) {
+								ImVec2 lineSize = font->CalcTextSizeA(trySize, FLT_MAX, 0.0f, line.c_str());
+								if (lineSize.x > availWidth) {
+									allFit = false;
+									break;
+								}
+							}
+							if (allFit) {
+								textSize = trySize;
+								layout = std::move(tryLayout);
+								break;
+							}
+						}
+					}
+				}
+			}
+			break;
+		}
+		default:
+			layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, maxLines);
+			break;
+		}
+
+		if (layout.lines.empty()) {
+			layout.lines.push_back(displayName);
+		}
+
+		const float lineSpacing = textSize + Config::AmmoWheel::NameLineSpacingPx;
+		const float totalTextHeight = static_cast<float>(layout.lines.size()) * lineSpacing;
+		float clipHalfWidth = 0.0f;
+		float clipHalfHeight = 0.0f;
+		if (Config::AmmoWheel::NameLayoutMode > 0) {
+			clipHalfWidth = availWidth * 0.55f;
+			clipHalfHeight = totalTextHeight + padding;
+		} else {
+			clipHalfWidth = useReskinPath ? (availWidth * 0.5f) : (availWidth * 0.6f);
+			clipHalfHeight = useReskinPath ? (totalTextHeight * 0.5f) : (totalTextHeight * 0.8f);
+		}
+
+		float bgHalfWidth = clipHalfWidth;
+		if (useReskinPath && font && !layout.lines.empty()) {
+			float maxLineWidth = 0.0f;
+			for (const auto& line : layout.lines) {
+				ImVec2 size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, line.c_str());
+				maxLineWidth = (std::max)(maxLineWidth, size.x);
+			}
+			float bgWidth = maxLineWidth + Config::AmmoWheel::NameTextBgExtraPaddingPx * 2.0f + padding * 2.0f;
+			if (Config::AmmoWheel::NameMaxWidthPx > 0.0f) {
+				bgWidth = (std::min)(bgWidth, Config::AmmoWheel::NameMaxWidthPx);
+			}
+			bgWidth = (std::min)(bgWidth, availWidth + padding * 2.0f);
+			bgHalfWidth = bgWidth * 0.5f;
+		}
+
+		entry.labelDisplayNameCached = displayName;
+		entry.labelLayoutCached = std::move(layout);
+		entry.labelFontSizeCached = textSize;
+		entry.labelAvailWidthCached = availWidth;
+		entry.labelLineSpacingCached = lineSpacing;
+		entry.labelTotalTextHeightCached = totalTextHeight;
+		entry.labelClipHalfWidthCached = clipHalfWidth;
+		entry.labelClipHalfHeightCached = clipHalfHeight;
+		entry.labelBgHalfWidthCached = bgHalfWidth;
+		entry.labelLayoutValid = true;
+	}
+
+	return true;
+}
+
+bool AmmoWheel::RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs)
+{
+	if (!Config::AmmoWheel::CenterEnabled) {
+		_centerPanelCache = CenterPanelCache{};
+		return false;
+	}
+
+	if (_hoveredIndex < 0 || _hoveredIndex >= static_cast<int>(_ammoEntries.size())) {
+		_centerPanelCache = CenterPanelCache{};
+		return false;
+	}
+
+	auto& entry = _ammoEntries[_hoveredIndex];
+	if (!entry.ammo) {
+		_centerPanelCache = CenterPanelCache{};
+		return false;
+	}
+
+	const ImVec2 viewport = ResolutionScale::Context::GetSingleton().GetRenderSize();
+	const RE::FormID ammoID = entry.ammo->GetFormID();
+	if (_centerPanelCache.valid &&
+		_centerPanelCache.hoveredIndex == _hoveredIndex &&
+		_centerPanelCache.ammoID == ammoID &&
+		_centerPanelCache.configRevision == _configRevision &&
+		_centerPanelCache.damageRevision == _damageCacheRevision &&
+		_centerPanelCache.viewport.x == viewport.x &&
+		_centerPanelCache.viewport.y == viewport.y) {
+		return false;
+	}
+
+	EnsureCenterFieldOrderCache();
+
+	CenterPanelCache cache{};
+	cache.valid = true;
+	cache.hoveredIndex = _hoveredIndex;
+	cache.ammoID = ammoID;
+	cache.configRevision = _configRevision;
+	cache.damageRevision = _damageCacheRevision;
+	cache.viewport = viewport;
+	cache.wheelCenterAtBuild = a_wheelCenter;
+
+	if (Config::AmmoWheel::CenterPanelPositionMode == 1) {
+		cache.panelCenter = ImVec2(
+			a_wheelCenter.x + Config::AmmoWheel::CenterPanelOffsetX,
+			a_wheelCenter.y + Config::AmmoWheel::CenterPanelOffsetY);
+	} else {
+		cache.panelCenter = calculateCenterPanelPosition(a_wheelCenter);
+	}
+
+	cache.nameFontSize = std::clamp(
+		Config::AmmoWheel::CenterFontPx * 1.2f,
+		Config::AmmoWheel::CenterTextMinFontSize,
+		Config::AmmoWheel::CenterTextMaxFontSize);
+	cache.infoFontSize = std::clamp(
+		Config::AmmoWheel::CenterFontPx,
+		Config::AmmoWheel::CenterTextMinFontSize,
+		Config::AmmoWheel::CenterTextMaxFontSize);
+	cache.descriptionFontSize = std::clamp(
+		Config::AmmoWheel::CenterFontPx * Config::AmmoWheel::CenterDescriptionFontScale,
+		Config::AmmoWheel::CenterTextMinFontSize,
+		Config::AmmoWheel::CenterTextMaxFontSize);
+	cache.lineSpacing = Config::AmmoWheel::CenterLineSpacingPx;
+	cache.padding = Config::AmmoWheel::CenterPaddingPx;
+
+	const float damage = entry.damageValid ? entry.cachedDamage : entry.ammo->data.damage;
+	const float maxDamage = _damageCacheValid ? _cachedMaxDamage : damage;
+	cache.highlightDamage = (std::abs(damage - maxDamage) <= kAmmoDamageEpsilon && maxDamage > 0.0f);
+	cache.roundedDamageValue = (std::max)(0, static_cast<int>(std::lround(damage)));
+
+	const std::string ammoType = entry.ammo->IsBolt() ? "Bolt" : "Arrow";
+	std::string source = "Vanilla";
+	if (auto* file = entry.ammo->GetFile(0)) {
+		std::string filename(file->GetFilename());
+		if (filename != "Skyrim.esm" &&
+			filename != "Update.esm" &&
+			filename != "Dawnguard.esm" &&
+			filename != "HearthFires.esm" &&
+			filename != "Dragonborn.esm") {
+			source = filename;
+		}
+	}
+
+	std::string centerDescription;
+	if (Config::AmmoWheel::CenterShowDescription) {
+		RE::BSString descriptionBuf = "";
+		entry.ammo->GetDescription(descriptionBuf, nullptr);
+		if (descriptionBuf.c_str()) {
+			centerDescription = NormalizeCenterDescriptionText(std::string(descriptionBuf.c_str()));
+		}
+	}
+
+	for (const auto& field : _centerFieldOrderCache) {
+		if (field == "Name" && Config::AmmoWheel::CenterFields::ShowName) {
+			if (Config::AmmoWheel::EnableWordWrap) {
+				TextLayout wrappedName = wrapTextForCenterPanel(entry.ammo->GetName(), cache.nameFontSize, cache.panelCenter);
+				for (const auto& line : wrappedName.lines) {
+					cache.textLines.emplace_back(line, cache.nameFontSize);
+					cache.isDamageLine.push_back(false);
+				}
+			} else {
+				cache.textLines.emplace_back(entry.ammo->GetName(), cache.nameFontSize);
+				cache.isDamageLine.push_back(false);
+			}
+		} else if (field == "Damage" && Config::AmmoWheel::CenterFields::ShowDamage) {
+			cache.textLines.emplace_back(fmt::format("Damage: {}", cache.roundedDamageValue), cache.infoFontSize);
+			cache.isDamageLine.push_back(true);
+		} else if (field == "Type" && Config::AmmoWheel::CenterFields::ShowType) {
+			cache.textLines.emplace_back(fmt::format("Type: {}", ammoType), cache.infoFontSize);
+			cache.isDamageLine.push_back(false);
+		} else if (field == "Count" && Config::AmmoWheel::CenterFields::ShowCount) {
+			cache.textLines.emplace_back(fmt::format("Count: {}", entry.count), cache.infoFontSize);
+			cache.isDamageLine.push_back(false);
+		} else if (field == "Source" && Config::AmmoWheel::CenterFields::ShowSource) {
+			cache.textLines.emplace_back(fmt::format("Source: {}", source), cache.infoFontSize);
+			cache.isDamageLine.push_back(false);
+		}
+	}
+
+	if (Config::AmmoWheel::CenterShowDescription && !centerDescription.empty()) {
+		const int maxDescLines = std::clamp(Config::AmmoWheel::CenterMaxDescriptionLines, 1, 8);
+		TextLayout wrappedDescription = wrapTextForCenterPanel(
+			centerDescription.c_str(),
+			cache.descriptionFontSize,
+			cache.panelCenter,
+			maxDescLines);
+		if (!wrappedDescription.lines.empty()) {
+			for (const auto& line : wrappedDescription.lines) {
+				cache.descriptionLines.emplace_back(line);
+			}
+		}
+	}
+
+	if (cache.textLines.empty()) {
+		if (Config::AmmoWheel::EnableWordWrap) {
+			TextLayout wrappedName = wrapTextForCenterPanel(entry.ammo->GetName(), cache.nameFontSize, cache.panelCenter);
+			for (const auto& line : wrappedName.lines) {
+				cache.textLines.emplace_back(line, cache.nameFontSize);
+				cache.isDamageLine.push_back(false);
+			}
+		} else {
+			cache.textLines.emplace_back(entry.ammo->GetName(), cache.nameFontSize);
+			cache.isDamageLine.push_back(false);
+		}
+	}
+
+	cache.totalHeight = cache.padding * 2.0f;
+	cache.maxTextWidth = 0.0f;
+	ImFont* font = ImGui::GetFont();
+	for (size_t i = 0; i < cache.textLines.size(); ++i) {
+		cache.totalHeight += cache.textLines[i].second;
+		if (i > 0) {
+			cache.totalHeight += cache.lineSpacing;
+		}
+
+		float width = 0.0f;
+		if (font) {
+			ImVec2 size = font->CalcTextSizeA(cache.textLines[i].second, FLT_MAX, 0.0f, cache.textLines[i].first.c_str());
+			width = size.x;
+		} else {
+			width = ImGui::CalcTextSize(cache.textLines[i].first.c_str()).x;
+		}
+		cache.maxTextWidth = (std::max)(cache.maxTextWidth, width);
+	}
+
+	const float maxPanelWidth = (std::max)(
+		1.0f,
+		_cachedInnerRadius * Config::AmmoWheel::CenterMaxWidthRatio * 2.0f);
+	const float maxPanelHeight = (std::max)(
+		1.0f,
+		viewport.y - Config::AmmoWheel::CenterPanelSafeMargin * 2.0f);
+
+	// Keep the center panel frame independent from current text content.
+	// Width/height are derived from configuration budgets (not current ammo name length).
+	const float textWidthRatio = std::clamp(Config::AmmoWheel::CenterTextMaxWidthRatio, 0.1f, 1.0f);
+	const float fixedTextWidth = maxPanelWidth * textWidthRatio;
+	const float fixedPanelWidth = std::clamp(fixedTextWidth + cache.padding * 2.0f, 1.0f, maxPanelWidth);
+
+	const int nameLineBudget = Config::AmmoWheel::CenterFields::ShowName ? (std::max)(1, Config::AmmoWheel::CenterTextMaxLines) : 0;
+	int infoLineBudget = 0;
+	if (Config::AmmoWheel::CenterFields::ShowDamage) { infoLineBudget++; }
+	if (Config::AmmoWheel::CenterFields::ShowType) { infoLineBudget++; }
+	if (Config::AmmoWheel::CenterFields::ShowCount) { infoLineBudget++; }
+	if (Config::AmmoWheel::CenterFields::ShowSource) { infoLineBudget++; }
+	const int totalLineBudget = (std::max)(1, nameLineBudget + infoLineBudget);
+	const int interLineGapCount = (std::max)(0, totalLineBudget - 1);
+
+	float budgetContentHeight = 0.0f;
+	budgetContentHeight += static_cast<float>(nameLineBudget) * cache.nameFontSize;
+	budgetContentHeight += static_cast<float>(infoLineBudget) * cache.infoFontSize;
+	budgetContentHeight += static_cast<float>(interLineGapCount) * cache.lineSpacing;
+	const float fixedPanelHeight = std::clamp(cache.padding * 2.0f + budgetContentHeight, 1.0f, maxPanelHeight);
+
+	_centerPanelStableWidth = fixedPanelWidth;
+	_centerPanelStableHeight = fixedPanelHeight;
+	_centerPanelStableConfigRevision = _configRevision;
+	_centerPanelStableViewport = viewport;
+	cache.panelWidth = fixedPanelWidth;
+	cache.panelHeight = fixedPanelHeight;
+
+	if (Config::AmmoWheel::CenterPanelClampToScreen) {
+		float margin = Config::AmmoWheel::CenterPanelSafeMargin;
+		cache.panelCenter.x = std::clamp(
+			cache.panelCenter.x,
+			margin + cache.panelWidth * 0.5f,
+			viewport.x - margin - cache.panelWidth * 0.5f);
+		cache.panelCenter.y = std::clamp(
+			cache.panelCenter.y,
+			margin + cache.panelHeight * 0.5f,
+			viewport.y - margin - cache.panelHeight * 0.5f);
+	}
+
+	_centerPanelCache = std::move(cache);
+	return true;
+}
+
 void AmmoWheel::RefreshAmmoList()
 {
 	std::unique_lock lock(_lock);
 	_ammoEntries.clear();
+	InvalidateRuntimeCaches();
 
 	// Reset diagnostic counters
 	_lastTotalAmmoScanned = 0;
@@ -1951,7 +3119,7 @@ void AmmoWheel::RefreshAmmoList()
 		_ammoEntries.push_back(entry);
 	}
 
-	// ========== PHASE 1: MULTI-CRITERIA SORTING SYSTEM ==========
+	// ========== MULTI-CRITERIA SORTING SYSTEM ==========
 	// Sort keys: 0=None, 1=Count, 2=Power, 3=Type, 4=Favorites
 	auto getSortValue = [](const AmmoEntry& entry, int sortKey) -> int {
 		switch (sortKey) {
@@ -2056,7 +3224,7 @@ void AmmoWheel::RefreshAmmoList()
 			_ammoEntries.size());
 	}
 
-	// ========== PHASE 2: APPLY AMMO LIMITS (POST-SORT TRUNCATION) ==========
+	// ========== APPLY AMMO LIMITS (POST-SORT TRUNCATION) ==========
 	// Single-pass limiter: iterate in sorted order, keep entries while per-type quota remains
 	// Preserves existing ordering - does not reorder or split/merge vectors
 	int arrowLimit = Config::AmmoWheel::Sort::ArrowLimit;
@@ -2123,8 +3291,9 @@ void AmmoWheel::TryOpen()
 		_hoveredTime = 0.f;
 		_blockMainWheel = true;  // Block main wheel while AmmoWheel is open
 		_activationConsumed = false;  // Reset debounce for new open session
+		_pendingCloseOnReleaseButton = -1;
 		
-		// PHASE 2: Reset navigation filters on open to prevent "locked" state
+		// Reset navigation filters on open to prevent a locked state.
 		if (Config::AmmoWheel::ResetFiltersOnOpen) {
 			ResetNavigationFilters();
 		}
@@ -2136,36 +3305,26 @@ void AmmoWheel::TryOpen()
 		// Start hover on equipped ammo or last selected
 		_hoveredIndex = FindInitialHoverIndex();
 		_prevHoveredIndex = _hoveredIndex;  // Initialize hysteresis to match initial selection
+		_mousePendingHoverIndex = -1;
+		_mouseAccumulatedDelta = { 0.0f, 0.0f };
+		_mouseAccumulatedPeak = 0.0f;
+		_mouseSlotCarry = 0.0f;
+		_mouseStepLatchDirection = 0;
 		// Lock hover until user provides meaningful input (mouse/gamepad movement)
 		_hoverInputLock = true;
 		
 		// Initialize cursor position to point at the initial hover slot
 		// This prevents the cursor from starting at center and causing selection jitter
 		if (_hoveredIndex >= 0 && !_ammoEntries.empty()) {
-			float arcAngle = getArcAngleRad();
-			float startAngle = getStartAngleRad();
-			int numEntries = static_cast<int>(_ammoEntries.size());
-			float slotAngle = arcAngle / static_cast<float>(numEntries);
-			float slotGapRad = Config::AmmoWheel::SlotGapDeg * (IM_PI / 180.0f);
-			float effectiveSlotAngle = slotAngle - slotGapRad;
-			
-			// Use EXACT same formula as getHoveredIndex() for slot center angle
-			float slotStartAngle = startAngle + slotAngle * static_cast<float>(_hoveredIndex) + slotGapRad * 0.5f;
-			float slotCenterAngle = slotStartAngle + effectiveSlotAngle * 0.5f;
-			
 			float initRadius = Config::AmmoWheel::WheelRadius * 0.8f;
-			_cursorPos.x = initRadius * std::cos(slotCenterAngle);
-			_cursorPos.y = initRadius * std::sin(slotCenterAngle);
-			
-			// CRITICAL: Also initialize filter smoothedPos to match cursor position
-			// This ensures the smoothed cursor starts at the selected slot, not at origin
-			_mouseFilter.smoothedPos = _cursorPos;
-			_gamepadFilter.smoothedPos = _cursorPos;
+			_cursorPos.x = initRadius * std::cos(getSlotCenterAngle(_hoveredIndex));
+			_cursorPos.y = initRadius * std::sin(getSlotCenterAngle(_hoveredIndex));
 		} else {
 			_cursorPos = { 0, 0 };
-			_mouseFilter.smoothedPos = { 0, 0 };
-			_gamepadFilter.smoothedPos = { 0, 0 };
 		}
+		_mouseFilter.Reset();
+		syncGamepadFilterToCursor();
+		_lastCursorInputSource = CursorInputSource::None;
 		
 		// Start popup animation from 0 so it animates in
 		_hoverPopupScale = 0.0f;
@@ -2197,16 +3356,55 @@ void AmmoWheel::TryOpen()
 				_cachedScreenPos.x, _cachedScreenPos.y, _cachedOuterRadius);
 		}
 
-		if (Config::AmmoWheel::TimeSlowEnabled && Config::AmmoWheel::TimeSlowScale < 1.0f) {
-			float currentTimeScale = Utils::Time::GGTM();
-			// Only modify timescale if it's currently at normal (1.0) - don't override Slow Time shout or other effects
-			if (currentTimeScale >= 0.99f && currentTimeScale <= 1.01f) {
-				_preAmmoWheelTimeScale = currentTimeScale;
-				_ammoWheelModifiedTimeScale = true;
-				Utils::Time::SGTM(Config::AmmoWheel::TimeSlowScale);
-			} else {
-				// External time effect active (e.g., Slow Time shout) - don't touch timescale
+		if (Config::AmmoWheel::TimeSlowEnabled) {
+			const float slowScale = Config::AmmoWheel::TimeSlowScale;
+			ResetMountedVelocityRestoreState();
+			if (slowScale <= 0.0f) {
 				_ammoWheelModifiedTimeScale = false;
+				OpenAmmoWheelPauseMenu();
+				_ammoWheelOwnedPauseMenu = true;
+				logger::info("[TimeDilation] AmmoWheel pause-mode: SlowTimeScale=0 -> vanilla pause (kPausesGame)");
+			} else if (slowScale < 1.0f) {
+				const bool mountedAtOpen = Utils::Player::IsMounted();
+				const float minSlowScale = mountedAtOpen ? kAmmoWheelMountedMinimumSlowScale : 0.01f;
+				const float effectiveScale = (std::max)(slowScale, minSlowScale);
+				if (mountedAtOpen && slowScale < kAmmoWheelMountedMinimumSlowScale) {
+					logger::info("[TimeDilation] AmmoWheel mounted slow clamp: requested={:.3f}, clamped={:.3f}",
+						slowScale, effectiveScale);
+				}
+				float currentTimeScale = Utils::Time::GGTM();
+				// Only modify timescale if it's currently at normal (1.0) - don't override Slow Time shout or other effects
+				if (currentTimeScale >= 0.99f && currentTimeScale <= 1.01f) {
+					_preAmmoWheelTimeScale = currentTimeScale;
+					_ammoWheelModifiedTimeScale = true;
+					_ammoWheelOwnedPauseMenu = false;
+					if (Utils::Player::TryCaptureMountedVelocity(_ammoWheelMountedVelocitySnapshot, &_ammoWheelMountedVelocityMountFormID)) {
+						_ammoWheelRestoreMountedVelocityOnClose = true;
+						logger::info("[TimeDilation] AmmoWheel mounted velocity snapshot: mount={:08X}, v=({:.2f},{:.2f},{:.2f})",
+							_ammoWheelMountedVelocityMountFormID,
+							_ammoWheelMountedVelocitySnapshot.x,
+							_ammoWheelMountedVelocitySnapshot.y,
+							_ammoWheelMountedVelocitySnapshot.z);
+					}
+					Utils::Time::SGTM(effectiveScale);
+					logger::info("[TimeDilation] AmmoWheel apply: before={:.3f}, after={:.3f}, cached={:.3f}",
+						currentTimeScale, effectiveScale, _preAmmoWheelTimeScale);
+					if (_ammoWheelRestoreMountedVelocityOnClose) {
+						Utils::Player::TryRestoreMountedVelocity(
+							_ammoWheelMountedVelocityMountFormID,
+							_ammoWheelMountedVelocitySnapshot,
+							true);
+					}
+				} else {
+					// External time effect active (e.g., Slow Time shout) - don't touch timescale
+					_ammoWheelModifiedTimeScale = false;
+					_ammoWheelOwnedPauseMenu = false;
+					logger::info("[TimeDilation] AmmoWheel skip: external effect active (current={:.3f}, requested={:.3f}, effective={:.3f})",
+						currentTimeScale, slowScale, effectiveScale);
+				}
+			} else {
+				_ammoWheelModifiedTimeScale = false;
+				_ammoWheelOwnedPauseMenu = false;
 			}
 		}
 
@@ -2237,10 +3435,17 @@ void AmmoWheel::Close()
 			}
 		}
 
-		// Only restore timescale if AmmoWheel was the one that modified it
+		// Restore pause/timescale only if AmmoWheel owns those changes.
+		if (_ammoWheelOwnedPauseMenu) {
+			logger::info("[TimeDilation] AmmoWheel restore: closing owned pause menu");
+			CloseAmmoWheelPauseMenu();
+			_ammoWheelOwnedPauseMenu = false;
+		}
+
 		if (_ammoWheelModifiedTimeScale) {
 			Utils::Time::SGTM(_preAmmoWheelTimeScale);
 			_ammoWheelModifiedTimeScale = false;
+			TryRestoreMountedVelocityAfterTimeRestore("Close");
 		}
 
 		logger::info("AmmoWheel: CLOSE (was state={}, hovered={})", static_cast<int>(_state), _hoveredIndex);
@@ -2249,6 +3454,11 @@ void AmmoWheel::Close()
 		_blockMainWheel = false;  // Release main wheel block on close
 		InputBroker::ClearActiveOwner(InputBroker::kWheelerRefinedPluginId);
 	}
+}
+
+void AmmoWheel::HardClose()
+{
+	ForceClose();
 }
 
 void AmmoWheel::Toggle()
@@ -2279,36 +3489,26 @@ void AmmoWheel::UpdateCursorPosMouse(float a_deltaX, float a_deltaY)
 	// Configure filter from config
 	_mouseFilter.deadzone = Config::AmmoWheel::MouseDeadzone;
 	_mouseFilter.smoothingSpeed = Config::AmmoWheel::MouseSmoothingSpeed;
-	
-	// Normalize delta to a reasonable range for deadzone comparison
-	// Mouse deltas can be large, so we scale them down for filtering
-	float sensitivity = 1.0f;
-	ImVec2 rawDelta = {a_deltaX * sensitivity, a_deltaY * sensitivity};
-	
-	// Apply filter (deadzone + smoothing)
-	ImVec2 filtered = _mouseFilter.Apply(rawDelta, dt, true);
-	
-	// If input is meaningful (above deadzone), unlock hover for cursor-based selection
-	if (std::abs(filtered.x) > 0.1f || std::abs(filtered.y) > 0.1f) {
-		_hoverInputLock = false;
+	if (_lastCursorInputSource != CursorInputSource::Mouse) {
+		_mouseFilter.Reset();
+		_mousePendingHoverIndex = -1;
+		_mouseAccumulatedDelta = { 0.0f, 0.0f };
+		_mouseAccumulatedPeak = 0.0f;
+		_mouseSlotCarry = 0.0f;
+		_mouseStepLatchDirection = 0;
+		_lastCursorInputSource = CursorInputSource::Mouse;
+		syncCursorToHoveredSlot(0.0f, true);
 	}
 	
-	// If hover is locked, don't update cursor position
-	if (_hoverInputLock) {
-		return;
-	}
-	
-	_cursorPos.x += filtered.x;
-	_cursorPos.y += filtered.y;  // Mouse: don't negate Y (raw delta is already in screen coordinates)
-
-	// Clamp cursor to max radius
-	float maxRadius = Config::AmmoWheel::WheelRadius * 1.5f;
-	float dist = std::sqrt(_cursorPos.x * _cursorPos.x + _cursorPos.y * _cursorPos.y);
-	if (dist > maxRadius) {
-		float scale = maxRadius / dist;
-		_cursorPos.x *= scale;
-		_cursorPos.y *= scale;
-	}
+	// Mouse move events can arrive many times per frame. Accumulate raw delta here and
+	// consume it once per frame in processPendingMouseMotion() so smoothing is frame-based
+	// instead of event-frequency-based.
+	(void)dt;
+	const ImVec2 rawDelta = { a_deltaX, a_deltaY };
+	_mouseAccumulatedDelta.x += rawDelta.x;
+	_mouseAccumulatedDelta.y += rawDelta.y;
+	const float rawMagnitude = std::sqrt(rawDelta.x * rawDelta.x + rawDelta.y * rawDelta.y);
+	_mouseAccumulatedPeak = (std::max)(_mouseAccumulatedPeak, rawMagnitude);
 }
 
 void AmmoWheel::UpdateCursorPosGamepad(float a_x, float a_y)
@@ -2323,15 +3523,25 @@ void AmmoWheel::UpdateCursorPosGamepad(float a_x, float a_y)
 	// Configure filter from config
 	_gamepadFilter.deadzone = Config::AmmoWheel::GamepadDeadzone;
 	_gamepadFilter.smoothingSpeed = Config::AmmoWheel::GamepadSmoothingSpeed;
+	if (_lastCursorInputSource != CursorInputSource::Gamepad) {
+		syncGamepadFilterToCursor();
+		_mousePendingHoverIndex = -1;
+		_mouseAccumulatedDelta = { 0.0f, 0.0f };
+		_mouseAccumulatedPeak = 0.0f;
+		_mouseSlotCarry = 0.0f;
+		_mouseStepLatchDirection = 0;
+		_lastCursorInputSource = CursorInputSource::Gamepad;
+	}
 	
 	// Gamepad stick values are already normalized to [-1, 1]
 	ImVec2 stickInput = {a_x, a_y};
+	float rawMagnitude = std::sqrt(stickInput.x * stickInput.x + stickInput.y * stickInput.y);
 	
 	// Apply filter (deadzone + smoothing)
 	ImVec2 filtered = _gamepadFilter.Apply(stickInput, dt, true);
 	
 	// If input is meaningful (above deadzone), unlock hover for cursor-based selection
-	if (std::abs(filtered.x) > 0.1f || std::abs(filtered.y) > 0.1f) {
+	if (rawMagnitude > _gamepadFilter.deadzone) {
 		_hoverInputLock = false;
 	}
 	
@@ -2341,7 +3551,7 @@ void AmmoWheel::UpdateCursorPosGamepad(float a_x, float a_y)
 	}
 	
 	// Convert filtered stick position to cursor position
-	float maxRadius = Config::AmmoWheel::WheelRadius * 1.5f;
+	float maxRadius = getCursorMaxRadius();
 	_cursorPos.x = filtered.x * maxRadius;
 	_cursorPos.y = -filtered.y * maxRadius;  // Negate Y: gamepad Y-positive is up, screen Y-positive is down
 }
@@ -2392,6 +3602,7 @@ void AmmoWheel::ActivateHoveredAmmo()
 	// Remember this selection for next time
 	_lastSelectedIndex = _hoveredIndex;
 	_lastSelectedAmmoID = targetFormID;
+	SyncRememberedAmmoForWeaponType(_currentWeaponType, targetFormID, "ActivateHoveredAmmo");
 	
 	logger::info("AmmoWheel: Equipped ammo '{}' (FormID: {:08X}, saved index={}, saved FormID={:08X})", 
 		entry.ammo->GetName(), targetFormID, _lastSelectedIndex, _lastSelectedAmmoID);
@@ -2409,6 +3620,7 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 	} else {
 		wheelCenter = _cachedScreenPos;
 	}
+	ImVec2 layoutCenter = wheelCenter;
 	
 	// Apply fade animation offset
 	wheelCenter.y += (1.f - a_drawArgs.alphaMult) * Config::Animation::ToggleVerticalFadeDistance;
@@ -2425,7 +3637,14 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 		return;
 	}
 
-	RE::TESObjectREFR::InventoryItemMap imap = player->GetInventory();
+	InventorySnapshotCache::Stats invStats{};
+	RE::TESObjectREFR::InventoryItemMap& imap = g_ammoWheelInventorySnapshot.Get(
+		player,
+		true,
+		Config::AmmoWheel::Performance::InventorySnapshotIntervalSeconds > 0.0f ?
+			Config::AmmoWheel::Performance::InventorySnapshotIntervalSeconds :
+			static_cast<float>(kAmmoWheelInventorySnapshotIntervalSeconds),
+		&invStats);
 	
 	// Get currently equipped ammo FormID for selection highlighting (derived each frame)
 	RE::FormID equippedAmmoID = getEquippedAmmoFormID();
@@ -2439,12 +3658,34 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 	float startAngle = getStartAngleRad();
 	float slotAngle = arcAngle / static_cast<float>(numEntries);
 
+	if (!_damageCacheValid || invStats.refreshedThisCall) {
+		const auto damageStart = std::chrono::steady_clock::now();
+		if (RebuildDamageCache(imap)) {
+			const auto damageEnd = std::chrono::steady_clock::now();
+			_damageRebuildMsAccum += std::chrono::duration<double, std::milli>(damageEnd - damageStart).count();
+			_damageRebuildCount++;
+		}
+	}
+
+	const auto labelStart = std::chrono::steady_clock::now();
+	if (RebuildLabelLayouts(layoutCenter, startAngle, slotAngle)) {
+		const auto labelEnd = std::chrono::steady_clock::now();
+		_labelRebuildMsAccum += std::chrono::duration<double, std::milli>(labelEnd - labelStart).count();
+		_labelRebuildCount++;
+	}
+
 	// Update hovered index based on cursor
 	float cursorAngle = getCursorAngle();
 	int prevHovered = _hoveredIndex;
 	
 	// Skip hover recalculation while input lock is active (preserves initial selection)
-	if (!_hoverInputLock) {
+	if (_lastCursorInputSource == CursorInputSource::Mouse) {
+		processPendingMouseMotion(ImGui::GetIO().DeltaTime);
+		if (!_hoverInputLock && _mousePendingHoverIndex >= 0 && _mousePendingHoverIndex < numEntries) {
+			_hoveredIndex = _mousePendingHoverIndex;
+		}
+		_mousePendingHoverIndex = -1;
+	} else if (!_hoverInputLock) {
 		_hoveredIndex = getHoveredIndex(wheelCenter, cursorAngle);
 	}
 	// When locked, keep _hoveredIndex as initialized by TryOpen()
@@ -2459,7 +3700,13 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 		_hoveredTime = 0.f;
 		// Reset popup animation when hovering a new slot
 		if (_hoveredIndex >= 0 && prevHovered >= 0 && _hoveredIndex != prevHovered) {
-			_hoverPopupScale = 0.0f;
+			if (Config::AmmoWheel::SmoothSlotTransition && _lastCursorInputSource == CursorInputSource::Mouse) {
+				// Soft-restart the popup on mouse slot changes so the hover replay effect stays
+				// visible while still replaying the popup animation from a low scale.
+				_hoverPopupScale = (std::min)(_hoverPopupScale, 0.15f);
+			} else {
+				_hoverPopupScale = 0.0f;
+			}
 		}
 		
 		// Play hover sound when slot changes
@@ -2471,8 +3718,157 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 	// Update _prevHoveredIndex for next frame's hysteresis calculation
 	_prevHoveredIndex = _hoveredIndex;
 
-	// ========== UNIFIED RESKIN: WHEEL BACKGROUND ==========
+	const auto centerStart = std::chrono::steady_clock::now();
+	if (RebuildCenterPanelCache(layoutCenter, a_drawArgs)) {
+		const auto centerEnd = std::chrono::steady_clock::now();
+		_centerRebuildMsAccum += std::chrono::duration<double, std::milli>(centerEnd - centerStart).count();
+		_centerRebuildCount++;
+	}
+
 	auto& reskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+	auto drawSlotDividers = [&]() {
+		// ========== ANIMATION: SLOT DIVIDERS ==========
+		// Only draw dividers for arc-shaped slots (radial lines don't make sense for floating shapes)
+		if (Config::AmmoWheel::SlotDividersEnabled && Config::AmmoWheel::SlotShape == 0 && numEntries > 1) {
+			ImU32 dividerColor = Config::AmmoWheel::SlotDividerColor;
+			uint8_t divAlpha = static_cast<uint8_t>((dividerColor >> 24) * a_drawArgs.alphaMult);
+			dividerColor = (dividerColor & 0x00FFFFFF) | (divAlpha << 24);
+			float thickness = Config::AmmoWheel::SlotDividerThickness;
+			const bool hasDividerReskin = reskinSystem.IsEnabled() && !_ammoEntries.empty() && _ammoEntries[0].reskinEntry.preset;
+			float dividerReskinAlphaMult = a_drawArgs.alphaMult;
+			if (hasDividerReskin && Config::AmmoWheel::SlotDividerReskinBreathingEnabled) {
+				const float speed = std::clamp(Config::AmmoWheel::SlotDividerReskinBreathingSpeed, 0.1f, 12.0f);
+				const float intensity = std::clamp(Config::AmmoWheel::SlotDividerReskinBreathingIntensity, 0.0f, 1.0f);
+				const float baseOpacity = std::clamp(Config::AmmoWheel::SlotDividerReskinBreathingOpacity, 0.0f, 1.0f);
+				const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * speed * 2.0f * IM_PI);
+				const float breathAlpha = (1.0f - intensity) + (intensity * pulse);
+				dividerReskinAlphaMult *= baseOpacity * breathAlpha;
+			}
+			auto* drawList = ImGui::GetWindowDrawList();
+			const auto dividerLayout = reskinSystem.GetLayoutOverrideSnapshot(
+				AmmoWheelReskinUnified::VisualTarget::SlotDivider);
+			const float dividerLayoutScale = (std::isfinite(dividerLayout.scale) && dividerLayout.scale > 0.0f)
+				? dividerLayout.scale
+				: 1.0f;
+			const bool applyDividerLayoutToPrimitiveFallback =
+				reskinSystem.IsEnabled() &&
+				(std::fabs(dividerLayoutScale - 1.0f) > 0.001f ||
+				 std::fabs(dividerLayout.offsetX) > 0.001f ||
+				 std::fabs(dividerLayout.offsetY) > 0.001f);
+			auto transformDividerPoint = [&](const ImVec2& pt) -> ImVec2 {
+				if (!applyDividerLayoutToPrimitiveFallback) {
+					return pt;
+				}
+				const float dx = pt.x - wheelCenter.x;
+				const float dy = pt.y - wheelCenter.y;
+				return ImVec2(
+					wheelCenter.x + dx * dividerLayoutScale + dividerLayout.offsetX,
+					wheelCenter.y + dy * dividerLayoutScale + dividerLayout.offsetY);
+			};
+
+			for (int i = 0; i <= numEntries; i++) {
+				float dividerAngle = startAngle + i * slotAngle;
+
+				ImVec2 innerPt = ImVec2(
+					wheelCenter.x + innerRadius * 0.95f * std::cos(dividerAngle),
+					wheelCenter.y + innerRadius * 0.95f * std::sin(dividerAngle)
+				);
+				ImVec2 outerPt = ImVec2(
+					wheelCenter.x + outerRadius * 1.05f * std::cos(dividerAngle),
+					wheelCenter.y + outerRadius * 1.05f * std::sin(dividerAngle)
+				);
+
+				bool drewDivider = false;
+				if (hasDividerReskin) {
+					AmmoWheelReskinUnified::DrawContext dividerCtx{};
+					dividerCtx.center = wheelCenter;
+					dividerCtx.radius = outerRadius * 1.05f;
+					dividerCtx.slotAngleRad = dividerAngle;
+					dividerCtx.alphaMult = dividerReskinAlphaMult;
+					dividerCtx.slotIndex = i;
+					dividerCtx.formID = 0;
+					drewDivider = reskinSystem.DrawTarget(
+						AmmoWheelReskinUnified::VisualTarget::SlotDivider,
+						_ammoEntries[0].reskinEntry,
+						dividerCtx,
+						drawList);
+				}
+
+				if (!drewDivider) {
+					drawList->AddLine(
+						transformDividerPoint(innerPt),
+						transformDividerPoint(outerPt),
+						dividerColor,
+						thickness);
+				}
+			}
+		}
+	};
+
+	auto drawSoftArcLayer = [&](float radius, ImU32 innerColor, float softEdgeRatio) {
+		radius = (std::max)(0.0f, radius);
+		if (radius <= 0.5f) {
+			return;
+		}
+
+		softEdgeRatio = std::clamp(softEdgeRatio, 0.0f, 0.95f);
+		const float solidRadius = radius * (1.0f - softEdgeRatio);
+
+		if (softEdgeRatio <= 0.001f || solidRadius >= radius - 0.5f) {
+			Drawer::draw_arc_gradient(
+				wheelCenter, 0.0f, radius,
+				startAngle, startAngle + arcAngle,
+				startAngle, startAngle + arcAngle,
+				innerColor, innerColor,
+				64, a_drawArgs);
+			return;
+		}
+
+		if (solidRadius > 0.5f) {
+			Drawer::draw_arc_gradient(
+				wheelCenter, 0.0f, solidRadius,
+				startAngle, startAngle + arcAngle,
+				startAngle, startAngle + arcAngle,
+				innerColor, innerColor,
+				64, a_drawArgs);
+		}
+
+		ImVec4 transparentOuter = ImGui::ColorConvertU32ToFloat4(innerColor);
+		transparentOuter.w = 0.0f;
+		ImU32 outerColor = ImGui::ColorConvertFloat4ToU32(transparentOuter);
+		Drawer::draw_arc_gradient(
+			wheelCenter, (std::max)(solidRadius, 0.0f), radius,
+			startAngle, startAngle + arcAngle,
+			startAngle, startAngle + arcAngle,
+			innerColor, outerColor,
+			64, a_drawArgs);
+	};
+
+	// ========== UNIFIED RESKIN: WHEEL BACKDROP (back-most layer) ==========
+	if (reskinSystem.IsEnabled() && !_ammoEntries.empty() && _ammoEntries[0].reskinEntry.preset) {
+		auto drawList = ImGui::GetWindowDrawList();
+		AmmoWheelReskinUnified::DrawContext backdropCtx{};
+		backdropCtx.center = wheelCenter;
+		backdropCtx.radius = outerRadius;
+		backdropCtx.alphaMult = a_drawArgs.alphaMult;
+		backdropCtx.slotAngleRad = 0.0f;  // No rotation for backdrop target
+		backdropCtx.slotIndex = 0;
+		backdropCtx.formID = 0;
+		reskinSystem.DrawTarget(
+			AmmoWheelReskinUnified::VisualTarget::WheelBackdrop,
+			_ammoEntries[0].reskinEntry,
+			backdropCtx,
+			drawList);
+	}
+
+	// When reskin is active, draw divider assets under wheel layers (background and border).
+	const bool drawDividersAsUnderlay =
+		reskinSystem.IsEnabled() && !_ammoEntries.empty() && _ammoEntries[0].reskinEntry.preset;
+	if (drawDividersAsUnderlay) {
+		drawSlotDividers();
+	}
+
+	// ========== UNIFIED RESKIN: WHEEL BACKGROUND ==========
 	bool reskinDrawnWheelBg = false;
 	if (reskinSystem.IsEnabled() && !_ammoEntries.empty() && _ammoEntries[0].reskinEntry.preset) {
 		auto drawList = ImGui::GetWindowDrawList();
@@ -2500,13 +3896,7 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 			ImU32 bgColor = primitives.wheelBackground;
 			uint8_t bgAlpha = static_cast<uint8_t>((bgColor >> 24) * userOpacityMult * a_drawArgs.alphaMult);
 			bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
-			Drawer::draw_arc_gradient(
-				wheelCenter, 0.0f, bgRadius,
-				startAngle, startAngle + arcAngle,
-				startAngle, startAngle + arcAngle,
-				bgColor, bgColor,
-				64, a_drawArgs
-			);
+			drawSoftArcLayer(bgRadius, bgColor, Config::AmmoWheel::BackgroundSoftEdgeRatio);
 		} else if (Config::AmmoWheel::UseSkyrimTheme) {
 			// Skyrim theme: layered arc backgrounds (respects arcAngle)
 			// Apply BackgroundOpacity as multiplier to theme alpha values
@@ -2516,50 +3906,26 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 			uint8_t baseGlowA = static_cast<uint8_t>(glowColor >> 24);
 			uint8_t glowA = static_cast<uint8_t>(baseGlowA * userOpacityMult * a_drawArgs.alphaMult);
 			glowColor = (glowColor & 0x00FFFFFF) | (glowA << 24);
-			Drawer::draw_arc_gradient(
-				wheelCenter, 0.0f, bgRadius * 1.05f,
-				startAngle, startAngle + arcAngle,
-				startAngle, startAngle + arcAngle,
-				glowColor, glowColor,
-				64, a_drawArgs
-			);
+			drawSoftArcLayer(bgRadius * 1.05f, glowColor, Config::AmmoWheel::BackgroundSoftEdgeRatio);
 			
 			// Mid layer
 			ImU32 midColor = Config::AmmoWheel::SkyrimTheme::BgMidLayer;
 			uint8_t baseMidA = static_cast<uint8_t>(midColor >> 24);
 			uint8_t midA = static_cast<uint8_t>(baseMidA * userOpacityMult * a_drawArgs.alphaMult);
 			midColor = (midColor & 0x00FFFFFF) | (midA << 24);
-			Drawer::draw_arc_gradient(
-				wheelCenter, 0.0f, bgRadius,
-				startAngle, startAngle + arcAngle,
-				startAngle, startAngle + arcAngle,
-				midColor, midColor,
-				64, a_drawArgs
-			);
+			drawSoftArcLayer(bgRadius, midColor, Config::AmmoWheel::BackgroundSoftEdgeRatio);
 			
 			// Dark inner layer
 			ImU32 darkColor = Config::AmmoWheel::SkyrimTheme::BgDarkLayer;
 			uint8_t baseDarkA = static_cast<uint8_t>(darkColor >> 24);
 			uint8_t darkA = static_cast<uint8_t>(baseDarkA * userOpacityMult * a_drawArgs.alphaMult);
 			darkColor = (darkColor & 0x00FFFFFF) | (darkA << 24);
-			Drawer::draw_arc_gradient(
-				wheelCenter, 0.0f, bgRadius * 0.95f,
-				startAngle, startAngle + arcAngle,
-				startAngle, startAngle + arcAngle,
-				darkColor, darkColor,
-				64, a_drawArgs
-			);
+			drawSoftArcLayer(bgRadius * 0.95f, darkColor, Config::AmmoWheel::BackgroundSoftEdgeRatio);
 		} else {
 			// Default: simple arc background (respects arcAngle)
 			uint8_t bgAlpha = static_cast<uint8_t>(userOpacityMult * 255.f * a_drawArgs.alphaMult);
 			ImU32 bgColor = IM_COL32(0, 0, 0, bgAlpha);
-			Drawer::draw_arc_gradient(
-				wheelCenter, 0.0f, bgRadius,
-				startAngle, startAngle + arcAngle,
-				startAngle, startAngle + arcAngle,
-				bgColor, bgColor,
-				64, a_drawArgs
-			);
+			drawSoftArcLayer(bgRadius, bgColor, Config::AmmoWheel::BackgroundSoftEdgeRatio);
 		}
 	}
 
@@ -2577,72 +3943,129 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 		
 		float borderInner = outerRadius * innerScale;
 		float borderOuter = outerRadius * outerScale;
+
+		bool drewBorderRing = false;
+		if (reskinSystem.IsEnabled() && !_ammoEntries.empty() && _ammoEntries[0].reskinEntry.preset && borderOuter > 0.0f) {
+			auto drawList = ImGui::GetWindowDrawList();
+			AmmoWheelReskinUnified::DrawContext borderCtx{};
+			borderCtx.center = wheelCenter;
+			borderCtx.radius = borderOuter;
+			borderCtx.slotAngleRad = 0.0f;
+			borderCtx.alphaMult = a_drawArgs.alphaMult;
+			borderCtx.slotIndex = 0;
+			borderCtx.formID = 0;
+			drewBorderRing = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::WheelBorderRing,
+				_ammoEntries[0].reskinEntry,
+				borderCtx,
+				drawList);
+		}
 		
 		// Validate radii are positive and have meaningful thickness
-		if (borderInner > 0.0f && borderOuter > borderInner && (borderOuter - borderInner) >= 1.0f) {
-			ImU32 borderInnerColor, borderOuterColor;
-			// TASK 1: Use border color override if enabled
-			if (Config::AmmoWheel::BorderColorOverrideEnabled) {
-				borderInnerColor = Config::AmmoWheel::BorderColorComputed;
-				// Outer color is slightly darker version of inner
-				uint8_t r = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_R_SHIFT) & 0xFF;
-				uint8_t g = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_G_SHIFT) & 0xFF;
-				uint8_t b = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_B_SHIFT) & 0xFF;
-				uint8_t a = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_A_SHIFT) & 0xFF;
-				borderOuterColor = IM_COL32(r * 3/4, g * 3/4, b * 3/4, a * 3/4);
-			} else if (Config::AmmoWheel::UseSkyrimTheme) {
-				// Skyrim theme: gold/bronze border
-				borderInnerColor = Config::AmmoWheel::SkyrimTheme::BorderGold;
-				borderOuterColor = Config::AmmoWheel::SkyrimTheme::BorderBronze;
+		if (!drewBorderRing) {
+			if (borderInner > 0.0f && borderOuter > borderInner && (borderOuter - borderInner) >= 1.0f) {
+				ImU32 borderInnerColor, borderOuterColor;
+				// TASK 1: Use border color override if enabled
+				if (Config::AmmoWheel::BorderColorOverrideEnabled) {
+					borderInnerColor = Config::AmmoWheel::BorderColorComputed;
+					// Outer color is slightly darker version of inner
+					uint8_t r = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_R_SHIFT) & 0xFF;
+					uint8_t g = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_G_SHIFT) & 0xFF;
+					uint8_t b = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_B_SHIFT) & 0xFF;
+					uint8_t a = (Config::AmmoWheel::BorderColorComputed >> IM_COL32_A_SHIFT) & 0xFF;
+					borderOuterColor = IM_COL32(r * 3 / 4, g * 3 / 4, b * 3 / 4, a * 3 / 4);
+				} else if (Config::AmmoWheel::UseSkyrimTheme) {
+					// Skyrim theme: gold/bronze border
+					borderInnerColor = Config::AmmoWheel::SkyrimTheme::BorderGold;
+					borderOuterColor = Config::AmmoWheel::SkyrimTheme::BorderBronze;
+				} else {
+					// Default border colors
+					borderInnerColor = Config::AmmoWheel::BorderColorInner;
+					borderOuterColor = Config::AmmoWheel::BorderColorOuter;
+				}
+
+				// Apply alpha mult to border colors
+				uint8_t innerA = static_cast<uint8_t>((borderInnerColor >> 24) * a_drawArgs.alphaMult);
+				uint8_t outerA = static_cast<uint8_t>((borderOuterColor >> 24) * a_drawArgs.alphaMult);
+				borderInnerColor = (borderInnerColor & 0x00FFFFFF) | (innerA << 24);
+				borderOuterColor = (borderOuterColor & 0x00FFFFFF) | (outerA << 24);
+
+				// Draw border based on slot shape
+				if (Config::AmmoWheel::SlotShape == 0) {
+					// Arc shape: draw gradient arc
+					Drawer::draw_arc_gradient(
+						wheelCenter, borderInner, borderOuter,
+						startAngle, startAngle + arcAngle,
+						startAngle, startAngle + arcAngle,
+						borderInnerColor, borderOuterColor,
+						64, a_drawArgs
+					);
+				} else {
+					// Non-arc shapes (Circle, Pill, RoundedRect): draw full circle border
+					auto drawList = ImGui::GetWindowDrawList();
+					float borderThickness = borderOuter - borderInner;
+					float borderMidRadius = (borderInner + borderOuter) / 2.0f;
+					drawList->AddCircle(wheelCenter, borderMidRadius, borderInnerColor, 48, borderThickness);
+				}
+
+				// Debug logging for style resolution
+				if (Config::AmmoWheel::DebugLogStyleResolution) {
+					static bool loggedOnce = false;
+					if (!loggedOnce) {
+						logger::info("[AmmoWheel Style] Border ring drawn: innerR={:.1f}, outerR={:.1f}, theme={}",
+							borderInner, borderOuter, Config::AmmoWheel::UseSkyrimTheme ? "Skyrim" : "Default");
+						loggedOnce = true;
+					}
+				}
 			} else {
-				// Default border colors
-				borderInnerColor = Config::AmmoWheel::BorderColorInner;
-				borderOuterColor = Config::AmmoWheel::BorderColorOuter;
-			}
-			
-			// Apply alpha mult to border colors
-			uint8_t innerA = static_cast<uint8_t>((borderInnerColor >> 24) * a_drawArgs.alphaMult);
-			uint8_t outerA = static_cast<uint8_t>((borderOuterColor >> 24) * a_drawArgs.alphaMult);
-			borderInnerColor = (borderInnerColor & 0x00FFFFFF) | (innerA << 24);
-			borderOuterColor = (borderOuterColor & 0x00FFFFFF) | (outerA << 24);
-			
-			// Draw border based on slot shape
-			if (Config::AmmoWheel::SlotShape == 0) {
-				// Arc shape: draw gradient arc
-				Drawer::draw_arc_gradient(
-					wheelCenter, borderInner, borderOuter,
-					startAngle, startAngle + arcAngle,
-					startAngle, startAngle + arcAngle,
-					borderInnerColor, borderOuterColor,
-					64, a_drawArgs
-				);
-			} else {
-				// Non-arc shapes (Circle, Pill, RoundedRect): draw full circle border
-				auto drawList = ImGui::GetWindowDrawList();
-				float borderThickness = borderOuter - borderInner;
-				float borderMidRadius = (borderInner + borderOuter) / 2.0f;
-				drawList->AddCircle(wheelCenter, borderMidRadius, borderInnerColor, 48, borderThickness);
-			}
-			
-			// Debug logging for style resolution
-			if (Config::AmmoWheel::DebugLogStyleResolution) {
-				static bool loggedOnce = false;
-				if (!loggedOnce) {
-					logger::info("[AmmoWheel Style] Border ring drawn: innerR={:.1f}, outerR={:.1f}, theme={}",
-						borderInner, borderOuter, Config::AmmoWheel::UseSkyrimTheme ? "Skyrim" : "Default");
-					loggedOnce = true;
+				// Log warning if border ring cannot be drawn due to invalid geometry
+				if (Config::AmmoWheel::DebugLogStyleResolution) {
+					static bool warnedOnce = false;
+					if (!warnedOnce) {
+						logger::warn("[AmmoWheel Style] Border ring skipped - invalid geometry: innerR={:.1f}, outerR={:.1f}",
+							borderInner, borderOuter);
+						warnedOnce = true;
+					}
 				}
 			}
-		} else {
-			// Log warning if border ring cannot be drawn due to invalid geometry
-			if (Config::AmmoWheel::DebugLogStyleResolution) {
-				static bool warnedOnce = false;
-				if (!warnedOnce) {
-					logger::warn("[AmmoWheel Style] Border ring skipped - invalid geometry: innerR={:.1f}, outerR={:.1f}",
-						borderInner, borderOuter);
-					warnedOnce = true;
-				}
-			}
+		}
+	}
+
+	// Draw center background before slot layers when reskin is active.
+	// This keeps SlotBackground visually above CenterBackground.
+	bool centerBgDrawnUnderSlots = false;
+	if (reskinSystem.IsEnabled() &&
+		Config::AmmoWheel::CenterEnabled &&
+		Config::AmmoWheel::CenterBgEnabled &&
+		_centerPanelCache.valid &&
+		_hoveredIndex >= 0 &&
+		_hoveredIndex < numEntries &&
+		_hoveredIndex < static_cast<int>(_ammoEntries.size())) {
+		const auto& hoveredEntry = _ammoEntries[_hoveredIndex];
+		if (hoveredEntry.reskinEntry.preset) {
+			const auto& cache = _centerPanelCache;
+			ImVec2 panelCenter = cache.panelCenter;
+			panelCenter.x += wheelCenter.x - cache.wheelCenterAtBuild.x;
+			panelCenter.y += wheelCenter.y - cache.wheelCenterAtBuild.y;
+			const float panelWidth = cache.panelWidth;
+			const float panelHeight = cache.panelHeight;
+
+			AmmoWheelReskinUnified::DrawContext centerCtx{};
+			centerCtx.center = panelCenter;
+			centerCtx.radius = 0.5f * (std::max)(panelWidth, panelHeight);
+			centerCtx.slotAngleRad = 0.0f;
+			centerCtx.alphaMult = a_drawArgs.alphaMult;
+			centerCtx.slotIndex = _hoveredIndex;
+			centerCtx.formID = hoveredEntry.ammo ? hoveredEntry.ammo->GetFormID() : 0;
+			centerCtx.hovered = true;
+			centerCtx.selected = false;
+			centerCtx.active = false;
+			centerCtx.progress = 0.0f;
+			centerBgDrawnUnderSlots = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::CenterBackground,
+				hoveredEntry.reskinEntry,
+				centerCtx,
+				ImGui::GetWindowDrawList());
 		}
 	}
 
@@ -2657,48 +4080,82 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 		ImGui::PopID();
 	}
 
-	// ========== ANIMATION: SLOT DIVIDERS ==========
-	// Only draw dividers for arc-shaped slots (radial lines don't make sense for floating shapes)
-	if (Config::AmmoWheel::SlotDividersEnabled && Config::AmmoWheel::SlotShape == 0 && numEntries > 1) {
-		ImU32 dividerColor = Config::AmmoWheel::SlotDividerColor;
-		uint8_t divAlpha = static_cast<uint8_t>((dividerColor >> 24) * a_drawArgs.alphaMult);
-		dividerColor = (dividerColor & 0x00FFFFFF) | (divAlpha << 24);
-		float thickness = Config::AmmoWheel::SlotDividerThickness;
-		
-		for (int i = 0; i <= numEntries; i++) {
-			float dividerAngle = startAngle + i * slotAngle;
-			
-			ImVec2 innerPt = ImVec2(
-				wheelCenter.x + innerRadius * 0.95f * std::cos(dividerAngle),
-				wheelCenter.y + innerRadius * 0.95f * std::sin(dividerAngle)
-			);
-			ImVec2 outerPt = ImVec2(
-				wheelCenter.x + outerRadius * 1.05f * std::cos(dividerAngle),
-				wheelCenter.y + outerRadius * 1.05f * std::sin(dividerAngle)
-			);
-			
-			ImGui::GetWindowDrawList()->AddLine(innerPt, outerPt, dividerColor, thickness);
-		}
+	// Keep legacy draw order for primitive divider lines.
+	if (!drawDividersAsUnderlay) {
+		drawSlotDividers();
 	}
 
 	// Draw highlight for hovered item at center
 	if (_hoveredIndex >= 0 && _hoveredIndex < numEntries) {
-		drawHighlight(wheelCenter, imap, a_drawArgs);
+		drawHighlight(wheelCenter, a_drawArgs, centerBgDrawnUnderSlots);
 	}
 
-	// Draw cursor indicator
-	if (_hoveredIndex >= 0) {
+	// Draw cursor indicator (optional)
+	if (Config::AmmoWheel::ShowCursorIndicator && _hoveredIndex >= 0) {
 		float cursorDist = _cachedTextRadius;
 		ImVec2 cursorTip = ImVec2(
 			wheelCenter.x + cursorDist * std::cos(cursorAngle),
 			wheelCenter.y + cursorDist * std::sin(cursorAngle)
 		);
-		ImU32 cursorColor = IM_COL32(255, 255, 255, static_cast<int>(200 * a_drawArgs.alphaMult));
-		ImGui::GetWindowDrawList()->AddCircleFilled(cursorTip, 5.0f, cursorColor);
+		bool drewCursor = false;
+		if (_hoveredIndex < static_cast<int>(_ammoEntries.size())) {
+			const auto& hoveredEntry = _ammoEntries[_hoveredIndex];
+			if (reskinSystem.IsEnabled() && hoveredEntry.reskinEntry.preset) {
+				AmmoWheelReskinUnified::DrawContext cursorCtx{};
+				cursorCtx.center = cursorTip;
+				cursorCtx.radius = 5.0f;
+				cursorCtx.slotAngleRad = cursorAngle;
+				cursorCtx.alphaMult = a_drawArgs.alphaMult;
+				cursorCtx.slotIndex = _hoveredIndex;
+				cursorCtx.formID = hoveredEntry.ammo ? hoveredEntry.ammo->GetFormID() : 0;
+				cursorCtx.hovered = true;
+				drewCursor = reskinSystem.DrawTarget(
+					AmmoWheelReskinUnified::VisualTarget::CursorIndicator,
+					hoveredEntry.reskinEntry,
+					cursorCtx,
+					ImGui::GetWindowDrawList());
+			}
+		}
+		if (!drewCursor) {
+			ImU32 cursorColor = IM_COL32(255, 255, 255, static_cast<int>(200 * a_drawArgs.alphaMult));
+			ImGui::GetWindowDrawList()->AddCircleFilled(cursorTip, 5.0f, cursorColor);
+		}
 	}
 
 	// Draw hover magnify popup (shows full name and large icon outside wheel)
 	drawHoverPopup(wheelCenter, a_drawArgs);
+
+	if (invStats.shouldLog) {
+		if (Config::AmmoWheel::Debug::LogPerf) {
+			const auto reskinPerf = reskinSystem.ConsumePerfStats();
+			logger::info(
+				"[Perf][AmmoWheel] invRefreshMs={:.2f} invRefreshCount={} damageRebuildMs={:.2f} damageRebuildCount={} labelRebuildMs={:.2f} labelRebuildCount={} centerRebuildMs={:.2f} centerRebuildCount={} reskinDrawTargetMs={:.2f} reskinDrawTargetCalls={} reskinGetTextureMs={:.2f} reskinGetTextureCalls={} texCacheHit={} texCacheMiss={} interval={:.2f}",
+				invStats.lastRefreshMs,
+				invStats.refreshCountThisWindow,
+				_damageRebuildMsAccum,
+				_damageRebuildCount,
+				_labelRebuildMsAccum,
+				_labelRebuildCount,
+				_centerRebuildMsAccum,
+				_centerRebuildCount,
+				reskinPerf.drawTargetMs,
+				reskinPerf.drawTargetCalls,
+				reskinPerf.getTextureMs,
+				reskinPerf.getTextureCalls,
+				reskinPerf.textureCacheHits,
+				reskinPerf.textureCacheMisses,
+				invStats.refreshIntervalSeconds);
+		} else {
+			// Keep counters bounded even when perf logging is disabled.
+			(void)reskinSystem.ConsumePerfStats();
+		}
+		_damageRebuildMsAccum = 0.0;
+		_damageRebuildCount = 0;
+		_labelRebuildMsAccum = 0.0;
+		_labelRebuildCount = 0;
+		_centerRebuildMsAccum = 0.0;
+		_centerRebuildCount = 0;
+	}
 
 	// Optional debug overlay
 	if (Config::AmmoWheel::EnableDebugOverlay) {
@@ -2851,6 +4308,13 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 	
 	// Check if this ammo is currently equipped
 	bool isEquipped = (entry.ammo->GetFormID() != 0 && entry.ammo->GetFormID() == a_equippedAmmoID);
+	auto brightenColor = [](ImU32 color, float strength) -> ImU32 {
+		ImVec4 f = ImGui::ColorConvertU32ToFloat4(color);
+		f.x = (std::min)(f.x * strength, 1.0f);
+		f.y = (std::min)(f.y * strength, 1.0f);
+		f.z = (std::min)(f.z * strength, 1.0f);
+		return ImGui::ColorConvertFloat4ToU32(f);
+	};
 
 	// Shared geometry used by both reskin and legacy paths
 	float midRadius = (a_innerRadius + a_outerRadius) / 2.0f;
@@ -2868,7 +4332,49 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 	const int lowAmmoLayer = Config::AmmoWheel::LowAmmoIndicatorDrawLayer;
 	auto drawLowAmmoAtLayer = [&](int layer) {
 		if (lowAmmoActive && lowAmmoLayer == layer) {
-			drawLowAmmoWarning(a_center, a_innerRadius, a_outerRadius, midAngle, a_drawArgs);
+			bool drewLowAmmo = false;
+			auto& lowAmmoReskin = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+			if (lowAmmoReskin.IsEnabled() && entry.reskinEntry.preset) {
+				const float pulse = static_cast<float>(std::sin(ImGui::GetTime() * 5.0) * 0.5 + 0.5);
+				const bool lowAmmoAssetConfigured = lowAmmoReskin.HasAssetForTarget(
+					AmmoWheelReskinUnified::VisualTarget::LowAmmoIndicator,
+					entry.reskinEntry);
+
+				AmmoWheelReskinUnified::DrawContext lowAmmoCtx{};
+				if (lowAmmoAssetConfigured) {
+					// Reskin mode: keep low-ammo overlay on the same slot-frame axis/size
+					// so it behaves like other slot-cover indicator assets.
+					lowAmmoCtx.center = slotCenter;
+					lowAmmoCtx.radius = (a_outerRadius - a_innerRadius) * 0.5f;
+				} else {
+					// Fallback positioning for legacy tiny marker behavior.
+					const float ringThickness = a_outerRadius - a_innerRadius;
+					const float radiusRatio = std::clamp(Config::AmmoWheel::LowAmmoIndicatorRadiusRatio, 0.0f, 1.0f);
+					const float baseRadius = a_innerRadius + ringThickness * radiusRatio;
+					const float radius = baseRadius + Config::AmmoWheel::LowAmmoIndicatorRadialOffsetPx;
+					const float angle = midAngle + (Config::AmmoWheel::LowAmmoIndicatorAngularOffsetDeg * (IM_PI / 180.0f));
+					lowAmmoCtx.center = ImVec2(
+						a_center.x + radius * std::cos(angle),
+						a_center.y + radius * std::sin(angle));
+					lowAmmoCtx.radius = 8.0f;
+				}
+				lowAmmoCtx.slotAngleRad = midAngle;
+				lowAmmoCtx.alphaMult = a_drawArgs.alphaMult * pulse;
+				lowAmmoCtx.slotIndex = a_index;
+				lowAmmoCtx.formID = entry.ammo ? entry.ammo->GetFormID() : 0;
+				lowAmmoCtx.progress = pulse;
+				lowAmmoCtx.hovered = a_hovered;
+				lowAmmoCtx.selected = isEquipped;
+				lowAmmoCtx.active = false;
+				drewLowAmmo = lowAmmoReskin.DrawTarget(
+					AmmoWheelReskinUnified::VisualTarget::LowAmmoIndicator,
+					entry.reskinEntry,
+					lowAmmoCtx,
+					ImGui::GetWindowDrawList());
+			}
+			if (!drewLowAmmo) {
+				drawLowAmmoWarning(a_center, a_innerRadius, a_outerRadius, midAngle, a_drawArgs);
+			}
 		}
 	};
 
@@ -2879,7 +4385,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		&& preset->PresetId != "Default";
 
 	// Reuse the standard indicator geometry in both reskin and legacy paths.
-	auto drawStandardIndicators = [&](ImDrawList* indicatorList) {
+	auto drawStandardIndicators = [&](ImDrawList* indicatorList, bool drawSelected = true, bool drawHovered = true) {
 		// ========== DATA-DRIVEN INDICATORS ==========
 		// For arc shapes, use arc indicators. For non-arc shapes, use shape-appropriate indicators.
 		if (Config::AmmoWheel::SlotShape == 0) {
@@ -2898,7 +4404,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 				const auto& selInd = preset->Selected;
 				const auto& hovInd = preset->Hovered;
 				
-				if (isEquipped && Config::AmmoWheel::Skin::EnableSelectedIndicator && selInd.Enabled) {
+				if (drawSelected && isEquipped && Config::AmmoWheel::Skin::EnableSelectedIndicator && selInd.Enabled) {
 					float radius = a_outerRadius + selInd.RadiusOffsetPx;
 					float startOff = selInd.StartAngleOffsetDeg * (IM_PI / 180.0f);
 					float sweepRad = (selInd.SweepDeg > 0.0f) 
@@ -2938,7 +4444,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 				}
 				
 				// TASK 3: Hover indicator - no blink, just show if hovered
-				if (a_hovered && Config::AmmoWheel::Skin::EnableHoveredIndicator && hovInd.Enabled) {
+				if (drawHovered && a_hovered && Config::AmmoWheel::Skin::EnableHoveredIndicator && hovInd.Enabled) {
 					float radius = a_outerRadius + hovInd.RadiusOffsetPx;
 					float startOff = hovInd.StartAngleOffsetDeg * (IM_PI / 180.0f);
 					float sweepRad = (hovInd.SweepDeg > 0.0f) 
@@ -2953,7 +4459,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 			} else {
 				using namespace Config::AmmoWheel::Skin;
 				
-				if (isEquipped && EnableSelectedIndicator && SelectedEnabled) {
+				if (drawSelected && isEquipped && EnableSelectedIndicator && SelectedEnabled) {
 					float radius = a_outerRadius + SelectedRadiusOffsetPx;
 					float startOff = SelectedStartAngleOffsetDeg * (IM_PI / 180.0f);
 					float sweepRad = (SelectedSweepDeg > 0.0f) 
@@ -2992,7 +4498,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 					}
 				}
 				
-				if (a_hovered && EnableHoveredIndicator && HoveredEnabled) {
+				if (drawHovered && a_hovered && EnableHoveredIndicator && HoveredEnabled) {
 					float radius = a_outerRadius + HoveredRadiusOffsetPx;
 					float startOff = HoveredStartAngleOffsetDeg * (IM_PI / 180.0f);
 					float sweepRad = (HoveredSweepDeg > 0.0f) 
@@ -3032,7 +4538,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 			selColor = (selColor & 0x00FFFFFF) | (selA << 24);
 			
 			// Selected indicator for non-arc shapes
-			if (isEquipped && EnableSelectedIndicator && selEnabled) {
+			if (drawSelected && isEquipped && EnableSelectedIndicator && selEnabled) {
 				float offset = 3.0f * Config::AmmoWheel::SelectedIndicatorSizeScale;  // Indicator offset from shape edge
 				
 				switch (Config::AmmoWheel::SlotShape) {
@@ -3086,32 +4592,107 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		ctx.formID = entry.ammo->GetFormID();
 		ctx.hovered = a_hovered;
 		ctx.selected = isEquipped;
+		ctx.maxFitSizePx = 0.0f;
 		
 		// Get primitive fallback colors
 		const auto& primitives = entry.reskinEntry.preset->primitives;
-		
+		const auto& slotBackgroundAsset = entry.reskinEntry.preset->assets[static_cast<size_t>(AmmoWheelReskinUnified::VisualTarget::SlotBackground)];
+		const bool slotBackgroundAssetConfigured =
+			slotBackgroundAsset.enabled &&
+			!slotBackgroundAsset.usePrimitive &&
+			slotBackgroundAsset.type != AmmoWheelReskinUnified::AssetType::None;
+		const bool selectedIndicatorAssetConfigured =
+			reskinSystem.HasAssetForTarget(AmmoWheelReskinUnified::VisualTarget::IndicatorSelected, entry.reskinEntry);
+		const bool hoveredIndicatorAssetConfigured =
+			reskinSystem.HasAssetForTarget(AmmoWheelReskinUnified::VisualTarget::IndicatorHovered, entry.reskinEntry);
+
+		auto drawSlotBackgroundShade = [&]() {
+			const float shadeOpacity = std::clamp(Config::AmmoWheel::SlotBackgroundShadeOpacity, 0.0f, 1.0f);
+			if (shadeOpacity <= 0.001f) {
+				return;
+			}
+
+			constexpr float shadeInsetPx = 2.0f;
+			const ImU32 shadeArcColor = IM_COL32(0, 0, 0, static_cast<int>(shadeOpacity * 255.0f));
+			const ImU32 shadeSolidColor = IM_COL32(0, 0, 0, static_cast<int>(shadeOpacity * 255.0f * a_drawArgs.alphaMult));
+
+			switch (Config::AmmoWheel::SlotShape) {
+			case 0:  // Arc
+			{
+				const float shadedInner = a_innerRadius + shadeInsetPx;
+				const float shadedOuter = (std::max)(shadedInner + 1.0f, a_outerRadius - shadeInsetPx);
+				Drawer::draw_arc_gradient(
+					a_center,
+					shadedInner,
+					shadedOuter,
+					drawStartAngle,
+					drawEndAngle,
+					drawStartAngle,
+					drawEndAngle,
+					shadeArcColor,
+					shadeArcColor,
+					32,
+					a_drawArgs);
+			}
+			break;
+			case 1:  // Rounded Rectangle
+			{
+				const float rectWidth = (std::max)(8.0f, slotArcLength * 0.85f - shadeInsetPx * 2.0f);
+				const float rectHeight = (std::max)(8.0f, slotWidth - shadeInsetPx * 2.0f);
+				const float cornerRadius = (std::max)(0.0f, Config::AmmoWheel::SlotCornerRadius - shadeInsetPx);
+				drawList->AddRectFilled(
+					ImVec2(shapeCenterX - rectWidth * 0.5f, shapeCenterY - rectHeight * 0.5f),
+					ImVec2(shapeCenterX + rectWidth * 0.5f, shapeCenterY + rectHeight * 0.5f),
+					shadeSolidColor,
+					cornerRadius);
+			}
+			break;
+			case 2:  // Pill
+			{
+				const float pillRadius = (std::max)(4.0f, slotWidth * 0.5f - shadeInsetPx);
+				const float pillLength = (std::max)(8.0f, slotArcLength * 0.7f - shadeInsetPx * 2.0f);
+				drawList->AddRectFilled(
+					ImVec2(shapeCenterX - pillLength * 0.5f, shapeCenterY - pillRadius),
+					ImVec2(shapeCenterX + pillLength * 0.5f, shapeCenterY + pillRadius),
+					shadeSolidColor,
+					pillRadius);
+			}
+			break;
+			case 3:  // Circle
+			{
+				const float circleRadius = (std::max)(4.0f, (std::min)(slotWidth, slotArcLength * 0.5f) * 0.85f - shadeInsetPx);
+				drawList->AddCircleFilled(ImVec2(shapeCenterX, shapeCenterY), circleRadius, shadeSolidColor, 24);
+			}
+			break;
+			}
+		};
+
+		// Draw slot shade first so SlotBackground asset remains fully visible above it.
+		if (slotBackgroundAssetConfigured && Config::AmmoWheel::SlotBackgroundShadeEnabled) {
+			drawSlotBackgroundShade();
+		}
+
 		// Draw slot background (try asset first, fallback to primitive)
 		bool backgroundDrawn = reskinSystem.DrawTarget(AmmoWheelReskinUnified::VisualTarget::SlotBackground, entry.reskinEntry, ctx, drawList);
 		// Draw slot frame early so indicators are always above background PNGs.
 		reskinSystem.DrawTarget(AmmoWheelReskinUnified::VisualTarget::SlotFrame, entry.reskinEntry, ctx, drawList);
+		ctx.maxFitSizePx = 0.0f;
 		
 		if (!backgroundDrawn) {
 			// Primitive fallback: respect SlotShape setting
-			ImU32 colorBegin = a_hovered ? primitives.slotHoveredInner : primitives.slotUnhoveredInner;
-			ImU32 colorEnd = a_hovered ? primitives.slotHoveredOuter : primitives.slotUnhoveredOuter;
-			
-			// ========== APPLY HOVER BRIGHTNESS (Config setting) ==========
-			if (a_hovered && Config::AmmoWheel::HoverBrightnessEnabled) {
-				float strength = Config::AmmoWheel::HoverBrightnessStrength;
-				auto brighten = [strength](ImU32 color) -> ImU32 {
-					ImVec4 f = ImGui::ColorConvertU32ToFloat4(color);
-					f.x = (std::min)(f.x * strength, 1.0f);
-					f.y = (std::min)(f.y * strength, 1.0f);
-					f.z = (std::min)(f.z * strength, 1.0f);
-					return ImGui::ColorConvertFloat4ToU32(f);
-				};
-				colorBegin = brighten(colorBegin);
-				colorEnd = brighten(colorEnd);
+			ImU32 colorBegin;
+			ImU32 colorEnd;
+			if (a_hovered) {
+				colorBegin = primitives.slotHoveredInner;
+				colorEnd = primitives.slotHoveredOuter;
+				if (Config::AmmoWheel::HoverBrightnessEnabled) {
+					const float strength = Config::AmmoWheel::HoverBrightnessStrength;
+					colorBegin = brightenColor(colorBegin, strength);
+					colorEnd = brightenColor(colorEnd, strength);
+				}
+			} else {
+				colorBegin = primitives.slotUnhoveredInner;
+				colorEnd = primitives.slotUnhoveredOuter;
 			}
 			
 			// ========== APPLY SELECTED BLINK (Config setting) ==========
@@ -3121,15 +4702,8 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 				float blinkT = 0.5f + 0.5f * blinkPhase;
 				float blinkStrength = 1.0f + Config::AmmoWheel::SelectedSlotBlinkStrength * blinkT;
 				
-				auto brightenBlink = [blinkStrength](ImU32 color) -> ImU32 {
-					ImVec4 f = ImGui::ColorConvertU32ToFloat4(color);
-					f.x = (std::min)(f.x * blinkStrength, 1.0f);
-					f.y = (std::min)(f.y * blinkStrength, 1.0f);
-					f.z = (std::min)(f.z * blinkStrength, 1.0f);
-					return ImGui::ColorConvertFloat4ToU32(f);
-				};
-				colorBegin = brightenBlink(colorBegin);
-				colorEnd = brightenBlink(colorEnd);
+				colorBegin = brightenColor(colorBegin, blinkStrength);
+				colorEnd = brightenColor(colorEnd, blinkStrength);
 			}
 			
 			// Convert to solid color for non-arc shapes
@@ -3174,18 +4748,22 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 			break;
 			}
 		}
-		
-		// Highlight overlay for PNG backgrounds (hover/selected tint)
-		if (backgroundDrawn && (a_hovered || isEquipped)) {
+
+		// Highlight overlay for PNG backgrounds (hover/selected tint).
+		// If dedicated indicator assets are configured, do not also draw primitive-style
+		// selected/hovered overlays on top; otherwise both visuals stack and look wrong.
+		const bool allowSelectedOverlay = isEquipped && !selectedIndicatorAssetConfigured;
+		const bool allowHoveredOverlay = a_hovered && !hoveredIndicatorAssetConfigured;
+		if (backgroundDrawn && (allowHoveredOverlay || allowSelectedOverlay)) {
 			ImU32 highlightBegin;
 			ImU32 highlightEnd;
 			
 			// Match legacy slot color selection logic
 			if (usePresetStyling && preset) {
-				if (isEquipped) {
+				if (allowSelectedOverlay) {
 					highlightBegin = preset->SelectedColorBegin;
 					highlightEnd = preset->SelectedColorEnd;
-				} else if (a_hovered) {
+				} else if (allowHoveredOverlay) {
 					highlightBegin = preset->HoveredColorBegin;
 					highlightEnd = preset->HoveredColorEnd;
 				} else {
@@ -3194,38 +4772,30 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 				}
 			} else if (Config::AmmoWheel::UseSkyrimTheme) {
 				using namespace Config::AmmoWheel::SkyrimTheme;
-				highlightBegin = a_hovered ? SlotHoveredInner : SlotUnhoveredInner;
-				highlightEnd = a_hovered ? SlotHoveredOuter : SlotUnhoveredOuter;
+				highlightBegin = allowHoveredOverlay ? SlotHoveredInner : SlotUnhoveredInner;
+				highlightEnd = allowHoveredOverlay ? SlotHoveredOuter : SlotUnhoveredOuter;
 			} else if (Config::AmmoWheel::UseMainWheelTheme) {
 				using namespace Config::Styling::Wheel;
-				highlightBegin = a_hovered ? HoveredColorBegin : UnhoveredColorBegin;
-				highlightEnd = a_hovered ? HoveredColorEnd : UnhoveredColorEnd;
+				highlightBegin = allowHoveredOverlay ? HoveredColorBegin : UnhoveredColorBegin;
+				highlightEnd = allowHoveredOverlay ? HoveredColorEnd : UnhoveredColorEnd;
 			} else {
-				highlightBegin = a_hovered ? Config::AmmoWheel::HoveredColorBegin : Config::AmmoWheel::UnhoveredColorBegin;
-				highlightEnd = a_hovered ? Config::AmmoWheel::HoveredColorEnd : Config::AmmoWheel::UnhoveredColorEnd;
+				highlightBegin = allowHoveredOverlay ? Config::AmmoWheel::HoveredColorBegin : Config::AmmoWheel::UnhoveredColorBegin;
+				highlightEnd = allowHoveredOverlay ? Config::AmmoWheel::HoveredColorEnd : Config::AmmoWheel::UnhoveredColorEnd;
 			}
 			
-			auto brighten = [](ImU32 color, float strength) -> ImU32 {
-				ImVec4 f = ImGui::ColorConvertU32ToFloat4(color);
-				f.x = (std::min)(f.x * strength, 1.0f);
-				f.y = (std::min)(f.y * strength, 1.0f);
-				f.z = (std::min)(f.z * strength, 1.0f);
-				return ImGui::ColorConvertFloat4ToU32(f);
-			};
-			
-			if (a_hovered && Config::AmmoWheel::HoverBrightnessEnabled) {
+			if (allowHoveredOverlay && Config::AmmoWheel::HoverBrightnessEnabled) {
 				float strength = Config::AmmoWheel::HoverBrightnessStrength;
-				highlightBegin = brighten(highlightBegin, strength);
-				highlightEnd = brighten(highlightEnd, strength);
+				highlightBegin = brightenColor(highlightBegin, strength);
+				highlightEnd = brightenColor(highlightEnd, strength);
 			}
 			
-			if (isEquipped && Config::AmmoWheel::SelectedBlinkEnabled) {
+			if (allowSelectedOverlay && Config::AmmoWheel::SelectedBlinkEnabled) {
 				float time = static_cast<float>(ImGui::GetTime());
 				float blinkPhase = std::sin(time * Config::AmmoWheel::SelectedBlinkSpeedHz * 2.0f * 3.14159f);
 				float blinkT = 0.5f + 0.5f * blinkPhase;
 				float blinkStrength = 1.0f + Config::AmmoWheel::SelectedSlotBlinkStrength * blinkT;
-				highlightBegin = brighten(highlightBegin, blinkStrength);
-				highlightEnd = brighten(highlightEnd, blinkStrength);
+				highlightBegin = brightenColor(highlightBegin, blinkStrength);
+				highlightEnd = brightenColor(highlightEnd, blinkStrength);
 			}
 			
 			const float overlayAlphaScale = 0.35f;
@@ -3284,8 +4854,66 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		}
 		
 		// ========== DRAW INDICATORS ON TOP OF BACKGROUND ==========
-		// Hybrid pipeline: PNG background + standard geometry indicators + icon/text.
-		drawStandardIndicators(drawList);
+		// Deterministic indicator layering for reskin assets: charge -> active -> selected -> hovered.
+		const bool selectedState = isEquipped;
+		const bool hoveredState = a_hovered;
+		const bool selectedEnabled = Config::AmmoWheel::Skin::EnableSelectedIndicator;
+		const bool hoveredEnabled = Config::AmmoWheel::Skin::EnableHoveredIndicator;
+		const bool activeEnabled = Config::AmmoWheel::Skin::EnableActiveIndicator;
+		const bool chargeEnabled = Config::AmmoWheel::Skin::EnableChargeIndicator;
+
+		float indicatorProgress = 0.0f;
+		const bool hasRTUCharge = Config::AmmoWheel::UseRTUSystem && a_hovered && (Config::AmmoWheel::RTUHoverDelay > 0.0f);
+		if (hasRTUCharge) {
+			indicatorProgress = std::clamp(_hoveredTime / Config::AmmoWheel::RTUHoverDelay, 0.0f, 1.0f);
+		}
+		const bool chargeState = hasRTUCharge && indicatorProgress < 1.0f;
+		const bool activeState = hasRTUCharge && indicatorProgress >= 1.0f;
+
+		AmmoWheelReskinUnified::DrawContext indicatorCtx{};
+		// Reskin indicators should be slot-anchored so custom overlay assets can
+		// fully cover the hovered/selected slot instead of sticking to wheel center.
+		indicatorCtx.center = ctx.center;
+		indicatorCtx.radius = ctx.radius;
+		indicatorCtx.slotAngleRad = midAngle;
+		indicatorCtx.alphaMult = a_drawArgs.alphaMult;
+		indicatorCtx.slotIndex = a_index;
+		indicatorCtx.formID = entry.ammo ? entry.ammo->GetFormID() : 0;
+		indicatorCtx.hovered = hoveredState;
+		indicatorCtx.selected = selectedState;
+		indicatorCtx.progress = indicatorProgress;
+		indicatorCtx.active = activeState;
+		// Keep indicator fit behavior consistent with SlotBackground/CenterPanelFrame:
+		// do not cap by tangential arc span, otherwise wide indicator SVG assets
+		// stay too small even at high scale.
+		indicatorCtx.maxFitSizePx = 0.0f;
+
+		bool drewSelected = false;
+		bool drewHovered = false;
+		bool drewCharge = false;
+		bool drewActive = false;
+
+		if (chargeEnabled && chargeState) {
+			drewCharge = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::IndicatorCharge, entry.reskinEntry, indicatorCtx, drawList);
+		}
+		if (activeEnabled && activeState) {
+			drewActive = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::IndicatorActive, entry.reskinEntry, indicatorCtx, drawList);
+		}
+		if (selectedEnabled && selectedState) {
+			drewSelected = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::IndicatorSelected, entry.reskinEntry, indicatorCtx, drawList);
+		}
+		if (hoveredEnabled && hoveredState) {
+			drewHovered = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::IndicatorHovered, entry.reskinEntry, indicatorCtx, drawList);
+		}
+
+		// Geometry fallback is per-indicator so missing assets do not disable the existing behavior.
+		drawStandardIndicators(drawList, !drewSelected, !drewHovered);
+		(void)drewCharge;
+		(void)drewActive;
 		drawLowAmmoAtLayer(0);
 		
 		// Draw slot icon (try asset first, fallback to legacy icon system)
@@ -3316,227 +4944,135 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 			reskinSystem.DrawTarget(AmmoWheelReskinUnified::VisualTarget::Popup, entry.reskinEntry, ctx, drawList);
 		}
 		
-		// Text rendering - use label layout system even with reskin enabled
-		if (Config::AmmoWheel::LabelShow) {
-			// Use the same label layout system as legacy path
-			float baseFontSize = Config::AmmoWheel::NameFontPx * Config::AmmoWheel::NameTextScale;
-			float textSize = baseFontSize;
-			const char* originalName = entry.ammo->GetName();
-			
-			// Apply label truncation if enabled
-			std::string displayName = originalName;
-			if (Config::AmmoWheel::LabelTruncateLength > 0 && strlen(originalName) > static_cast<size_t>(Config::AmmoWheel::LabelTruncateLength)) {
-				if (Config::AmmoWheel::LabelAbbreviate) {
-					// Simple abbreviation - just truncate and add "..."
-					displayName = std::string(originalName).substr(0, Config::AmmoWheel::LabelTruncateLength - 3) + "...";
-				} else {
-					displayName = std::string(originalName).substr(0, Config::AmmoWheel::LabelTruncateLength);
-				}
-			}
-			
-			// ========== AUTO-WIDTH COMPUTATION ==========
-			float availWidth = 0.0f;
-			float margin = Config::AmmoWheel::NameMarginPx;
-			float padding = Config::AmmoWheel::NamePanelPaddingPx;
-			
-			// Determine label side based on wheel position
-			ImVec2 viewportSize = ResolutionScale::Context::GetSingleton().GetRenderSize();
-			bool labelOnLeft = (a_center.x > viewportSize.x * 0.5f);
-			
-			if (Config::AmmoWheel::NameLayoutMode > 0) {
-				// New layout modes: compute available width from screen space
-				if (labelOnLeft) {
-					availWidth = a_center.x - margin - padding;
-				} else {
-					availWidth = viewportSize.x - a_center.x - margin - padding;
-				}
-				
-				// Apply max width cap if configured
-				if (Config::AmmoWheel::NameMaxWidthPx > 0.0f) {
-					availWidth = (std::min)(availWidth, Config::AmmoWheel::NameMaxWidthPx);
-				}
-				
-				// Ensure minimum width
-				availWidth = (std::max)(availWidth, 60.0f);
-			} else {
-				// Legacy mode: use slot arc-based width
-				float slotArcLength = (a_endAngle - a_startAngle) * _cachedTextRadius;
-				availWidth = slotArcLength * Config::AmmoWheel::LabelMaxSlotArcRatio;
-				availWidth = (std::max)(availWidth, 60.0f);
-			}
-			
-			// ========== LAYOUT MODE PROCESSING ==========
-			TextLayout layout;
-			int maxLines = Config::AmmoWheel::NameMaxLines;
-			
-			switch (Config::AmmoWheel::NameLayoutMode) {
-				case 0: // LegacyEllipsis - original behavior
-				{
-					// Calculate normalized slot position for legacy multi-line logic
-					float normalizedU = std::cos(midAngle);
-					float absU = std::abs(normalizedU);
-					
-					int legacyMaxLines = 1;
-					if (Config::AmmoWheel::LabelMultiLine) {
-						if (absU >= 0.70f) legacyMaxLines = 3;
-						else if (absU >= 0.35f) legacyMaxLines = 2;
-					}
-					
-					layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, legacyMaxLines);
-				}
-				break;
-				case 1: // Wrap
-					layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, maxLines);
-					break;
-				case 2: // ShrinkToFit
-				{
-					ImFont* font = ImGui::GetFont();
-					if (font) {
-						ImVec2 size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, displayName.c_str());
-						float minFont = Config::AmmoWheel::NameMinFontPx;
-						
-						while (size.x > availWidth && textSize > minFont) {
-							textSize -= 1.0f;
-							size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, displayName.c_str());
-						}
-					}
-					layout.lines.push_back(displayName);
-				}
-				break;
-				case 3: // Hybrid
-				{
-					// Try wrapping first
-					layout = wrapTextForSlot(displayName.c_str(), availWidth, textSize, maxLines);
-					
-					// If last line still too wide, try shrinking font
-					if (!layout.lines.empty()) {
-						ImFont* font = ImGui::GetFont();
-						if (font) {
-							ImVec2 lastLineSize = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, layout.lines.back().c_str());
-							
-							if (lastLineSize.x > availWidth) {
-								// Try shrinking font
-								float minFont = Config::AmmoWheel::NameMinFontPx;
-								float trySize = textSize;
-								
-								while (trySize > minFont) {
-									trySize -= 1.0f;
-									ImVec2 testSize = font->CalcTextSizeA(trySize, FLT_MAX, 0.0f, layout.lines.back().c_str());
-									if (testSize.x <= availWidth) {
-										textSize = trySize;
-										break;
-									}
-								}
-							}
-						}
-					}
-				}
-				break;
-			}
-			
-			// ========== POSITION CALCULATION ==========
-			ImVec2 textCenter = ImVec2(a_center.x + _cachedTextRadius * std::cos(midAngle),
+		// Text rendering - use cached per-entry label layout
+		if (Config::AmmoWheel::LabelShow && entry.labelLayoutValid && entry.labelUsesReskinPathCached) {
+			const auto& layout = entry.labelLayoutCached;
+			const float baseTextSize = entry.labelFontSizeCached;
+			const float baseLineSpacing = entry.labelLineSpacingCached;
+			const float baseTotalTextHeight = entry.labelTotalTextHeightCached;
+			const float baseClipHalfWidth = entry.labelClipHalfWidthCached;
+			const float baseClipHalfHeight = entry.labelClipHalfHeightCached;
+			const float bgHalfWidth = entry.labelBgHalfWidthCached;
+			const float namePadding = Config::AmmoWheel::NamePanelPaddingPx;
+
+			ImVec2 panelCenter = ImVec2(a_center.x + _cachedTextRadius * std::cos(midAngle),
 				a_center.y + _cachedTextRadius * std::sin(midAngle));
+			ImVec2 textCenter = panelCenter;
+
+			float textScale = 1.0f;
+			float textOpacity = 1.0f;
+			if (reskinSystem.IsEnabled() && entry.reskinEntry.preset) {
+				const auto textOverride = reskinSystem.GetLayoutOverrideSnapshot(
+					AmmoWheelReskinUnified::VisualTarget::SlotLabelText);
+
+				if (std::isfinite(textOverride.scale) && textOverride.scale > 0.0f) {
+					textScale = std::clamp(textOverride.scale, 0.1f, 6.0f);
+				}
+				if (std::isfinite(textOverride.opacity)) {
+					textOpacity = std::clamp(textOverride.opacity, 0.0f, 1.0f);
+				}
+
+				textCenter.x += textOverride.offsetX;
+				textCenter.y += textOverride.offsetY;
+
+				const float basisAngle = midAngle + textOverride.angleOffsetDeg * (IM_PI / 180.0f);
+				if (std::fabs(textOverride.offsetRadial) > 0.001f || std::fabs(textOverride.offsetTangential) > 0.001f) {
+					const float cosA = std::cos(basisAngle);
+					const float sinA = std::sin(basisAngle);
+					textCenter.x += cosA * textOverride.offsetRadial - sinA * textOverride.offsetTangential;
+					textCenter.y += sinA * textOverride.offsetRadial + cosA * textOverride.offsetTangential;
+				}
+			}
+
+			const float textSize = baseTextSize * textScale;
+			const float lineSpacing = baseLineSpacing * textScale;
+			const float totalTextHeight = baseTotalTextHeight * textScale;
+			const float clipHalfWidth = baseClipHalfWidth * textScale;
+			const float clipHalfHeight = baseClipHalfHeight * textScale;
+
+			DrawArgs textDrawArgs = a_drawArgs;
+			textDrawArgs.alphaMult *= textOpacity;
+
 			float textX = textCenter.x;
 			float textY = textCenter.y;
-			float lineSpacing = textSize + Config::AmmoWheel::NameLineSpacingPx;
-			float totalTextHeight = layout.lines.size() * lineSpacing;
-			
 			if (Config::AmmoWheel::ShowAmmoCount) {
 				textY -= totalTextHeight * 0.5f + Config::AmmoWheel::CountFontSize * 0.5f;
 			} else {
 				textY -= totalTextHeight * 0.5f;
 			}
-			
-			// ========== CLIP RECT CALCULATION ==========
-			float clipHalfWidth, clipHalfHeight;
-			if (Config::AmmoWheel::NameLayoutMode > 0) {
-				// New modes: use full available width for clipping
-				clipHalfWidth = availWidth * 0.55f;
-				clipHalfHeight = totalTextHeight + padding;
+
+			float panelTextY = panelCenter.y;
+			if (Config::AmmoWheel::ShowAmmoCount) {
+				panelTextY -= baseTotalTextHeight * 0.5f + Config::AmmoWheel::CountFontSize * 0.5f;
 			} else {
-				// Legacy mode: use slot-based clipping
-				clipHalfWidth = availWidth * 0.5f;
-				clipHalfHeight = totalTextHeight * 0.5f;
+				panelTextY -= baseTotalTextHeight * 0.5f;
 			}
-			
+
 			ImVec2 clipMin(textCenter.x - clipHalfWidth, textY - clipHalfHeight);
 			ImVec2 clipMax(textCenter.x + clipHalfWidth, textY + totalTextHeight + clipHalfHeight);
-			
 			ImGui::GetWindowDrawList()->PushClipRect(clipMin, clipMax, true);
-			
-			// ========== TEXT BACKGROUND PANEL ==========
+
 			if (Config::AmmoWheel::NameTextBgEnabled && !layout.lines.empty()) {
-				// Calculate text block width bounded by availWidth and NameMaxWidthPx
-				float maxLineWidth = 0.0f;
-				ImFont* font = ImGui::GetFont();
-				if (font) {
-					for (const auto& line : layout.lines) {
-						ImVec2 size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, line.c_str());
-						maxLineWidth = (std::max)(maxLineWidth, size.x);
-					}
-				}
-				float bgWidth = maxLineWidth + Config::AmmoWheel::NameTextBgExtraPaddingPx * 2.0f + padding * 2.0f;
-				// Respect NameMaxWidthPx clamp if provided
-				if (Config::AmmoWheel::NameMaxWidthPx > 0.0f) {
-					bgWidth = (std::min)(bgWidth, Config::AmmoWheel::NameMaxWidthPx);
-				}
-				// Also cap by computed availWidth (screen-based)
-				bgWidth = (std::min)(bgWidth, availWidth + padding * 2.0f);
-				float bgHalfWidth = bgWidth * 0.5f;
-				
-				float bgPadding = Config::AmmoWheel::NameTextBgExtraPaddingPx + padding;
+				float bgPadding = Config::AmmoWheel::NameTextBgExtraPaddingPx + namePadding;
 				float bgInset = Config::AmmoWheel::NameTextBgInsetPx;
-				
-				float bgLeft = textX - bgHalfWidth - bgInset;
-				float bgRight = textX + bgHalfWidth + bgInset;
-				float bgTop = textY - bgPadding;
-				float bgBottom = textY + totalTextHeight + bgPadding;
-				
-				// Calculate background color with opacity (use configured dark color)
-				ImU32 bgColor = Config::AmmoWheel::NameTextBgColor;
-				uint8_t bgAlpha = static_cast<uint8_t>((bgColor >> 24) * Config::AmmoWheel::NameTextBgOpacity * a_drawArgs.alphaMult);
-				bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
-				
-				ImGui::GetWindowDrawList()->AddRectFilled(
-					ImVec2(bgLeft, bgTop),
-					ImVec2(bgRight, bgBottom),
-					bgColor,
-					Config::AmmoWheel::NameTextBgCornerRounding
-				);
+				float bgLeft = panelCenter.x - bgHalfWidth - bgInset;
+				float bgRight = panelCenter.x + bgHalfWidth + bgInset;
+				float bgTop = panelTextY - bgPadding;
+				float bgBottom = panelTextY + baseTotalTextHeight + bgPadding;
+
+				bool drewNamePanelBg = false;
+				if (reskinSystem.IsEnabled() && entry.reskinEntry.preset) {
+					AmmoWheelReskinUnified::DrawContext nameBgCtx{};
+					nameBgCtx.center = ImVec2((bgLeft + bgRight) * 0.5f, (bgTop + bgBottom) * 0.5f);
+					nameBgCtx.radius = 0.5f * (std::max)(bgRight - bgLeft, bgBottom - bgTop);
+					nameBgCtx.slotAngleRad = 0.0f;
+					nameBgCtx.alphaMult = a_drawArgs.alphaMult * Config::AmmoWheel::NameTextBgOpacity;
+					nameBgCtx.slotIndex = a_index;
+					nameBgCtx.formID = entry.ammo ? entry.ammo->GetFormID() : 0;
+					drewNamePanelBg = reskinSystem.DrawTarget(
+						AmmoWheelReskinUnified::VisualTarget::NamePanelBackground,
+						entry.reskinEntry,
+						nameBgCtx,
+						drawList);
+				}
+
+				if (!drewNamePanelBg) {
+					ImU32 bgColor = Config::AmmoWheel::NameTextBgColor;
+					uint8_t bgAlpha = static_cast<uint8_t>((bgColor >> 24) * Config::AmmoWheel::NameTextBgOpacity * a_drawArgs.alphaMult);
+					bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
+
+					drawList->AddRectFilled(
+						ImVec2(bgLeft, bgTop),
+						ImVec2(bgRight, bgBottom),
+						bgColor,
+						Config::AmmoWheel::NameTextBgCornerRounding);
+				}
 			}
-			
-			// ========== TEXT RENDERING ==========
-			// Use color override if enabled, otherwise fall back to primitive color
+
 			ImU32 textColor;
-			if (a_hovered && Config::AmmoWheel::ArrowLabelColorOverrideEnabled) {
+			const bool emphasizeLabelColor = a_hovered || isEquipped;
+			if (emphasizeLabelColor && Config::AmmoWheel::ArrowLabelColorOverrideEnabled) {
 				textColor = Config::AmmoWheel::ArrowLabelColorComputed;
 			} else if (Config::AmmoWheel::SlotLabelColorOverrideEnabled) {
 				textColor = Config::AmmoWheel::SlotLabelColorComputed;
 			} else {
 				textColor = primitives.textPrimary;
 			}
-			uint8_t textAlpha = static_cast<uint32_t>((textColor >> 24) * a_drawArgs.alphaMult);
+			uint8_t textAlpha = static_cast<uint32_t>((textColor >> 24) * textDrawArgs.alphaMult);
 			textColor = (textColor & 0x00FFFFFF) | (textAlpha << 24);
-			
-			// Draw each line
-			for (size_t i = 0; i < layout.lines.size(); i++) {
-				float lineY = textY + i * lineSpacing;
-				
-				// Text shadow (Skyrim-style)
+
+			for (size_t lineIdx = 0; lineIdx < layout.lines.size(); lineIdx++) {
+				float lineY = textY + static_cast<float>(lineIdx) * lineSpacing;
 				if (Config::AmmoWheel::TextShadowEnabled) {
 					ImU32 shadowColor = primitives.textShadow;
-					uint8_t shadowAlpha = static_cast<uint32_t>((shadowColor >> 24) * a_drawArgs.alphaMult);
+					uint8_t shadowAlpha = static_cast<uint32_t>((shadowColor >> 24) * textDrawArgs.alphaMult);
 					shadowColor = (shadowColor & 0x00FFFFFF) | (shadowAlpha << 24);
-					
 					float shadowOffset = Config::AmmoWheel::TextShadowOffset;
-					Drawer::draw_text(textX + shadowOffset, lineY + shadowOffset, layout.lines[i].c_str(), shadowColor, textSize, a_drawArgs);
+					Drawer::draw_text(textX + shadowOffset, lineY + shadowOffset, layout.lines[lineIdx].c_str(), shadowColor, textSize, textDrawArgs);
 				}
-				
-				// Main text
-				Drawer::draw_text(textX, lineY, layout.lines[i].c_str(), textColor, textSize, a_drawArgs);
+				Drawer::draw_text(textX, lineY, layout.lines[lineIdx].c_str(), textColor, textSize, textDrawArgs);
 			}
-			
+
 			ImGui::GetWindowDrawList()->PopClipRect();
 		}
 		
@@ -3544,7 +5080,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		if (Config::AmmoWheel::ShowAmmoCount) {
 			ImVec2 countCenter = ImVec2(a_center.x + _cachedCountRadius * std::cos(midAngle),
 				a_center.y + _cachedCountRadius * std::sin(midAngle));
-			drawAmmoCount(countCenter, entry.count, a_drawArgs);
+			drawAmmoCount(countCenter, entry.count, a_drawArgs, &entry.reskinEntry, midAngle);
 		}
 
 		drawLowAmmoAtLayer(2);
@@ -3578,6 +5114,11 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		} else if (a_hovered) {
 			colorBegin = preset->HoveredColorBegin;
 			colorEnd = preset->HoveredColorEnd;
+			if (Config::AmmoWheel::HoverBrightnessEnabled) {
+				const float strength = Config::AmmoWheel::HoverBrightnessStrength;
+				colorBegin = brightenColor(colorBegin, strength);
+				colorEnd = brightenColor(colorEnd, strength);
+			}
 		} else {
 			colorBegin = preset->UnhoveredColorBegin;
 			colorEnd = preset->UnhoveredColorEnd;
@@ -3605,35 +5146,16 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		// Use AmmoWheel-specific theme (blue theme)
 		colorBegin = a_hovered ? Config::AmmoWheel::HoveredColorBegin : Config::AmmoWheel::UnhoveredColorBegin;
 		colorEnd = a_hovered ? Config::AmmoWheel::HoveredColorEnd : Config::AmmoWheel::UnhoveredColorEnd;
+		if (a_hovered && Config::AmmoWheel::HoverBrightnessEnabled) {
+			const float strength = Config::AmmoWheel::HoverBrightnessStrength;
+			colorBegin = brightenColor(colorBegin, strength);
+			colorEnd = brightenColor(colorEnd, strength);
+		}
 		activeArcBegin = Config::AmmoWheel::ActiveArcColorBegin;
 		activeArcEnd = Config::AmmoWheel::ActiveArcColorEnd;
 		activeArcWidth = 8.0f;  // Default width for AmmoWheel theme
 	}
 
-	// ========== TASK 3: HOVER BRIGHTNESS + SELECTED BLINK ==========
-	// Apply hover brightness (no blink, just brighten)
-	if (a_hovered && Config::AmmoWheel::HoverBrightnessEnabled) {
-		float strength = Config::AmmoWheel::HoverBrightnessStrength;
-		ImU32 colorBefore = colorBegin;  // Debug
-		auto brighten = [strength](ImU32 color) -> ImU32 {
-			ImVec4 f = ImGui::ColorConvertU32ToFloat4(color);
-			f.x = (std::min)(f.x * strength, 1.0f);
-			f.y = (std::min)(f.y * strength, 1.0f);
-			f.z = (std::min)(f.z * strength, 1.0f);
-			return ImGui::ColorConvertFloat4ToU32(f);
-		};
-		colorBegin = brighten(colorBegin);
-		colorEnd = brighten(colorEnd);
-		
-		// Debug: log once per session when hover brightness is applied
-		static bool loggedHoverBrightness = false;
-		if (!loggedHoverBrightness) {
-			logger::info("[AmmoWheel] HoverBrightness APPLIED: strength={:.2f}, colorBefore=0x{:08X}, colorAfter=0x{:08X}",
-				strength, colorBefore, colorBegin);
-			loggedHoverBrightness = true;
-		}
-	}
-	
 	// Apply selected slot blink (brightness pulse)
 	if (isEquipped && Config::AmmoWheel::SelectedBlinkEnabled) {
 		float time = static_cast<float>(ImGui::GetTime());
@@ -3641,23 +5163,8 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		float blinkT = 0.5f + 0.5f * blinkPhase;  // 0 to 1
 		float blinkStrength = 1.0f + Config::AmmoWheel::SelectedSlotBlinkStrength * blinkT;
 		
-		auto brightenBlink = [blinkStrength](ImU32 color) -> ImU32 {
-			ImVec4 f = ImGui::ColorConvertU32ToFloat4(color);
-			f.x = (std::min)(f.x * blinkStrength, 1.0f);
-			f.y = (std::min)(f.y * blinkStrength, 1.0f);
-			f.z = (std::min)(f.z * blinkStrength, 1.0f);
-			return ImGui::ColorConvertFloat4ToU32(f);
-		};
-		colorBegin = brightenBlink(colorBegin);
-		colorEnd = brightenBlink(colorEnd);
-		
-		// Debug: log once per session when selected blink is applied
-		static bool loggedSelectedBlink = false;
-		if (!loggedSelectedBlink) {
-			logger::info("[AmmoWheel] SelectedBlink APPLIED: speed={:.1f}Hz, blinkStrength={:.2f}",
-				Config::AmmoWheel::SelectedBlinkSpeedHz, Config::AmmoWheel::SelectedSlotBlinkStrength);
-			loggedSelectedBlink = true;
-		}
+		colorBegin = brightenColor(colorBegin, blinkStrength);
+		colorEnd = brightenColor(colorEnd, blinkStrength);
 	}
 	
 	// ========== SLOT SHAPE RENDERING ==========
@@ -3984,227 +5491,67 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 	}
 	drawLowAmmoAtLayer(1);
 
-	// Text/Label Rendering with new layout system
-	if (Config::AmmoWheel::LabelShow) {
-		float baseFontSize = Config::AmmoWheel::NameFontPx * Config::AmmoWheel::NameTextScale;
-		float textSize = baseFontSize;
-		const char* originalName = entry.ammo->GetName();
-		
-		// Get screen dimensions for auto-width computation
+	// Text/Label Rendering with cached layout
+	if (Config::AmmoWheel::LabelShow && entry.labelLayoutValid && !entry.labelUsesReskinPathCached) {
+		const auto& layout = entry.labelLayoutCached;
+		const float textSize = entry.labelFontSizeCached;
+		const float availWidth = entry.labelAvailWidthCached;
+		const float lineSpacing = entry.labelLineSpacingCached;
+		const float totalTextHeight = entry.labelTotalTextHeightCached;
+		const float clipHalfWidth = entry.labelClipHalfWidthCached;
+		const float clipHalfHeight = entry.labelClipHalfHeightCached;
+		const float namePadding = Config::AmmoWheel::NamePanelPaddingPx;
 		ImVec2 screenSize = ResolutionScale::Context::GetSingleton().GetRenderSize();
-		float wheelCenterX = a_center.x;
-		float wheelCenterY = a_center.y;
-		float wheelOuterRadius = Config::AmmoWheel::WheelRadius;
-		
-		// Compute wheel bounding box
-		float wheelLeft = wheelCenterX - wheelOuterRadius;
-		float wheelRight = wheelCenterX + wheelOuterRadius;
-		float wheelTop = wheelCenterY - wheelOuterRadius;
-		float wheelBottom = wheelCenterY + wheelOuterRadius;
-		
-		// ========== AUTO-WIDTH COMPUTATION ==========
-		float availWidth = 0.0f;
-		float margin = Config::AmmoWheel::NameMarginPx;
-		float padding = Config::AmmoWheel::NamePanelPaddingPx;
-		
-		// Determine label side based on wheel position
-		bool labelOnLeft = (wheelCenterX > screenSize.x * 0.5f);
-		
-		if (Config::AmmoWheel::NameLayoutMode > 0) {
-			// New layout modes: compute available width from screen space
-			if (labelOnLeft) {
-				availWidth = wheelLeft - margin - padding;
-			} else {
-				availWidth = screenSize.x - wheelRight - margin - padding;
-			}
-			
-			// Apply max width cap if configured
-			if (Config::AmmoWheel::NameMaxWidthPx > 0.0f) {
-				availWidth = (std::min)(availWidth, Config::AmmoWheel::NameMaxWidthPx);
-			}
-			
-			// Ensure minimum width
-			availWidth = (std::max)(availWidth, 120.0f);
-		} else {
-			// Legacy mode: use slot arc-based width
-			float slotArcLength = (a_endAngle - a_startAngle) * _cachedTextRadius;
-			availWidth = slotArcLength * Config::AmmoWheel::LabelMaxSlotArcRatio;
-			availWidth = (std::max)(availWidth, 60.0f);
-		}
-		
-		// ========== LAYOUT MODE PROCESSING ==========
-		TextLayout layout;
-		int maxLines = Config::AmmoWheel::NameMaxLines;
-		
-		switch (Config::AmmoWheel::NameLayoutMode) {
-			case 0: // LegacyEllipsis - original behavior
-			{
-				// Calculate normalized slot position for legacy multi-line logic
-				float arcSpan = getArcAngleRad();
-				float arcStart = getStartAngleRad();
-				float arcMidAngle = arcStart + arcSpan * 0.5f;
-				float slotAngle = (a_startAngle + a_endAngle) * 0.5f;
-				float u = 0.0f;
-				if (arcSpan > 0.01f) {
-					u = (slotAngle - arcMidAngle) / (arcSpan * 0.5f);
-					u = std::clamp(u, -1.0f, 1.0f);
-				}
-				float absU = std::abs(u);
-				
-				int legacyMaxLines = 1;
-				if (Config::AmmoWheel::LabelMultiLine) {
-					if (absU >= 0.70f) legacyMaxLines = 3;
-					else if (absU >= 0.35f) legacyMaxLines = 2;
-				}
-				layout = wrapTextForSlot(originalName, availWidth, textSize, legacyMaxLines);
-				break;
-			}
-			
-			case 1: // Wrap - multi-line wrapping with full available width
-			{
-				layout = wrapTextForSlot(originalName, availWidth, textSize, maxLines);
-				break;
-			}
-			
-			case 2: // ShrinkToFit - reduce font size to fit on single line
-			{
-				ImFont* font = ImGui::GetFont();
-				if (font) {
-					ImVec2 size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, originalName);
-					float minFont = Config::AmmoWheel::NameMinFontPx;
-					
-					while (size.x > availWidth && textSize > minFont) {
-						textSize -= 1.0f;
-						size = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, originalName);
-					}
-					
-					if (size.x <= availWidth) {
-						layout.lines.push_back(originalName);
-					} else {
-						// Still too long at min font - apply ellipsis
-						layout.lines.push_back(TruncateTextToFit(originalName, availWidth, textSize));
-					}
-				} else {
-					layout.lines.push_back(originalName);
-				}
-				layout.totalHeight = textSize * 1.2f;
-				break;
-			}
-			
-			case 3: // Hybrid - try wrap first, then shrink if needed
-			{
-				layout = wrapTextForSlot(originalName, availWidth, textSize, maxLines);
-				
-				// Check if last line overflows
-				ImFont* font = ImGui::GetFont();
-				if (font && !layout.lines.empty()) {
-					ImVec2 lastLineSize = font->CalcTextSizeA(textSize, FLT_MAX, 0.0f, layout.lines.back().c_str());
-					
-					if (lastLineSize.x > availWidth) {
-						// Try shrinking font
-						float minFont = Config::AmmoWheel::NameMinFontPx;
-						float trySize = textSize;
-						
-						while (trySize > minFont) {
-							trySize -= 1.0f;
-							TextLayout tryLayout = wrapTextForSlot(originalName, availWidth, trySize, maxLines);
-							
-							bool allFit = true;
-							for (const auto& line : tryLayout.lines) {
-								ImVec2 lineSize = font->CalcTextSizeA(trySize, FLT_MAX, 0.0f, line.c_str());
-								if (lineSize.x > availWidth) {
-									allFit = false;
-									break;
-								}
-							}
-							
-							if (allFit) {
-								textSize = trySize;
-								layout = tryLayout;
-								break;
-							}
-						}
-					}
-				}
-				layout.totalHeight = layout.lines.size() * textSize * (1.0f + Config::AmmoWheel::NameLineSpacingPx / textSize);
-				break;
-			}
-		}
-		
-		// ========== POSITION CALCULATION ==========
+		const float wheelOuterRadius = Config::AmmoWheel::WheelRadius;
+		const float wheelLeft = a_center.x - wheelOuterRadius;
+		const float wheelRight = a_center.x + wheelOuterRadius;
+		const float wheelTop = a_center.y - wheelOuterRadius;
+		const float wheelBottom = a_center.y + wheelOuterRadius;
+
 		float textX = textCenter.x;
 		float textY = textCenter.y;
-		float lineSpacing = textSize + Config::AmmoWheel::NameLineSpacingPx;
-		float totalTextHeight = layout.lines.size() * lineSpacing;
-		
 		if (Config::AmmoWheel::ShowAmmoCount) {
 			textY -= (totalTextHeight * 0.3f);
 		}
 		float lineStartY = textY - totalTextHeight * 0.5f + textSize * 0.5f;
-		
-		// ========== CLIP RECT CALCULATION ==========
-		float clipHalfWidth, clipHalfHeight;
-		if (Config::AmmoWheel::NameLayoutMode > 0) {
-			// New modes: use full available width for clipping
-			clipHalfWidth = availWidth * 0.55f;
-			clipHalfHeight = totalTextHeight + padding;
-		} else {
-			// Legacy mode: original clip rect
-			clipHalfWidth = availWidth * 0.6f;
-			clipHalfHeight = totalTextHeight * 0.8f;
-		}
-		
+
 		ImVec2 clipMin(textCenter.x - clipHalfWidth, textCenter.y - clipHalfHeight);
 		ImVec2 clipMax(textCenter.x + clipHalfWidth, textCenter.y + clipHalfHeight);
-		
-		// ========== TEXT BACKGROUND PANEL ==========
+
 		if (Config::AmmoWheel::NameTextBgEnabled && !layout.lines.empty()) {
-			// Calculate text block bounding rect
-			float bgPadding = Config::AmmoWheel::NameTextBgExtraPaddingPx + padding;
+			float bgPadding = Config::AmmoWheel::NameTextBgExtraPaddingPx + namePadding;
 			float bgInset = Config::AmmoWheel::NameTextBgInsetPx;
-			
 			float bgLeft = textX - clipHalfWidth - bgPadding;
 			float bgRight = textX + clipHalfWidth + bgPadding;
 			float bgTop = lineStartY - textSize * 0.5f - bgPadding;
 			float bgBottom = lineStartY + totalTextHeight - textSize * 0.5f + bgPadding;
-			
-			// Apply inset from screen edges
 			bgLeft = (std::max)(bgLeft, bgInset);
 			bgRight = (std::min)(bgRight, screenSize.x - bgInset);
 			bgTop = (std::max)(bgTop, bgInset);
 			bgBottom = (std::min)(bgBottom, screenSize.y - bgInset);
-			
-			// Calculate background color with opacity
+
 			ImU32 bgColor = Config::AmmoWheel::NameTextBgColor;
 			uint8_t bgAlpha = static_cast<uint8_t>((bgColor >> 24) * Config::AmmoWheel::NameTextBgOpacity * a_drawArgs.alphaMult);
 			bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
-			
 			ImGui::GetWindowDrawList()->AddRectFilled(
 				ImVec2(bgLeft, bgTop),
 				ImVec2(bgRight, bgBottom),
 				bgColor,
-				Config::AmmoWheel::NameTextBgCornerRounding
-			);
+				Config::AmmoWheel::NameTextBgCornerRounding);
 		}
-		
-		// ========== DEBUG VISUALIZATION ==========
+
 		if (Config::AmmoWheel::DebugDrawTextRects) {
 			ImDrawList* dl = ImGui::GetWindowDrawList();
-			// Clip rect (red)
 			dl->AddRect(clipMin, clipMax, IM_COL32(255, 0, 0, 180), 0.0f, 0, 1.0f);
-			// Available width line (green)
 			float wrapLineX = textX + availWidth * 0.5f;
 			dl->AddLine(ImVec2(wrapLineX, clipMin.y), ImVec2(wrapLineX, clipMax.y), IM_COL32(0, 255, 0, 180), 1.0f);
-			// Wheel bbox (blue)
 			dl->AddRect(ImVec2(wheelLeft, wheelTop), ImVec2(wheelRight, wheelBottom), IM_COL32(0, 0, 255, 100), 0.0f, 0, 1.0f);
 		}
-		
+
 		ImGui::GetWindowDrawList()->PushClipRect(clipMin, clipMax, true);
-		
-		// ========== DRAW TEXT LINES ==========
-		// TASK 1: Use color override if enabled, otherwise fall back to theme/default
 		ImU32 textColor;
-		if (a_hovered && Config::AmmoWheel::ArrowLabelColorOverrideEnabled) {
+		const bool emphasizeLabelColor = a_hovered || isEquipped;
+		if (emphasizeLabelColor && Config::AmmoWheel::ArrowLabelColorOverrideEnabled) {
 			textColor = Config::AmmoWheel::ArrowLabelColorComputed;
 		} else if (Config::AmmoWheel::SlotLabelColorOverrideEnabled) {
 			textColor = Config::AmmoWheel::SlotLabelColorComputed;
@@ -4213,42 +5560,36 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 		} else {
 			textColor = Config::AmmoWheel::NameTextColor;
 		}
-		// Apply alpha mult
 		uint8_t textAlpha = static_cast<uint8_t>((textColor >> 24) * a_drawArgs.alphaMult);
 		textColor = (textColor & 0x00FFFFFF) | (textAlpha << 24);
-		
-		for (size_t i = 0; i < layout.lines.size(); i++) {
-			float lineY = lineStartY + i * lineSpacing;
-			
-			// Text shadow
+
+		for (size_t lineIdx = 0; lineIdx < layout.lines.size(); lineIdx++) {
+			float lineY = lineStartY + static_cast<float>(lineIdx) * lineSpacing;
 			if (Config::AmmoWheel::TextShadowEnabled) {
 				uint8_t shadowAlpha = static_cast<uint8_t>(Config::AmmoWheel::TextShadowAlpha * a_drawArgs.alphaMult);
 				ImU32 shadowColor = IM_COL32(0, 0, 0, shadowAlpha);
 				float offset = Config::AmmoWheel::TextShadowOffset;
-				Drawer::draw_text(textX + offset, lineY + offset, layout.lines[i].c_str(), shadowColor, textSize, a_drawArgs);
+				Drawer::draw_text(textX + offset, lineY + offset, layout.lines[lineIdx].c_str(), shadowColor, textSize, a_drawArgs);
 			}
-			
-			// Hover glow
+
 			if (a_hovered && Config::AmmoWheel::TextHoverGlowEnabled) {
-				ImU32 glowColor = Config::AmmoWheel::UseSkyrimTheme 
-					? Config::AmmoWheel::SkyrimTheme::HighlightGold 
+				ImU32 glowColor = Config::AmmoWheel::UseSkyrimTheme
+					? Config::AmmoWheel::SkyrimTheme::HighlightGold
 					: Config::AmmoWheel::TextHoverGlowColor;
 				uint8_t glowAlpha = static_cast<uint8_t>((glowColor >> 24) * a_drawArgs.alphaMult);
 				glowColor = (glowColor & 0x00FFFFFF) | (glowAlpha << 24);
-				Drawer::draw_text(textX, lineY, layout.lines[i].c_str(), glowColor, textSize * 1.02f, a_drawArgs);
+				Drawer::draw_text(textX, lineY, layout.lines[lineIdx].c_str(), glowColor, textSize * 1.02f, a_drawArgs);
 			}
-			
-			// TASK 2: Faux-bold rendering (draw text multiple times with offset)
+
 			if (Config::AmmoWheel::NameBoldEnabled && Config::AmmoWheel::NameBoldMode == 1) {
 				float boldOffset = Config::AmmoWheel::NameBoldStrengthPx;
-				Drawer::draw_text(textX + boldOffset, lineY, layout.lines[i].c_str(), textColor, textSize, a_drawArgs);
-				Drawer::draw_text(textX, lineY + boldOffset, layout.lines[i].c_str(), textColor, textSize, a_drawArgs);
+				Drawer::draw_text(textX + boldOffset, lineY, layout.lines[lineIdx].c_str(), textColor, textSize, a_drawArgs);
+				Drawer::draw_text(textX, lineY + boldOffset, layout.lines[lineIdx].c_str(), textColor, textSize, a_drawArgs);
 			}
-			
-			// Main text
-			Drawer::draw_text(textX, lineY, layout.lines[i].c_str(), textColor, textSize, a_drawArgs);
+
+			Drawer::draw_text(textX, lineY, layout.lines[lineIdx].c_str(), textColor, textSize, a_drawArgs);
 		}
-		
+
 		ImGui::GetWindowDrawList()->PopClipRect();
 	}
 
@@ -4258,281 +5599,99 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 			a_center.x + _cachedCountRadius * std::cos(midAngle),
 			a_center.y + _cachedCountRadius * std::sin(midAngle)
 		);
-		drawAmmoCount(countCenter, entry.count, a_drawArgs);
+		drawAmmoCount(countCenter, entry.count, a_drawArgs, nullptr, midAngle);
 	}
 
 	drawLowAmmoAtLayer(2);
 }
 
-void AmmoWheel::drawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
+void AmmoWheel::drawHighlight(ImVec2 a_center, DrawArgs a_drawArgs, bool a_centerBgAlreadyDrawn)
 {
-	if (!Config::AmmoWheel::CenterEnabled) {
+	if (!Config::AmmoWheel::CenterEnabled || !_centerPanelCache.valid) {
 		return;
 	}
-	
 	if (_hoveredIndex < 0 || _hoveredIndex >= static_cast<int>(_ammoEntries.size())) {
 		return;
 	}
+	const auto& entry = _ammoEntries[_hoveredIndex];
 
-	auto& entry = _ammoEntries[_hoveredIndex];
-	if (!entry.ammo) {
+	const auto& cache = _centerPanelCache;
+	if (cache.textLines.empty() && cache.descriptionLines.empty()) {
 		return;
 	}
 
-	// TASK 2: Use adaptive center panel position (or fixed offset)
-	ImVec2 panelCenter;
-	if (Config::AmmoWheel::CenterPanelPositionMode == 1) {
-		// Fixed offset mode
-		panelCenter = ImVec2(a_center.x + Config::AmmoWheel::CenterPanelOffsetX,
-		                     a_center.y + Config::AmmoWheel::CenterPanelOffsetY);
-	} else {
-		// Auto inside arc mode
-		panelCenter = calculateCenterPanelPosition(a_center);
+	ImVec2 panelCenter = cache.panelCenter;
+	panelCenter.x += a_center.x - cache.wheelCenterAtBuild.x;
+	panelCenter.y += a_center.y - cache.wheelCenterAtBuild.y;
+	const float panelWidth = cache.panelWidth;
+	const float panelHeight = cache.panelHeight;
+	const float padding = cache.padding;
+	const float lineSpacing = cache.lineSpacing;
+
+	ImVec2 bgMin = ImVec2(panelCenter.x - panelWidth * 0.5f, panelCenter.y - panelHeight * 0.5f);
+	ImVec2 bgMax = ImVec2(panelCenter.x + panelWidth * 0.5f, panelCenter.y + panelHeight * 0.5f);
+
+	int shapeType = Config::AmmoWheel::CenterPanelShapeIndex;
+	if (shapeType == 0) {
+		const float arcSpan = getArcAngleRad();
+		shapeType = (arcSpan >= 2.0f * IM_PI * 0.9f) ? 2 : 3;
 	}
 
-	// Use configured font sizes with min/max clamping
-	float nameFontSize = std::clamp(Config::AmmoWheel::CenterFontPx * 1.2f, 
-	                                 Config::AmmoWheel::CenterTextMinFontSize,
-	                                 Config::AmmoWheel::CenterTextMaxFontSize);
-	float infoFontSize = std::clamp(Config::AmmoWheel::CenterFontPx,
-	                                 Config::AmmoWheel::CenterTextMinFontSize,
-	                                 Config::AmmoWheel::CenterTextMaxFontSize);
-	float lineSpacing = Config::AmmoWheel::CenterLineSpacingPx;
-	float padding = Config::AmmoWheel::CenterPaddingPx;
-	
-	// ========== DAMAGE-ONLY HIGHLIGHT: Compute max damage across all entries ==========
-	float maxDamage = 0.0f;
-	int entriesWithMaxDamage = 0;
-	constexpr float DAMAGE_EPSILON = 0.01f;  // Tolerance for floating-point comparison
-	
-	// Debug: Log all entries if enabled
-	if (Config::AmmoWheel::Debug::LogCentralPanel) {
-		static bool loggedScan = false;
-		static int lastHoveredForScan = -1;
-		if (_hoveredIndex != lastHoveredForScan) {
-			loggedScan = false;
-			lastHoveredForScan = _hoveredIndex;
-		}
-		if (!loggedScan) {
-			logger::info("[CentralPanel] === Scanning {} entries for maxDamage ===", _ammoEntries.size());
-			loggedScan = true;
-		}
-	}
-	
-	for (const auto& e : _ammoEntries) {
-		if (!e.ammo) continue;
-		float dmg = e.ammo->data.damage;
-		if (a_imap.contains(e.ammo)) {
-			RE::InventoryEntryData* invEntry = a_imap.find(e.ammo)->second.second.get();
-			dmg = RE::PlayerCharacter::GetSingleton()->GetDamage(invEntry);
-		}
-		
-		// Debug: Log each entry's damage
-		if (Config::AmmoWheel::Debug::LogCentralPanel) {
-			static bool loggedScan = false;
-			static int lastHoveredForScan = -1;
-			if (_hoveredIndex != lastHoveredForScan) {
-				loggedScan = false;
-				lastHoveredForScan = _hoveredIndex;
-			}
-			if (!loggedScan) {
-				logger::info("[CentralPanel]   {} | Type: {} | Damage: {:.2f}",
-					e.ammo->GetName(),
-					e.ammo->IsBolt() ? "Bolt" : "Arrow",
-					dmg);
-			}
-		}
-		
-		if (dmg > maxDamage + DAMAGE_EPSILON) {
-			maxDamage = dmg;
-			entriesWithMaxDamage = 1;
-		} else if (std::abs(dmg - maxDamage) <= DAMAGE_EPSILON) {
-			entriesWithMaxDamage++;
-		}
-	}
-	
-	// ========== PHASE 3: BUILD TEXT LINES FROM FIELD CONFIG ==========
-	std::vector<std::pair<std::string, float>> textLines;  // {text, fontSize}
-	std::vector<bool> isDamageLine;  // Track which lines are damage lines
-	
-	// Calculate damage for current entry
-	float damage = entry.ammo->data.damage;
-	if (a_imap.contains(entry.ammo)) {
-		RE::InventoryEntryData* invEntry = a_imap.find(entry.ammo)->second.second.get();
-		damage = RE::PlayerCharacter::GetSingleton()->GetDamage(invEntry);
-	}
-	
-	// Determine if this entry should have highlighted damage (with epsilon tolerance)
-	bool shouldHighlightDamage = (std::abs(damage - maxDamage) <= DAMAGE_EPSILON && maxDamage > 0.0f);
-	
-	// Debug logging (once per panel refresh)
-	if (Config::AmmoWheel::Debug::LogCentralPanel) {
-		static bool loggedThisRefresh = false;
-		static int lastHoveredIndex = -1;
-		if (_hoveredIndex != lastHoveredIndex) {
-			loggedThisRefresh = false;
-			lastHoveredIndex = _hoveredIndex;
-		}
-		if (!loggedThisRefresh) {
-			logger::info("[CentralPanel] Hovered: {} | Type: {} | Damage: {:.0f} | MaxDamage: {:.0f} | Highlight: {} | TiedEntries: {}",
-				entry.ammo->GetName(),
-				entry.ammo->IsBolt() ? "Bolt" : "Arrow",
-				damage,
-				maxDamage,
-				shouldHighlightDamage,
-				entriesWithMaxDamage);
-			loggedThisRefresh = true;
-		}
-	}
-	
-	// Determine ammo type
-	std::string ammoType = entry.ammo->IsBolt() ? "Bolt" : "Arrow";
-	
-	// Determine source (Vanilla vs Modded)
-	std::string source = "Vanilla";
-	if (entry.ammo) {
-		auto* file = entry.ammo->GetFile(0);
-		if (file) {
-			std::string filename(file->GetFilename());
-			// Base game plugins
-			if (filename != "Skyrim.esm" && filename != "Update.esm" && 
-			    filename != "Dawnguard.esm" && filename != "HearthFires.esm" && 
-			    filename != "Dragonborn.esm") {
-				source = filename;  // Show mod name
-			}
-		}
-	}
-	
-	// Build lines based on field toggles and order
-	// Parse order string: "Name,Damage,Type,Count,Source"
-	std::string orderStr = Config::AmmoWheel::CenterFields::Order;
-	std::vector<std::string> fieldOrder;
-	{
-		size_t pos = 0;
-		while ((pos = orderStr.find(',')) != std::string::npos) {
-			std::string field = orderStr.substr(0, pos);
-			if (!field.empty()) fieldOrder.push_back(field);
-			orderStr.erase(0, pos + 1);
-		}
-		if (!orderStr.empty()) fieldOrder.push_back(orderStr);
-	}
-	
-	// Add fields in configured order
-	for (const auto& field : fieldOrder) {
-		if (field == "Name" && Config::AmmoWheel::CenterFields::ShowName) {
-			// PHASE 1: Use word wrapping for long ammo names
-			if (Config::AmmoWheel::EnableWordWrap) {
-				TextLayout wrappedName = wrapTextForCenterPanel(entry.ammo->GetName(), nameFontSize, panelCenter);
-				for (const auto& line : wrappedName.lines) {
-					textLines.push_back({line, nameFontSize});
-					isDamageLine.push_back(false);
-				}
-			} else {
-				textLines.push_back({entry.ammo->GetName(), nameFontSize});
-				isDamageLine.push_back(false);
-			}
-		} else if (field == "Damage" && Config::AmmoWheel::CenterFields::ShowDamage) {
-			textLines.push_back({fmt::format("Damage: {:.0f}", damage), infoFontSize});
-			isDamageLine.push_back(true);  // Mark as damage line
-		} else if (field == "Type" && Config::AmmoWheel::CenterFields::ShowType) {
-			textLines.push_back({fmt::format("Type: {}", ammoType), infoFontSize});
-			isDamageLine.push_back(false);
-		} else if (field == "Count" && Config::AmmoWheel::CenterFields::ShowCount) {
-			textLines.push_back({fmt::format("Count: {}", entry.count), infoFontSize});
-			isDamageLine.push_back(false);
-		} else if (field == "Source" && Config::AmmoWheel::CenterFields::ShowSource) {
-			textLines.push_back({fmt::format("Source: {}", source), infoFontSize});
-			isDamageLine.push_back(false);
-		}
-	}
-	
-	// Fallback if no fields configured
-	if (textLines.empty()) {
-		if (Config::AmmoWheel::EnableWordWrap) {
-			TextLayout wrappedName = wrapTextForCenterPanel(entry.ammo->GetName(), nameFontSize, panelCenter);
-			for (const auto& line : wrappedName.lines) {
-				textLines.push_back({line, nameFontSize});
-				isDamageLine.push_back(false);
-			}
-		} else {
-			textLines.push_back({entry.ammo->GetName(), nameFontSize});
-			isDamageLine.push_back(false);
-		}
-	}
-	
-	// Calculate total height and max width
-	float totalHeight = padding * 2;
-	float maxTextWidth = 0.0f;
-	for (size_t i = 0; i < textLines.size(); i++) {
-		totalHeight += textLines[i].second;
-		if (i > 0) totalHeight += lineSpacing;
-		
-		// Measure text width
-		ImVec2 textSize = ImGui::CalcTextSize(textLines[i].first.c_str());
-		float scaledWidth = textSize.x * (textLines[i].second / ImGui::GetFontSize());
-		maxTextWidth = (std::max)(maxTextWidth, scaledWidth);
-	}
-	
-	float panelWidth = (std::min)(maxTextWidth + padding * 2, 
-	                            _cachedInnerRadius * Config::AmmoWheel::CenterMaxWidthRatio * 2.0f);
-	float panelHeight = totalHeight;
-	
-	// TASK 2: Clamp to screen if enabled
-	if (Config::AmmoWheel::CenterPanelClampToScreen) {
-		ImVec2 viewport = ResolutionScale::Context::GetSingleton().GetRenderSize();
-		float margin = Config::AmmoWheel::CenterPanelSafeMargin;
-		panelCenter.x = std::clamp(panelCenter.x, margin + panelWidth / 2.0f, viewport.x - margin - panelWidth / 2.0f);
-		panelCenter.y = std::clamp(panelCenter.y, margin + panelHeight / 2.0f, viewport.y - margin - panelHeight / 2.0f);
-	}
-	
-	// Calculate bounds
-	ImVec2 bgMin = ImVec2(panelCenter.x - panelWidth / 2.0f, panelCenter.y - panelHeight / 2.0f);
-	ImVec2 bgMax = ImVec2(panelCenter.x + panelWidth / 2.0f, panelCenter.y + panelHeight / 2.0f);
-	
-	// TASK 2: Draw shape-specific background
-	if (Config::AmmoWheel::CenterBgEnabled) {
-		float bgAlpha = Config::AmmoWheel::CenterBgOpacity * a_drawArgs.alphaMult;
-		ImU32 bgColor = IM_COL32(0, 0, 0, static_cast<int>(bgAlpha * 255));
+	if (Config::AmmoWheel::CenterBgEnabled && !a_centerBgAlreadyDrawn) {
 		auto* drawList = ImGui::GetWindowDrawList();
-		
-		// Determine shape: 0=Auto, 1=Rectangle, 2=Circle, 3=RoundedRect
-		int shapeType = Config::AmmoWheel::CenterPanelShapeIndex;
-		if (shapeType == 0) {
-			// Auto: match wheel geometry
-			float arcSpan = getArcAngleRad();
-			if (arcSpan >= 2.0f * IM_PI * 0.9f) {
-				shapeType = 2;  // Full circle -> Circle panel
-			} else {
-				shapeType = 3;  // Partial arc -> RoundedRect
+		bool drewCenterBg = false;
+
+		auto& reskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+		if (reskinSystem.IsEnabled() && entry.reskinEntry.preset) {
+			AmmoWheelReskinUnified::DrawContext centerCtx{};
+			centerCtx.center = panelCenter;
+			centerCtx.radius = 0.5f * (std::max)(panelWidth, panelHeight);
+			centerCtx.slotAngleRad = 0.0f;
+			centerCtx.alphaMult = a_drawArgs.alphaMult;
+			centerCtx.slotIndex = _hoveredIndex;
+			centerCtx.formID = entry.ammo ? entry.ammo->GetFormID() : 0;
+			centerCtx.hovered = true;
+			centerCtx.selected = false;
+			centerCtx.active = false;
+			centerCtx.progress = 0.0f;
+			drewCenterBg = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::CenterBackground,
+				entry.reskinEntry,
+				centerCtx,
+				drawList);
+		}
+
+		if (!drewCenterBg) {
+			float bgAlpha = Config::AmmoWheel::CenterBgOpacity * a_drawArgs.alphaMult;
+			ImU32 bgColor = IM_COL32(0, 0, 0, static_cast<int>(bgAlpha * 255));
+
+			switch (shapeType) {
+			case 1:
+				drawList->AddRectFilled(bgMin, bgMax, bgColor, 0.0f);
+				break;
+			case 2:
+			{
+				float radius = (std::max)(panelWidth, panelHeight) * 0.5f * 1.1f;
+				drawList->AddCircleFilled(panelCenter, radius, bgColor, 48);
+				break;
+			}
+			case 3:
+			default:
+				drawList->AddRectFilled(bgMin, bgMax, bgColor, Config::AmmoWheel::CenterPanelCornerRounding);
+				break;
 			}
 		}
-		
-		switch (shapeType) {
-		case 1:  // Rectangle
-			drawList->AddRectFilled(bgMin, bgMax, bgColor, 0.0f);
-			break;
-		case 2: {  // Circle
-			float radius = (std::max)(panelWidth, panelHeight) / 2.0f * 1.1f;
-			drawList->AddCircleFilled(panelCenter, radius, bgColor, 48);
-			break;
-		}
-		case 3:  // RoundedRect (default)
-		default:
-			drawList->AddRectFilled(bgMin, bgMax, bgColor, Config::AmmoWheel::CenterPanelCornerRounding);
-			break;
-		}
-		
-		// Draw border if configured
+
 		if (Config::AmmoWheel::CenterPanelBorderThickness > 0.0f) {
 			float borderAlpha = Config::AmmoWheel::CenterPanelBorderAlpha * a_drawArgs.alphaMult;
-			ImU32 borderColor = IM_COL32(139, 90, 43, static_cast<int>(borderAlpha * 255));  // Bronze
-			
+			ImU32 borderColor = IM_COL32(139, 90, 43, static_cast<int>(borderAlpha * 255));
 			switch (shapeType) {
 			case 1:
 				drawList->AddRect(bgMin, bgMax, borderColor, 0.0f, 0, Config::AmmoWheel::CenterPanelBorderThickness);
 				break;
-			case 2: {
-				float radius = (std::max)(panelWidth, panelHeight) / 2.0f * 1.1f;
+			case 2:
+			{
+				float radius = (std::max)(panelWidth, panelHeight) * 0.5f * 1.1f;
 				drawList->AddCircle(panelCenter, radius, borderColor, 48, Config::AmmoWheel::CenterPanelBorderThickness);
 				break;
 			}
@@ -4544,77 +5703,109 @@ void AmmoWheel::drawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemM
 		}
 	}
 
-	// ========== ANIMATION: CENTER FRAME ==========
 	if (Config::AmmoWheel::CenterFrameEnabled) {
-		float framePadding = 5.0f;
+		const float framePadding = 5.0f;
 		ImVec2 frameMin = ImVec2(bgMin.x - framePadding, bgMin.y - framePadding);
 		ImVec2 frameMax = ImVec2(bgMax.x + framePadding, bgMax.y + framePadding);
-		
-		// Calculate frame color with optional pulse
-		ImU32 frameColor = Config::AmmoWheel::CenterFrameColor;
+
 		float frameAlphaMult = a_drawArgs.alphaMult;
 		if (Config::AmmoWheel::CenterFramePulse) {
 			float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * Config::AmmoWheel::CenterFramePulseSpeed);
 			frameAlphaMult *= pulse;
 		}
-		uint8_t frameAlpha = static_cast<uint8_t>((frameColor >> 24) * frameAlphaMult);
-		frameColor = (frameColor & 0x00FFFFFF) | (frameAlpha << 24);
-		
-		// Draw frame border
-		ImGui::GetWindowDrawList()->AddRect(frameMin, frameMax, frameColor, 6.0f, 0, 3.0f);
-		
-		// Draw corner decorations
-		if (Config::AmmoWheel::CenterCornersEnabled) {
-			float len = Config::AmmoWheel::CenterCornerSize;
-			auto* drawList = ImGui::GetWindowDrawList();
-			
-			// Top-left corner
-			drawList->AddLine(ImVec2(frameMin.x, frameMin.y + len), ImVec2(frameMin.x, frameMin.y), frameColor, 2.0f);
-			drawList->AddLine(ImVec2(frameMin.x, frameMin.y), ImVec2(frameMin.x + len, frameMin.y), frameColor, 2.0f);
-			
-			// Top-right corner
-			drawList->AddLine(ImVec2(frameMax.x - len, frameMin.y), ImVec2(frameMax.x, frameMin.y), frameColor, 2.0f);
-			drawList->AddLine(ImVec2(frameMax.x, frameMin.y), ImVec2(frameMax.x, frameMin.y + len), frameColor, 2.0f);
-			
-			// Bottom-right corner
-			drawList->AddLine(ImVec2(frameMax.x, frameMax.y - len), ImVec2(frameMax.x, frameMax.y), frameColor, 2.0f);
-			drawList->AddLine(ImVec2(frameMax.x, frameMax.y), ImVec2(frameMax.x - len, frameMax.y), frameColor, 2.0f);
-			
-			// Bottom-left corner
-			drawList->AddLine(ImVec2(frameMin.x + len, frameMax.y), ImVec2(frameMin.x, frameMax.y), frameColor, 2.0f);
-			drawList->AddLine(ImVec2(frameMin.x, frameMax.y), ImVec2(frameMin.x, frameMax.y - len), frameColor, 2.0f);
+		bool drewCenterFrame = false;
+		auto& reskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+		const bool useReskinIndependentCenterFrame = reskinSystem.IsEnabled() && entry.reskinEntry.preset;
+		if (useReskinIndependentCenterFrame) {
+			// Reskin path: keep CenterPanelFrame independent from center panel primitive layout
+			// (MaxWidthRatio / font size / padding / center panel shape offsets).
+			// Anchor to wheel center and let Reskin.Layout.CenterPanelFrame drive placement.
+			AmmoWheelReskinUnified::DrawContext frameCtx{};
+			frameCtx.center = a_center;
+			frameCtx.radius = (std::max)(16.0f, _cachedInnerRadius * 0.62f);
+			frameCtx.slotAngleRad = 0.0f;
+			frameCtx.alphaMult = frameAlphaMult;
+			frameCtx.slotIndex = _hoveredIndex;
+			frameCtx.formID = entry.ammo ? entry.ammo->GetFormID() : 0;
+			frameCtx.hovered = true;
+			drewCenterFrame = reskinSystem.DrawTarget(
+				AmmoWheelReskinUnified::VisualTarget::CenterPanelFrame,
+				entry.reskinEntry,
+				frameCtx,
+				ImGui::GetWindowDrawList());
+		}
+
+		if (!drewCenterFrame) {
+			// Primitive fallback should honor CenterPanelFrame layout overrides too,
+			// so frame tuning stays independent in both reskin and primitive paths.
+			const auto frameLayout = reskinSystem.GetLayoutOverrideSnapshot(
+				AmmoWheelReskinUnified::VisualTarget::CenterPanelFrame);
+			const float frameLayoutScale =
+				(std::isfinite(frameLayout.scale) && frameLayout.scale > 0.0f) ?
+					frameLayout.scale :
+					1.0f;
+			ImVec2 frameCenterBase = panelCenter;
+			float frameHalfWidth = (panelWidth * 0.5f + framePadding);
+			float frameHalfHeight = (panelHeight * 0.5f + framePadding);
+			if (useReskinIndependentCenterFrame) {
+				// Keep fallback aligned with reskin behavior when frame asset is missing.
+				frameCenterBase = a_center;
+				const float independentHalf = (std::max)(16.0f, _cachedInnerRadius * 0.62f);
+				frameHalfWidth = independentHalf + framePadding;
+				frameHalfHeight = independentHalf + framePadding;
+			}
+			const ImVec2 frameCenterAdjusted = ImVec2(
+				frameCenterBase.x + frameLayout.offsetX + frameLayout.offsetRadial,
+				frameCenterBase.y + frameLayout.offsetY + frameLayout.offsetTangential);
+			frameHalfWidth *= frameLayoutScale;
+			frameHalfHeight *= frameLayoutScale;
+			frameMin = ImVec2(frameCenterAdjusted.x - frameHalfWidth, frameCenterAdjusted.y - frameHalfHeight);
+			frameMax = ImVec2(frameCenterAdjusted.x + frameHalfWidth, frameCenterAdjusted.y + frameHalfHeight);
+
+			ImU32 frameColor = Config::AmmoWheel::CenterFrameColor;
+			uint8_t frameAlpha = static_cast<uint8_t>((frameColor >> 24) * frameAlphaMult);
+			frameColor = (frameColor & 0x00FFFFFF) | (frameAlpha << 24);
+
+			ImGui::GetWindowDrawList()->AddRect(frameMin, frameMax, frameColor, 6.0f, 0, 3.0f);
+			if (Config::AmmoWheel::CenterCornersEnabled) {
+				float len = Config::AmmoWheel::CenterCornerSize * frameLayoutScale;
+				auto* drawList = ImGui::GetWindowDrawList();
+				drawList->AddLine(ImVec2(frameMin.x, frameMin.y + len), ImVec2(frameMin.x, frameMin.y), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMin.x, frameMin.y), ImVec2(frameMin.x + len, frameMin.y), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMax.x - len, frameMin.y), ImVec2(frameMax.x, frameMin.y), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMax.x, frameMin.y), ImVec2(frameMax.x, frameMin.y + len), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMax.x, frameMax.y - len), ImVec2(frameMax.x, frameMax.y), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMax.x, frameMax.y), ImVec2(frameMax.x - len, frameMax.y), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMin.x + len, frameMax.y), ImVec2(frameMin.x, frameMax.y), frameColor, 2.0f);
+				drawList->AddLine(ImVec2(frameMin.x, frameMax.y), ImVec2(frameMin.x, frameMax.y - len), frameColor, 2.0f);
+			}
 		}
 	}
 
-	// TASK 2: Draw stacked text lines with two-tier damage highlighting
-	float textY = panelCenter.y - panelHeight / 2.0f + padding;
-	for (size_t i = 0; i < textLines.size(); i++) {
+	const float textX = panelCenter.x + Config::AmmoWheel::CenterTextOffsetX;
+	auto& centerReskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+	const bool centerReskinEnabled = centerReskinSystem.IsEnabled() && entry.reskinEntry.preset;
+	float textY = panelCenter.y - panelHeight * 0.5f + padding + Config::AmmoWheel::CenterTextOffsetY;
+	for (size_t i = 0; i < cache.textLines.size(); i++) {
+		const bool isDamageLine = (i < cache.isDamageLine.size() && cache.isDamageLine[i]);
 		ImU32 textColor;
-		
-		// TWO-TIER DAMAGE HIGHLIGHT: Gold for max damage, light red for others
-		// Damage highlight logic is preserved exactly as before
-		if (i < isDamageLine.size() && isDamageLine[i]) {
-			if (shouldHighlightDamage) {
-				// Max damage: Gold
+		if (isDamageLine) {
+			if (cache.highlightDamage) {
 				ImU32 maxColor = Config::AmmoWheel::CenterFields::MaxDamageColor;
 				textColor = IM_COL32(
 					(maxColor >> IM_COL32_R_SHIFT) & 0xFF,
 					(maxColor >> IM_COL32_G_SHIFT) & 0xFF,
 					(maxColor >> IM_COL32_B_SHIFT) & 0xFF,
-					static_cast<int>(255 * a_drawArgs.alphaMult)
-				);
+					static_cast<int>(255 * a_drawArgs.alphaMult));
 			} else {
-				// Other damage: Light red
 				ImU32 otherColor = Config::AmmoWheel::CenterFields::OtherDamageColor;
 				textColor = IM_COL32(
 					(otherColor >> IM_COL32_R_SHIFT) & 0xFF,
 					(otherColor >> IM_COL32_G_SHIFT) & 0xFF,
 					(otherColor >> IM_COL32_B_SHIFT) & 0xFF,
-					static_cast<int>(255 * a_drawArgs.alphaMult)
-				);
+					static_cast<int>(255 * a_drawArgs.alphaMult));
 			}
 		} else {
-			// TASK 1: Non-damage lines use center label color override if enabled
 			if (Config::AmmoWheel::CenterLabelColorOverrideEnabled) {
 				textColor = Config::AmmoWheel::CenterLabelColorComputed;
 				uint8_t a = static_cast<uint8_t>((textColor >> 24) * a_drawArgs.alphaMult);
@@ -4623,26 +5814,241 @@ void AmmoWheel::drawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemM
 				textColor = IM_COL32(255, 255, 255, static_cast<int>(255 * a_drawArgs.alphaMult));
 			}
 		}
-		
-		// Apply text shadow if enabled
+
+		if (isDamageLine && centerReskinEnabled) {
+			const std::string damageDigits = std::to_string((std::max)(0, cache.roundedDamageValue));
+			const float lineFontSize = cache.textLines[i].second;
+			if (!damageDigits.empty() && lineFontSize > 0.0f) {
+				const char* damageLabel = "Damage:";
+				ImFont* font = ImGui::GetDefaultFont();
+				const float labelWidth = font ? font->CalcTextSizeA(lineFontSize, FLT_MAX, 0.0f, damageLabel).x :
+					ImGui::CalcTextSize(damageLabel).x;
+				const float estimatedDigitsWidth = font ? font->CalcTextSizeA(lineFontSize, FLT_MAX, 0.0f, damageDigits.c_str()).x :
+					ImGui::CalcTextSize(damageDigits.c_str()).x;
+				const float gap = (std::max)(2.0f, lineFontSize * 0.10f);
+
+				auto drawDamageDigits = [&](AmmoWheelReskinUnified::VisualTarget target, float alphaScale, ImVec2 center, float* outWidth) {
+					AmmoWheelReskinUnified::DrawContext digitCtx{};
+					digitCtx.center = center;
+					digitCtx.radius = lineFontSize * 0.5f;
+					digitCtx.slotAngleRad = 0.0f;
+					digitCtx.alphaMult = a_drawArgs.alphaMult * alphaScale;
+					return centerReskinSystem.DrawDigitString(
+						target,
+						entry.reskinEntry,
+						digitCtx,
+						damageDigits,
+						lineFontSize,
+						ImGui::GetWindowDrawList(),
+						outWidth);
+				};
+
+				const auto primaryTarget = cache.highlightDamage ?
+					AmmoWheelReskinUnified::VisualTarget::MaxDamageDigits :
+					AmmoWheelReskinUnified::VisualTarget::DamageDigits;
+
+				float renderedDigitsWidth = 0.0f;
+				bool measured = drawDamageDigits(primaryTarget, 0.0f, ImVec2(textX, textY), &renderedDigitsWidth);
+				if (!measured && primaryTarget == AmmoWheelReskinUnified::VisualTarget::MaxDamageDigits) {
+					measured = drawDamageDigits(AmmoWheelReskinUnified::VisualTarget::DamageDigits, 0.0f, ImVec2(textX, textY), &renderedDigitsWidth);
+				}
+				if (!(renderedDigitsWidth > 0.0f) || !std::isfinite(renderedDigitsWidth)) {
+					renderedDigitsWidth = (std::max)(1.0f, estimatedDigitsWidth);
+				}
+
+				const float totalWidth = labelWidth + gap + renderedDigitsWidth;
+				const float leftX = textX - totalWidth * 0.5f;
+				const float labelCenterX = leftX + labelWidth * 0.5f;
+				const float digitsCenterX = leftX + labelWidth + gap + renderedDigitsWidth * 0.5f;
+
+				bool drewDigits = drawDamageDigits(primaryTarget, 1.0f, ImVec2(digitsCenterX, textY), &renderedDigitsWidth);
+				if (!drewDigits && primaryTarget == AmmoWheelReskinUnified::VisualTarget::MaxDamageDigits) {
+					drewDigits = drawDamageDigits(AmmoWheelReskinUnified::VisualTarget::DamageDigits, 1.0f, ImVec2(digitsCenterX, textY), &renderedDigitsWidth);
+				}
+
+				if (drewDigits) {
+					if (Config::AmmoWheel::CenterTextShadowEnabled) {
+						const float shadowOffset = 1.5f;
+						const ImU32 shadowColor = IM_COL32(0, 0, 0, static_cast<int>(180 * a_drawArgs.alphaMult));
+						Drawer::draw_text(
+							labelCenterX + shadowOffset,
+							textY + shadowOffset,
+							damageLabel,
+							shadowColor,
+							lineFontSize,
+							a_drawArgs);
+					}
+
+					Drawer::draw_text(labelCenterX, textY, damageLabel, textColor, lineFontSize, a_drawArgs);
+					textY += lineFontSize + lineSpacing;
+					continue;
+				}
+			}
+		}
+
 		if (Config::AmmoWheel::CenterTextShadowEnabled) {
 			float shadowOffset = 1.5f;
 			ImU32 shadowColor = IM_COL32(0, 0, 0, static_cast<int>(180 * a_drawArgs.alphaMult));
-			Drawer::draw_text(panelCenter.x + shadowOffset, textY + shadowOffset, 
-			                  textLines[i].first.c_str(), shadowColor, textLines[i].second, a_drawArgs);
+			Drawer::draw_text(
+				textX + shadowOffset,
+				textY + shadowOffset,
+				cache.textLines[i].first.c_str(),
+				shadowColor,
+				cache.textLines[i].second,
+				a_drawArgs);
 		}
-		
-		Drawer::draw_text(panelCenter.x, textY, textLines[i].first.c_str(), textColor, textLines[i].second, a_drawArgs);
-		textY += textLines[i].second + lineSpacing;
+
+		Drawer::draw_text(textX, textY, cache.textLines[i].first.c_str(), textColor, cache.textLines[i].second, a_drawArgs);
+		textY += cache.textLines[i].second + lineSpacing;
+	}
+
+	if (Config::AmmoWheel::CenterShowDescription && !cache.descriptionLines.empty()) {
+		auto& reskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+		const bool reskinEnabled = reskinSystem.IsEnabled();
+		const auto descLayout = reskinSystem.GetLayoutOverrideSnapshot(
+			AmmoWheelReskinUnified::VisualTarget::CenterDescriptionText);
+
+		// Reskin mode: anchor description to wheel center, completely independent from center panel box.
+		// Primitive mode: preserve old center-attached behavior for backward compatibility.
+		ImVec2 descAnchor = reskinEnabled ? a_center : panelCenter;
+		float layoutAngleRad = reskinEnabled ? (descLayout.angleOffsetDeg * IM_PI / 180.0f) : 0.0f;
+		float ca = std::cos(layoutAngleRad);
+		float sa = std::sin(layoutAngleRad);
+		if (reskinEnabled) {
+			descAnchor.x += descLayout.offsetX + ca * descLayout.offsetRadial - sa * descLayout.offsetTangential;
+			descAnchor.y += descLayout.offsetY + sa * descLayout.offsetRadial + ca * descLayout.offsetTangential;
+		} else {
+			descAnchor.x += Config::AmmoWheel::CenterDescriptionOffsetX;
+			descAnchor.y += Config::AmmoWheel::CenterDescriptionOffsetY;
+		}
+
+		float descScale = reskinEnabled ? descLayout.scale : 1.0f;
+		descScale = std::clamp(descScale, 0.05f, 8.0f);
+		float descOpacity = std::clamp(Config::AmmoWheel::CenterDescriptionOpacity, 0.0f, 1.0f);
+		if (reskinEnabled) {
+			descOpacity *= std::clamp(descLayout.opacity, 0.0f, 1.0f);
+		}
+		const ImU32 descColor = Config::AmmoWheel::CenterDescriptionColor;
+		const uint8_t descAlpha = static_cast<uint8_t>(
+			((descColor >> IM_COL32_A_SHIFT) & 0xFF) * descOpacity * a_drawArgs.alphaMult);
+		const ImU32 descTextColor = IM_COL32(
+			(descColor >> IM_COL32_R_SHIFT) & 0xFF,
+			(descColor >> IM_COL32_G_SHIFT) & 0xFF,
+			(descColor >> IM_COL32_B_SHIFT) & 0xFF,
+			descAlpha);
+
+		float descY = descAnchor.y;
+		for (const auto& line : cache.descriptionLines) {
+			const float fontSize = cache.descriptionFontSize * descScale;
+			if (Config::AmmoWheel::CenterTextShadowEnabled) {
+				const float shadowOffset = 1.5f;
+				const ImU32 shadowColor = IM_COL32(0, 0, 0, static_cast<int>(180 * a_drawArgs.alphaMult * descOpacity));
+				Drawer::draw_text(
+					descAnchor.x + shadowOffset,
+					descY + shadowOffset,
+					line.c_str(),
+					shadowColor,
+					fontSize,
+					a_drawArgs);
+			}
+
+			Drawer::draw_text(descAnchor.x, descY, line.c_str(), descTextColor, fontSize, a_drawArgs);
+			descY += fontSize + lineSpacing + Config::AmmoWheel::CenterDescriptionLineSpacingPx;
+		}
 	}
 }
 
-void AmmoWheel::drawAmmoCount(ImVec2 a_slotCenter, int a_count, DrawArgs a_drawArgs)
+void AmmoWheel::drawAmmoCount(ImVec2 a_slotCenter, int a_count, DrawArgs a_drawArgs,
+	const AmmoWheelReskinUnified::ResolvedEntry* a_reskinEntry, float a_slotAngleRad)
 {
-	std::string countStr = a_count > 999 ? "999+" : std::to_string(a_count);
 	ImU32 color = Config::AmmoWheel::CountColor;
 	float fontSize = Config::AmmoWheel::CountFontPx;  // Use configured font size
-	Drawer::draw_text(a_slotCenter.x, a_slotCenter.y + 10.f, countStr.c_str(), color, fontSize, a_drawArgs);
+	const float baselineY = a_slotCenter.y + 10.0f;
+	const bool plusSuffix = a_count > 999;
+	const std::string digitsOnly = plusSuffix ? "999" : std::to_string(a_count);
+	float digitSpacingOffsetPx = 0.0f;
+
+	if (a_reskinEntry) {
+		auto& reskinSystem = AmmoWheelReskinUnified::ReskinSystem::GetSingleton();
+		if (reskinSystem.IsEnabled() && a_reskinEntry->preset) {
+			digitSpacingOffsetPx =
+				reskinSystem.GetLayoutOverrideSnapshot(AmmoWheelReskinUnified::VisualTarget::AmmoCountDigits)
+					.digitSpacingOffsetPx;
+
+			AmmoWheelReskinUnified::DrawContext baseCtx{};
+			baseCtx.center = ImVec2(a_slotCenter.x, baselineY);
+			baseCtx.radius = fontSize * 0.5f;
+			baseCtx.slotAngleRad = a_slotAngleRad;
+			baseCtx.alphaMult = a_drawArgs.alphaMult;
+
+			float renderedWidth = 0.0f;
+			if (reskinSystem.DrawDigitString(
+				AmmoWheelReskinUnified::VisualTarget::AmmoCountDigits,
+				*a_reskinEntry,
+				baseCtx,
+				digitsOnly,
+				fontSize,
+				ImGui::GetWindowDrawList(),
+				&renderedWidth)) {
+				if (plusSuffix) {
+					constexpr float kPlusPaddingPx = 2.0f;
+					Drawer::draw_text(
+						baseCtx.center.x + renderedWidth * 0.5f + kPlusPaddingPx,
+						baselineY,
+						"+",
+						color,
+						fontSize,
+						a_drawArgs);
+				}
+				return;
+			}
+		}
+	}
+
+	// If digits asset falls back to primitive text, still honor Angular Spread for multi-glyph counts.
+	if (std::fabs(digitSpacingOffsetPx) > 0.001f) {
+		const std::string countStr = plusSuffix ? "999+" : std::to_string(a_count);
+		ImFont* font = ImGui::GetDefaultFont();
+		if (font && !countStr.empty()) {
+			const float spacing = digitSpacingOffsetPx;
+			float totalW = 0.0f;
+			float maxH = 0.0f;
+			std::vector<float> glyphWidths;
+			glyphWidths.reserve(countStr.size());
+			for (char ch : countStr) {
+				const char glyph[2] = { ch, '\0' };
+				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, glyph);
+				glyphWidths.push_back(sz.x);
+				totalW += sz.x;
+				maxH = (std::max)(maxH, sz.y);
+			}
+			if (countStr.size() > 1) {
+				totalW += spacing * static_cast<float>(countStr.size() - 1);
+			}
+			float cursorX = a_slotCenter.x - totalW * 0.5f;
+			const float topY = baselineY - maxH * 0.5f;
+			for (size_t i = 0; i < countStr.size(); ++i) {
+				const char glyph[2] = { countStr[i], '\0' };
+				Drawer::draw_text_with_font(
+					cursorX,
+					topY,
+					glyph,
+					color,
+					font,
+					fontSize,
+					a_drawArgs,
+					false);
+				cursorX += glyphWidths[i];
+				if (i + 1 < countStr.size()) {
+					cursorX += spacing;
+				}
+			}
+			return;
+		}
+	}
+
+	std::string countStr = plusSuffix ? "999+" : std::to_string(a_count);
+	Drawer::draw_text(a_slotCenter.x, baselineY, countStr.c_str(), color, fontSize, a_drawArgs);
 }
 
 void AmmoWheel::drawLowAmmoWarning(ImVec2 a_center, float a_innerRadius, float a_outerRadius, float a_midAngle, DrawArgs a_drawArgs)
@@ -4684,7 +6090,7 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 		return;
 	}
 
-	// ========== PHASE 4: ENHANCED POPUP ANIMATION ==========
+	// ========== ENHANCED POPUP ANIMATION ==========
 	// Use time-based animation with configurable durations
 	float deltaTime = ImGui::GetIO().DeltaTime;
 	float hoverInSpeed = Config::AmmoWheel::PopupAnim::Enabled ? (1000.0f / Config::AmmoWheel::PopupAnim::HoverInMs) : Config::AmmoWheel::PopupAnimationSpeed;
@@ -4737,8 +6143,13 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 	float padding = Config::AmmoWheel::PopupPaddingPx;
 	
 	// Calculate popup position
-	float midAngle = getStartAngleRad() + 
-		(getArcAngleRad() / _ammoEntries.size()) * (_hoveredIndex + 0.5f);
+	float midAngle = getSlotCenterAngle(_hoveredIndex);
+	if (_lastCursorInputSource == CursorInputSource::Mouse) {
+		const float cursorLen = std::sqrt(_cursorPos.x * _cursorPos.x + _cursorPos.y * _cursorPos.y);
+		if (cursorLen > 0.001f) {
+			midAngle = getCursorAngle();
+		}
+	}
 	
 	float popupDistance = _cachedOuterRadius + offset;
 	ImVec2 popupCenter = ImVec2(
@@ -4752,7 +6163,7 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 	popupCenter.x = std::clamp(popupCenter.x, margin, viewport.x - margin);
 	popupCenter.y = std::clamp(popupCenter.y, margin, viewport.y - margin);
 	
-	// ========== PHASE 4: APPLY EASING FUNCTION ==========
+	// ========== APPLY EASING FUNCTION ==========
 	float t = _hoverPopupScale;
 	float easedT = t;
 	
@@ -4785,6 +6196,230 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 	float scale = scaleFrom + (scaleTo - scaleFrom) * easedT;
 	float alpha = easedT * a_drawArgs.alphaMult;
 	float animatedRadius = bubbleRadius * scale;
+
+	int popupShapeMode = std::clamp(Config::AmmoWheel::PopupShapeMode, 0, 5);
+	if (popupShapeMode == 0) {
+		// Backward compatibility: legacy toggle maps to circle vs rounded-rect.
+		popupShapeMode = Config::AmmoWheel::PopupCircular ? 1 : 2;
+	}
+	const float sunDragonTone = std::clamp(Config::AmmoWheel::PopupSunDragonTone, 0.0f, 2.0f);
+
+	auto calcPopupRectBounds = [&](ImVec2& outMin, ImVec2& outMax) {
+		float popupWidth = bubbleRadius * 2.0f;
+		float popupHeight = bubbleRadius * 2.0f;
+		outMin = ImVec2(popupCenter.x - popupWidth * 0.5f, popupCenter.y - popupHeight * 0.5f);
+		outMax = ImVec2(popupCenter.x + popupWidth * 0.5f, popupCenter.y + popupHeight * 0.5f);
+	};
+
+	auto hash01 = [](uint32_t value) -> float {
+		value ^= value >> 16;
+		value *= 0x7feb352dU;
+		value ^= value >> 15;
+		value *= 0x846ca68bU;
+		value ^= value >> 16;
+		return static_cast<float>(value & 0x00FFFFFFU) / 16777216.0f;
+	};
+
+	auto toneSunDragonColor = [&](int r, int g, int b, int a) -> ImU32 {
+		const float t = sunDragonTone;
+		const float sat = 0.45f + t * 0.45f;  // 0->desat, 1->near natural, 2->more vivid
+		const float warmBlend = std::clamp(1.0f - t, 0.0f, 1.0f) * 0.38f;
+		const float brighten = 1.12f - 0.16f * std::clamp(t, 0.0f, 1.0f) + 0.04f * (std::max)(t - 1.0f, 0.0f);
+
+		const float luma = 0.299f * r + 0.587f * g + 0.114f * b;
+		float rr = luma + (r - luma) * sat;
+		float gg = luma + (g - luma) * sat;
+		float bb = luma + (b - luma) * sat;
+
+		// Blend toward pale warm tones for softer "sunlight" at low tone values.
+		rr = rr * (1.0f - warmBlend) + 236.0f * warmBlend;
+		gg = gg * (1.0f - warmBlend) + 212.0f * warmBlend;
+		bb = bb * (1.0f - warmBlend) + 164.0f * warmBlend;
+
+		rr *= brighten;
+		gg *= brighten;
+		bb *= brighten;
+
+		return IM_COL32(
+			static_cast<int>(std::clamp(rr, 0.0f, 255.0f)),
+			static_cast<int>(std::clamp(gg, 0.0f, 255.0f)),
+			static_cast<int>(std::clamp(bb, 0.0f, 255.0f)),
+			std::clamp(a, 0, 255));
+	};
+
+	auto buildOrganicBubblePoints = [&](float baseRadius, float phaseOffset) {
+		const int pointCount = std::clamp(Config::AmmoWheel::PopupBlobPointCount, 8, 48);
+		const float jaggedness = std::clamp(Config::AmmoWheel::PopupBlobJaggedness, 0.0f, 0.45f);
+		const float wobbleSpeed = std::clamp(Config::AmmoWheel::PopupBlobWobbleSpeed, 0.0f, 8.0f);
+		const float wobbleTime = static_cast<float>(ImGui::GetTime()) * wobbleSpeed;
+		const float safeRadius = (std::max)(baseRadius, 4.0f);
+		const uint32_t baseSeed = entry.ammo ? entry.ammo->GetFormID() :
+			static_cast<uint32_t>(_hoveredIndex + 1);
+
+		std::vector<ImVec2> points;
+		points.reserve(pointCount);
+
+		for (int i = 0; i < pointCount; ++i) {
+			const float u = static_cast<float>(i) / static_cast<float>(pointCount);
+			const float angle = u * (2.0f * IM_PI) + phaseOffset;
+			const uint32_t seed = baseSeed ^ (0x9E3779B9u * static_cast<uint32_t>(i + 1));
+			const float rand01 = hash01(seed);
+			const float randSigned = rand01 * 2.0f - 1.0f;
+			const float wave = std::sin(angle * 3.0f + wobbleTime * 0.75f + rand01 * 6.2831853f);
+			const float wobble = std::clamp(randSigned * 0.45f + wave * 0.55f, -1.0f, 1.0f);
+			const float localRadius = safeRadius * (1.0f + jaggedness * wobble);
+
+			points.emplace_back(
+				popupCenter.x + localRadius * std::cos(angle),
+				popupCenter.y + localRadius * std::sin(angle));
+		}
+
+		return points;
+	};
+
+	auto buildDragonFireBubblePoints = [&](float baseRadius, float phaseOffset) {
+		const int pointCount = std::clamp((std::max)(Config::AmmoWheel::PopupBlobPointCount, 16), 16, 48);
+		const float jaggedness = std::clamp(Config::AmmoWheel::PopupBlobJaggedness, 0.0f, 0.45f);
+		const float flickerSpeed = std::clamp(Config::AmmoWheel::PopupBlobWobbleSpeed, 0.0f, 8.0f);
+		const float tFire = static_cast<float>(ImGui::GetTime()) * (flickerSpeed * 1.8f + 0.8f);
+		const float safeRadius = (std::max)(baseRadius, 6.0f);
+		const uint32_t baseSeed = entry.ammo ? entry.ammo->GetFormID() :
+			static_cast<uint32_t>(_hoveredIndex + 1);
+		const float flameAmp = 0.18f + jaggedness * 0.55f;
+		const float swayAmp = 0.04f + jaggedness * 0.14f;
+		const float lowerCompress = 0.12f + jaggedness * 0.18f;
+
+		std::vector<ImVec2> points;
+		points.reserve(pointCount);
+
+		for (int i = 0; i < pointCount; ++i) {
+			const float u = static_cast<float>(i) / static_cast<float>(pointCount);
+			const float angle = u * (2.0f * IM_PI) + phaseOffset;
+			const float dx = std::cos(angle);
+			const float dy = std::sin(angle);
+			const float upper = std::clamp(-dy, 0.0f, 1.0f);
+			const float lower = std::clamp(dy, 0.0f, 1.0f);
+
+			const uint32_t seed = baseSeed ^ (0x85ebca6bu * static_cast<uint32_t>(i + 3));
+			const float rand01 = hash01(seed);
+			const float randSigned = rand01 * 2.0f - 1.0f;
+
+			const float lick = 0.5f + 0.5f * std::sin(tFire + angle * 4.0f + rand01 * 7.0f);
+			const float pulse = 0.5f + 0.5f * std::sin(tFire * 0.65f + rand01 * 11.0f);
+
+			float radial = safeRadius;
+			radial *= 1.0f + randSigned * jaggedness * 0.14f;
+			radial *= 1.0f + upper * flameAmp * (0.35f + 0.65f * lick);
+			radial *= 1.0f - lower * lowerCompress * (0.45f + 0.55f * pulse);
+
+			const float sway = std::sin(tFire * 0.55f + rand01 * 8.0f + upper * 3.0f) *
+				safeRadius * swayAmp * (0.25f + 0.75f * upper);
+			const float lift = upper * safeRadius * (0.05f + 0.10f * lick);
+
+			points.emplace_back(
+				popupCenter.x + radial * dx + sway,
+				popupCenter.y + radial * dy - lift);
+		}
+
+		return points;
+	};
+
+	auto buildSunDragonBubblePoints = [&](float baseRadius, float phaseOffset) {
+		const int pointCount = std::clamp((std::max)(Config::AmmoWheel::PopupBlobPointCount, 24), 24, 56);
+		const float jaggedness = std::clamp(Config::AmmoWheel::PopupBlobJaggedness, 0.0f, 0.45f);
+		const float shimmerSpeed = std::clamp(Config::AmmoWheel::PopupBlobWobbleSpeed, 0.0f, 8.0f);
+		const float tSun = static_cast<float>(ImGui::GetTime()) * (shimmerSpeed * 1.9f + 0.8f);
+		const float safeRadius = (std::max)(baseRadius, 6.0f);
+		const uint32_t baseSeed = entry.ammo ? entry.ammo->GetFormID() :
+			static_cast<uint32_t>(_hoveredIndex + 1);
+		const float coronaAmp = 0.12f + jaggedness * 0.38f;
+		const float spikeAmp = 0.10f + jaggedness * 0.52f;
+		const float plumeAmp = 0.07f + jaggedness * 0.30f;
+		const float swirlAmp = 0.02f + jaggedness * 0.10f;
+		const float lowerCompress = 0.04f + jaggedness * 0.12f;
+
+		std::vector<ImVec2> points;
+		points.reserve(pointCount);
+
+		for (int i = 0; i < pointCount; ++i) {
+			const float u = static_cast<float>(i) / static_cast<float>(pointCount);
+			const float angle = u * (2.0f * IM_PI) + phaseOffset;
+			const float dx = std::cos(angle);
+			const float dy = std::sin(angle);
+			const float upper = std::clamp(-dy, 0.0f, 1.0f);
+			const float lower = std::clamp(dy, 0.0f, 1.0f);
+
+			const uint32_t seed = baseSeed ^ (0x27d4eb2du * static_cast<uint32_t>(i + 11));
+			const float rand01 = hash01(seed);
+			const float randSigned = rand01 * 2.0f - 1.0f;
+
+			const float corona = 0.5f + 0.5f * std::sin(angle * 10.0f + tSun * 1.2f + rand01 * 6.2831853f);
+			const float spikeWave = std::sin(angle * 12.0f - tSun * 0.95f + rand01 * 4.0f);
+			const float spikeMask = std::pow((std::max)(spikeWave, 0.0f), 2.4f);
+			const float plumeWave = 0.5f + 0.5f * std::sin(tSun * 0.75f + angle * 3.0f + rand01 * 5.0f);
+			const float plume = std::pow(upper, 1.15f) * plumeWave;
+
+			float radial = safeRadius;
+			radial *= 1.0f + randSigned * jaggedness * 0.10f;
+			radial *= 1.0f + coronaAmp * (0.35f + 0.65f * corona);
+			radial *= 1.0f + spikeAmp * spikeMask;
+			radial *= 1.0f + plumeAmp * plume;
+			radial *= 1.0f - lower * lowerCompress;
+
+			const float swirl = std::sin(tSun * 0.7f + angle * 1.8f + rand01 * 5.0f) *
+				safeRadius * swirlAmp * (0.2f + 0.8f * upper);
+			const float lift = plume * safeRadius * (0.04f + 0.08f * plumeWave);
+
+			points.emplace_back(
+				popupCenter.x + radial * dx + swirl,
+				popupCenter.y + radial * dy - lift);
+		}
+
+		return points;
+	};
+
+	auto drawSunDragonFlareRays = [&](float baseRadius, float phaseOffset, float alphaScale) {
+		const int rayCount = std::clamp((std::max)(Config::AmmoWheel::PopupBlobPointCount, 22), 22, 56);
+		const float jaggedness = std::clamp(Config::AmmoWheel::PopupBlobJaggedness, 0.0f, 0.45f);
+		const float wobbleSpeed = std::clamp(Config::AmmoWheel::PopupBlobWobbleSpeed, 0.0f, 8.0f);
+		const float tSun = static_cast<float>(ImGui::GetTime()) * (wobbleSpeed * 2.1f + 0.9f) + phaseOffset;
+		const float safeRadius = (std::max)(baseRadius, 6.0f);
+		const uint32_t baseSeed = entry.ammo ? entry.ammo->GetFormID() :
+			static_cast<uint32_t>(_hoveredIndex + 1);
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+		for (int i = 0; i < rayCount; ++i) {
+			const float u = static_cast<float>(i) / static_cast<float>(rayCount);
+			const float angle = u * (2.0f * IM_PI) + phaseOffset * 0.35f;
+			const float dx = std::cos(angle);
+			const float dy = std::sin(angle);
+			const float upper = std::clamp(-dy, 0.0f, 1.0f);
+			const float sideBias = 0.55f + 0.45f * std::abs(std::cos(angle * 0.5f));
+
+			const uint32_t seed = baseSeed ^ (0x165667b1u * static_cast<uint32_t>(i + 5));
+			const float rand01 = hash01(seed);
+			const float pulse = 0.5f + 0.5f * std::sin(tSun + angle * 6.0f + rand01 * 5.0f);
+			const float beam = std::pow((std::max)(std::sin(angle * 6.0f - tSun * 0.82f + rand01 * 4.0f), 0.0f), 1.8f);
+
+			const float tipLength = safeRadius * (0.08f + 0.18f * beam * (0.35f + 0.65f * upper * sideBias));
+			const float tipRadius = safeRadius + tipLength + (2.0f + 8.0f * pulse);
+			const float baseInner = safeRadius * (0.88f + 0.08f * pulse);
+			const float rayWidth = safeRadius * (0.015f + 0.020f * (0.35f + 0.65f * beam));
+
+			const ImVec2 dir(dx, dy);
+			const ImVec2 perp(-dy, dx);
+			const ImVec2 p0(popupCenter.x + dir.x * baseInner, popupCenter.y + dir.y * baseInner);
+			const ImVec2 tip(popupCenter.x + dir.x * tipRadius, popupCenter.y + dir.y * tipRadius);
+			const ImVec2 p1(tip.x + perp.x * rayWidth, tip.y + perp.y * rayWidth);
+			const ImVec2 p2(tip.x - perp.x * rayWidth, tip.y - perp.y * rayWidth);
+
+			const int aRay = static_cast<int>(std::clamp((24.0f + 78.0f * beam) * alpha * alphaScale, 0.0f, 255.0f));
+			const ImU32 rayColor = (i % 3 == 0)
+				? toneSunDragonColor(255, 214, 112, aRay)
+				: toneSunDragonColor(255, 156, 48, aRay);
+			drawList->AddTriangleFilled(p0, p1, p2, rayColor);
+		}
+	};
 	
 	// TASK 5: Draw circular bubble background
 	// PopupAnim::BackgroundOpacity is applied as a user multiplier on top of theme/custom color alpha
@@ -4830,73 +6465,299 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 	
 	// Fallback to primitive shapes if texture not drawn
 	if (!drewTexturedBubble) {
-		if (Config::AmmoWheel::PopupCircular) {
-			ImU32 bgColor = Config::AmmoWheel::PopupUseCustomColor 
-				? Config::AmmoWheel::PopupBackgroundColor 
-				: (Config::AmmoWheel::UseSkyrimTheme 
-					? Config::AmmoWheel::SkyrimTheme::BgDarkLayer 
-					: IM_COL32(20, 15, 10, 220));
-			uint8_t baseBgA = static_cast<uint8_t>(bgColor >> 24);
-			uint8_t bgAlpha = static_cast<uint8_t>(baseBgA * popupOpacityMult * alpha);
-			bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
-			
-			// Main circle fill
+		ImU32 bgColor = Config::AmmoWheel::PopupUseCustomColor
+			? Config::AmmoWheel::PopupBackgroundColor
+			: (Config::AmmoWheel::UseSkyrimTheme
+				? Config::AmmoWheel::SkyrimTheme::BgDarkLayer
+				: IM_COL32(20, 15, 10, 220));
+		uint8_t baseBgA = static_cast<uint8_t>(bgColor >> 24);
+		uint8_t bgAlpha = static_cast<uint8_t>(baseBgA * popupOpacityMult * alpha);
+		bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
+
+		switch (popupShapeMode) {
+		case 1:  // Circle
 			ImGui::GetWindowDrawList()->AddCircleFilled(popupCenter, animatedRadius, bgColor, 48);
-		} else {
-			// Fallback: rectangular popup
-			float popupWidth = bubbleRadius * 2.0f;
-			float popupHeight = bubbleRadius * 2.0f;
-			ImVec2 popupMin(popupCenter.x - popupWidth/2, popupCenter.y - popupHeight/2);
-			ImVec2 popupMax(popupCenter.x + popupWidth/2, popupCenter.y + popupHeight/2);
-			
-			ImU32 bgColor = Config::AmmoWheel::PopupUseCustomColor 
-				? Config::AmmoWheel::PopupBackgroundColor 
-				: (Config::AmmoWheel::UseSkyrimTheme 
-					? Config::AmmoWheel::SkyrimTheme::BgDarkLayer 
-					: IM_COL32(20, 15, 10, 220));
-			uint8_t baseBgA = static_cast<uint8_t>(bgColor >> 24);
-			uint8_t bgAlpha = static_cast<uint8_t>(baseBgA * popupOpacityMult * alpha);
-			bgColor = (bgColor & 0x00FFFFFF) | (bgAlpha << 24);
-			
+			break;
+		case 3:  // Organic blob
+		{
+			auto organicPoints = buildOrganicBubblePoints(animatedRadius, 0.0f);
+			if (!organicPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddConvexPolyFilled(
+					organicPoints.data(),
+					static_cast<int>(organicPoints.size()),
+					bgColor);
+			}
+			break;
+		}
+		case 4:  // Dragon-fire blob
+		{
+			auto firePoints = buildDragonFireBubblePoints(animatedRadius, 0.0f);
+			if (!firePoints.empty()) {
+				ImU32 fireFillColor = bgColor;
+				if (!Config::AmmoWheel::PopupUseCustomColor) {
+					uint8_t a = static_cast<uint8_t>(fireFillColor >> 24);
+					fireFillColor = IM_COL32(60, 18, 10, a);
+				}
+				ImGui::GetWindowDrawList()->AddConvexPolyFilled(
+					firePoints.data(),
+					static_cast<int>(firePoints.size()),
+					fireFillColor);
+			}
+			break;
+		}
+		case 5:  // Sun-dragon blob
+		{
+			auto sunPoints = buildSunDragonBubblePoints(animatedRadius, 0.0f);
+			if (!sunPoints.empty()) {
+				ImU32 sunFillColor = bgColor;
+				if (!Config::AmmoWheel::PopupUseCustomColor) {
+					uint8_t a = static_cast<uint8_t>(sunFillColor >> 24);
+					sunFillColor = toneSunDragonColor(96, 52, 10, a);
+				}
+				ImGui::GetWindowDrawList()->AddConvexPolyFilled(
+					sunPoints.data(),
+					static_cast<int>(sunPoints.size()),
+					sunFillColor);
+
+				// Bright inner core for sun-fire look.
+				auto innerCorePoints = buildSunDragonBubblePoints((std::max)(animatedRadius * 0.80f, 4.0f), 0.31f);
+				if (!innerCorePoints.empty()) {
+					uint8_t coreA = static_cast<uint8_t>(std::clamp(static_cast<int>(sunFillColor >> 24) + 20, 0, 255));
+					ImU32 coreColor = Config::AmmoWheel::PopupUseCustomColor
+						? ((sunFillColor & 0x00FFFFFF) | (coreA << 24))
+						: toneSunDragonColor(196, 124, 24, coreA);
+					ImGui::GetWindowDrawList()->AddConvexPolyFilled(
+						innerCorePoints.data(),
+						static_cast<int>(innerCorePoints.size()),
+						coreColor);
+				}
+			}
+			break;
+		}
+		case 2:  // Rounded rectangle
+		default:
+		{
+			ImVec2 popupMin{};
+			ImVec2 popupMax{};
+			calcPopupRectBounds(popupMin, popupMax);
 			ImGui::GetWindowDrawList()->AddRectFilled(popupMin, popupMax, bgColor, bubbleRadius * 0.3f);
+			break;
+		}
 		}
 	}
 	
 	// Add dark vignette ring for text visibility (before border rings)
 	// This ensures text near the edge is readable even when overlapping transparent flipbook borders
-	if (Config::AmmoWheel::PopupCircular) {
-		// Dark vignette ring around the edge (wider, darker background for text)
-		ImU32 vignetteColor = IM_COL32(10, 8, 5, static_cast<int>(180 * alpha));
+	ImU32 vignetteColor = IM_COL32(10, 8, 5, static_cast<int>(180 * alpha));
+	switch (popupShapeMode) {
+	case 1:  // Circle
 		ImGui::GetWindowDrawList()->AddCircle(popupCenter, animatedRadius - 8.0f, vignetteColor, 48, 16.0f);
+		break;
+	case 3:  // Organic blob
+	{
+		auto vignettePoints = buildOrganicBubblePoints((std::max)(animatedRadius - 10.0f, 4.0f), 0.12f);
+		if (!vignettePoints.empty()) {
+			ImGui::GetWindowDrawList()->AddPolyline(
+				vignettePoints.data(),
+				static_cast<int>(vignettePoints.size()),
+				vignetteColor,
+				true,
+				10.0f);
+		}
+		break;
 	}
-	
-	// Always draw border rings (on top of texture or primitive background)
-	if (Config::AmmoWheel::PopupCircular) {
-		// Gold border ring
-		ImU32 borderColor = IM_COL32(218, 165, 32, static_cast<int>(200 * alpha));
-		ImGui::GetWindowDrawList()->AddCircle(popupCenter, animatedRadius, borderColor, 48, 2.5f);
-		
-		// Inner glow ring
-		ImU32 glowColor = IM_COL32(255, 215, 0, static_cast<int>(60 * alpha));
-		ImGui::GetWindowDrawList()->AddCircle(popupCenter, animatedRadius - 4.0f, glowColor, 48, 1.5f);
-	} else {
-		float popupWidth = bubbleRadius * 2.0f;
-		float popupHeight = bubbleRadius * 2.0f;
-		ImVec2 popupMin(popupCenter.x - popupWidth/2, popupCenter.y - popupHeight/2);
-		ImVec2 popupMax(popupCenter.x + popupWidth/2, popupCenter.y + popupHeight/2);
-		
-		// Dark vignette for rectangular popup
-		ImU32 vignetteColor = IM_COL32(10, 8, 5, static_cast<int>(180 * alpha));
+	case 4:  // Dragon-fire blob
+	{
+		auto fireVignette = buildDragonFireBubblePoints((std::max)(animatedRadius - 9.0f, 4.0f), 0.12f);
+		if (!fireVignette.empty()) {
+			ImGui::GetWindowDrawList()->AddPolyline(
+				fireVignette.data(),
+				static_cast<int>(fireVignette.size()),
+				vignetteColor,
+				true,
+				8.0f);
+		}
+		break;
+	}
+	case 5:  // Sun-dragon blob
+	{
+		auto sunVignette = buildSunDragonBubblePoints((std::max)(animatedRadius - 8.0f, 4.0f), 0.18f);
+		if (!sunVignette.empty()) {
+			ImU32 sunVignetteColor = toneSunDragonColor(120, 74, 16, static_cast<int>(170 * alpha));
+			ImGui::GetWindowDrawList()->AddPolyline(
+				sunVignette.data(),
+				static_cast<int>(sunVignette.size()),
+				sunVignetteColor,
+				true,
+				9.0f);
+		}
+		break;
+	}
+	case 2:  // Rounded rectangle
+	default:
+	{
+		ImVec2 popupMin{};
+		ImVec2 popupMax{};
+		calcPopupRectBounds(popupMin, popupMax);
 		ImGui::GetWindowDrawList()->AddRect(
 			ImVec2(popupMin.x + 8, popupMin.y + 8),
 			ImVec2(popupMax.x - 8, popupMax.y - 8),
-			vignetteColor, bubbleRadius * 0.3f, 0, 16.0f);
-		
-		ImU32 borderColor = IM_COL32(200, 160, 50, static_cast<int>(180 * alpha));
-		ImGui::GetWindowDrawList()->AddRect(popupMin, popupMax, borderColor, bubbleRadius * 0.3f, 0, 2.0f);
+			vignetteColor,
+			bubbleRadius * 0.3f,
+			0,
+			16.0f);
+		break;
+	}
 	}
 	
-	// Phase 2E: Apply padding to content area
+	bool drewPopupRim = false;
+	bool drewPopupGlow = false;
+	if (reskinSystem.IsEnabled() && entry.reskinEntry.preset) {
+		AmmoWheelReskinUnified::DrawContext rimCtx{};
+		rimCtx.center = popupCenter;
+		rimCtx.radius = animatedRadius;
+		rimCtx.slotAngleRad = 0.0f;
+		rimCtx.alphaMult = alpha;
+		rimCtx.slotIndex = _hoveredIndex;
+		rimCtx.formID = entry.ammo ? entry.ammo->GetFormID() : 0;
+		rimCtx.hovered = true;
+		rimCtx.selected = false;
+		rimCtx.active = false;
+		drewPopupRim = reskinSystem.DrawTarget(
+			AmmoWheelReskinUnified::VisualTarget::PopupBubbleRim,
+			entry.reskinEntry,
+			rimCtx,
+			ImGui::GetWindowDrawList());
+		drewPopupGlow = reskinSystem.DrawTarget(
+			AmmoWheelReskinUnified::VisualTarget::PopupBubbleGlow,
+			entry.reskinEntry,
+			rimCtx,
+			ImGui::GetWindowDrawList());
+	}
+
+	// Draw popup rim/glow fallback layers when reskin assets are not available.
+	if (popupShapeMode == 1) {
+		if (!drewPopupRim) {
+			ImU32 borderColor = IM_COL32(218, 165, 32, static_cast<int>(200 * alpha));
+			ImGui::GetWindowDrawList()->AddCircle(popupCenter, animatedRadius, borderColor, 48, 2.5f);
+		}
+		if (!drewPopupGlow) {
+			ImU32 glowColor = IM_COL32(255, 215, 0, static_cast<int>(60 * alpha));
+			ImGui::GetWindowDrawList()->AddCircle(popupCenter, animatedRadius - 4.0f, glowColor, 48, 1.5f);
+		}
+	} else if (popupShapeMode == 3) {
+		if (!drewPopupRim) {
+			ImU32 borderColor = IM_COL32(208, 168, 98, static_cast<int>(190 * alpha));
+			auto borderPoints = buildOrganicBubblePoints(animatedRadius, 0.18f);
+			if (!borderPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					borderPoints.data(),
+					static_cast<int>(borderPoints.size()),
+					borderColor,
+					true,
+					2.5f);
+			}
+		}
+		if (!drewPopupGlow) {
+			ImU32 glowColor = IM_COL32(255, 215, 140, static_cast<int>(70 * alpha));
+			auto glowPoints = buildOrganicBubblePoints((std::max)(animatedRadius - 4.0f, 3.0f), 0.34f);
+			if (!glowPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					glowPoints.data(),
+					static_cast<int>(glowPoints.size()),
+					glowColor,
+					true,
+					1.6f);
+			}
+		}
+	} else if (popupShapeMode == 4) {
+		const float tFire = static_cast<float>(ImGui::GetTime()) * (std::clamp(Config::AmmoWheel::PopupBlobWobbleSpeed, 0.0f, 8.0f) * 2.0f + 0.8f);
+		const float flicker = 0.5f + 0.5f * std::sin(tFire);
+		if (!drewPopupRim) {
+			ImU32 borderColor = IM_COL32(255, 120, 32, static_cast<int>((160.0f + 70.0f * flicker) * alpha));
+			auto borderPoints = buildDragonFireBubblePoints(animatedRadius, 0.22f);
+			if (!borderPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					borderPoints.data(),
+					static_cast<int>(borderPoints.size()),
+					borderColor,
+					true,
+					2.8f);
+			}
+		}
+		if (!drewPopupGlow) {
+			ImU32 glowColor = IM_COL32(255, 190, 80, static_cast<int>((95.0f + 80.0f * flicker) * alpha));
+			auto glowPoints = buildDragonFireBubblePoints((std::max)(animatedRadius - 3.0f, 3.0f), 0.38f);
+			if (!glowPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					glowPoints.data(),
+					static_cast<int>(glowPoints.size()),
+					glowColor,
+					true,
+					1.8f);
+			}
+			ImU32 emberColor = IM_COL32(255, 80, 20, static_cast<int>((45.0f + 45.0f * flicker) * alpha));
+			auto emberPoints = buildDragonFireBubblePoints((std::max)(animatedRadius - 7.0f, 2.0f), 0.55f);
+			if (!emberPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					emberPoints.data(),
+					static_cast<int>(emberPoints.size()),
+					emberColor,
+					true,
+					1.2f);
+			}
+		}
+	} else if (popupShapeMode == 5) {
+		const float tSun = static_cast<float>(ImGui::GetTime()) * (std::clamp(Config::AmmoWheel::PopupBlobWobbleSpeed, 0.0f, 8.0f) * 1.8f + 0.7f);
+		const float flare = 0.5f + 0.5f * std::sin(tSun);
+		if (!drewPopupGlow) {
+			drawSunDragonFlareRays(animatedRadius, 0.22f, 1.0f);
+		}
+		if (!drewPopupRim) {
+			ImU32 borderColor = toneSunDragonColor(255, 216, 108, static_cast<int>((170.0f + 72.0f * flare) * alpha));
+			auto borderPoints = buildSunDragonBubblePoints(animatedRadius, 0.24f);
+			if (!borderPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					borderPoints.data(),
+					static_cast<int>(borderPoints.size()),
+					borderColor,
+					true,
+					3.0f);
+			}
+		}
+		if (!drewPopupGlow) {
+			ImU32 glowColor = toneSunDragonColor(255, 242, 156, static_cast<int>((102.0f + 96.0f * flare) * alpha));
+			auto glowPoints = buildSunDragonBubblePoints((std::max)(animatedRadius - 3.0f, 3.0f), 0.40f);
+			if (!glowPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					glowPoints.data(),
+					static_cast<int>(glowPoints.size()),
+					glowColor,
+					true,
+					2.0f);
+			}
+			ImU32 coronaColor = toneSunDragonColor(255, 174, 52, static_cast<int>((64.0f + 62.0f * flare) * alpha));
+			auto coronaPoints = buildSunDragonBubblePoints((std::max)(animatedRadius - 8.0f, 2.0f), 0.56f);
+			if (!coronaPoints.empty()) {
+				ImGui::GetWindowDrawList()->AddPolyline(
+					coronaPoints.data(),
+					static_cast<int>(coronaPoints.size()),
+					coronaColor,
+					true,
+					1.5f);
+			}
+		}
+	} else {
+		if (!drewPopupRim) {
+			ImVec2 popupMin{};
+			ImVec2 popupMax{};
+			calcPopupRectBounds(popupMin, popupMax);
+			ImU32 borderColor = IM_COL32(200, 160, 50, static_cast<int>(180 * alpha));
+			ImGui::GetWindowDrawList()->AddRect(popupMin, popupMax, borderColor, bubbleRadius * 0.3f, 0, 2.0f);
+		}
+	}
+	
+	// Apply padding to the content area.
 	float contentRadius = animatedRadius - padding;  // Effective content area
 	
 	// Draw magnified icon (centered in upper portion of bubble)
@@ -5017,6 +6878,257 @@ ImVec2 AmmoWheel::calculateSlotCenter(int a_index, ImVec2 a_wheelCenter, float a
 	);
 }
 
+float AmmoWheel::getSlotCenterAngle(int a_index) const
+{
+	const int numEntries = static_cast<int>(_ammoEntries.size());
+	if (numEntries <= 0) {
+		return getStartAngleRad();
+	}
+
+	const int clampedIndex = std::clamp(a_index, 0, numEntries - 1);
+	const float arcAngle = getArcAngleRad();
+	const float startAngle = getStartAngleRad();
+	const float slotAngle = arcAngle / static_cast<float>(numEntries);
+	const float slotGapRad = Config::AmmoWheel::SlotGapDeg * (IM_PI / 180.0f);
+	const float effectiveSlotAngle = slotAngle - slotGapRad;
+	const float slotStartAngle = startAngle + slotAngle * static_cast<float>(clampedIndex) + slotGapRad * 0.5f;
+	return slotStartAngle + effectiveSlotAngle * 0.5f;
+}
+
+int AmmoWheel::stepHoveredIndex(int a_currentIndex, int a_delta) const
+{
+	const int numEntries = static_cast<int>(_ammoEntries.size());
+	if (numEntries <= 0) {
+		return -1;
+	}
+
+	int next = a_currentIndex;
+	if (next < 0 || next >= numEntries) {
+		next = 0;
+	}
+	next += a_delta;
+
+	const bool wrap = getArcAngleRad() >= (2.0f * IM_PI * 0.95f);
+	if (wrap) {
+		next %= numEntries;
+		if (next < 0) {
+			next += numEntries;
+		}
+		return next;
+	}
+
+	return std::clamp(next, 0, numEntries - 1);
+}
+
+void AmmoWheel::processPendingMouseMotion(float a_dt)
+{
+	const int numEntries = static_cast<int>(_ammoEntries.size());
+	const ImVec2 rawDelta = _mouseAccumulatedDelta;
+	float rawMagnitude = _mouseAccumulatedPeak;
+	const float accumulatedMagnitude = std::sqrt(rawDelta.x * rawDelta.x + rawDelta.y * rawDelta.y);
+	rawMagnitude = (std::max)(rawMagnitude, accumulatedMagnitude);
+
+	_mouseAccumulatedDelta = { 0.0f, 0.0f };
+	_mouseAccumulatedPeak = 0.0f;
+
+	// Keep the visual focus cursor animated toward the hovered slot even while idle.
+	if (numEntries <= 0) {
+		_mouseSlotCarry = 0.0f;
+		_mouseStepLatchDirection = 0;
+		return;
+	}
+
+	ImVec2 filtered = _mouseFilter.Apply(rawDelta, a_dt, true);
+
+	// With very few slots the angular distance is large. Boost drive modestly so sparse
+	// wheels still step predictably without lowering the detent threshold too far.
+	const float slotAngle = getArcAngleRad() / static_cast<float>(numEntries);
+	constexpr float kReferenceSlotAngle = (2.0f * IM_PI) / 10.0f;
+	const float ratio = slotAngle / kReferenceSlotAngle;
+	if (ratio > 1.0f) {
+		float gain = 1.0f + (ratio - 1.0f) * 0.65f;
+		if (numEntries <= 4) {
+			gain += (4.0f - static_cast<float>(numEntries)) * 0.25f;
+		}
+		gain = std::clamp(gain, 1.0f, 3.5f);
+		filtered.x *= gain;
+		filtered.y *= gain;
+	}
+
+	if (rawMagnitude > _mouseFilter.deadzone) {
+		_hoverInputLock = false;
+	}
+
+	if (_hoverInputLock) {
+		_mouseSlotCarry = 0.0f;
+		_mouseStepLatchDirection = 0;
+		syncCursorToHoveredSlot(a_dt, false);
+		return;
+	}
+
+	int currentHoveredIndex = _hoveredIndex;
+	if (currentHoveredIndex < 0 || currentHoveredIndex >= numEntries) {
+		currentHoveredIndex = FindInitialHoverIndex();
+	}
+	if (currentHoveredIndex < 0 || currentHoveredIndex >= numEntries) {
+		syncCursorToHoveredSlot(a_dt, false);
+		return;
+	}
+
+	if (rawMagnitude <= _mouseFilter.deadzone) {
+		const float settleBlend = 1.0f - std::exp(-16.0f * a_dt);
+		_mouseSlotCarry += (0.0f - _mouseSlotCarry) * settleBlend;
+		_mouseStepLatchDirection = 0;
+		if (std::abs(_mouseSlotCarry) < 0.01f) {
+			_mouseSlotCarry = 0.0f;
+		}
+		syncCursorToHoveredSlot(a_dt, false);
+		return;
+	}
+
+	const float baseAngle = getSlotCenterAngle(currentHoveredIndex);
+	const ImVec2 tangent = { -std::sin(baseAngle), std::cos(baseAngle) };
+	const float rawTangential = rawDelta.x * tangent.x + rawDelta.y * tangent.y;
+	const float filteredTangential = filtered.x * tangent.x + filtered.y * tangent.y;
+	const float targetRadius = Config::AmmoWheel::WheelRadius * 0.8f;
+
+	float angularDrive = 0.0f;
+	const ImVec2 baseCursor = { targetRadius * std::cos(baseAngle), targetRadius * std::sin(baseAngle) };
+	const ImVec2 movedCursor = { baseCursor.x + rawDelta.x, baseCursor.y + rawDelta.y };
+	const float movedRadius = std::sqrt(movedCursor.x * movedCursor.x + movedCursor.y * movedCursor.y);
+	if (movedRadius > 0.001f) {
+		const float cross = baseCursor.x * movedCursor.y - baseCursor.y * movedCursor.x;
+		const float dot = baseCursor.x * movedCursor.x + baseCursor.y * movedCursor.y;
+		const float angularDelta = std::atan2(cross, dot);
+		if (std::isfinite(angularDelta)) {
+			angularDrive = angularDelta * targetRadius;
+		}
+	}
+
+	// Filtered drive keeps transitions calm; a small raw assist preserves immediacy.
+	float tangentialDrive = filteredTangential * 0.75f + rawTangential * 0.25f;
+	if (!std::isfinite(tangentialDrive)) {
+		tangentialDrive = 0.0f;
+	}
+
+	float signedDrive = tangentialDrive;
+	const bool sparseWheel = numEntries <= 5;
+	if (sparseWheel && std::isfinite(angularDrive)) {
+		if (std::abs(angularDrive) > std::abs(signedDrive)) {
+			signedDrive = angularDrive;
+		} else if (signedDrive != 0.0f && ((signedDrive > 0.0f) == (angularDrive > 0.0f))) {
+			signedDrive = signedDrive * 0.7f + angularDrive * 0.3f;
+		}
+	}
+
+	if (std::abs(signedDrive) > 0.0001f) {
+		if (_mouseSlotCarry != 0.0f && ((_mouseSlotCarry > 0.0f) != (signedDrive > 0.0f))) {
+			_mouseSlotCarry = 0.0f;
+		}
+
+		float detentThreshold = targetRadius * slotAngle * (sparseWheel ? 0.16f : 0.24f);
+		detentThreshold = sparseWheel
+			? std::clamp(detentThreshold, 10.0f, 22.0f)
+			: std::clamp(detentThreshold, 12.0f, 30.0f);
+
+		if (sparseWheel && _mouseStepLatchDirection != 0) {
+			const float latchSignedDrive = signedDrive * static_cast<float>(_mouseStepLatchDirection);
+			if (latchSignedDrive > 0.0f) {
+				_mouseSlotCarry = 0.0f;
+				syncCursorToHoveredSlot(a_dt, false);
+				return;
+			}
+			_mouseStepLatchDirection = 0;
+		}
+
+		const float maxCarry = detentThreshold * 1.15f;
+		_mouseSlotCarry = std::clamp(_mouseSlotCarry + signedDrive, -maxCarry, maxCarry);
+
+		if (std::abs(_mouseSlotCarry) >= detentThreshold) {
+			const int direction = (_mouseSlotCarry > 0.0f) ? 1 : -1;
+			_mousePendingHoverIndex = stepHoveredIndex(currentHoveredIndex, direction);
+			_mouseSlotCarry = 0.0f;
+			_mouseStepLatchDirection = sparseWheel ? direction : 0;
+		}
+	}
+
+	syncCursorToHoveredSlot(a_dt, false);
+}
+
+void AmmoWheel::syncCursorToHoveredSlot(float a_dt, bool a_immediate)
+{
+	int targetIndex = _mousePendingHoverIndex;
+	if (targetIndex < 0 || targetIndex >= static_cast<int>(_ammoEntries.size())) {
+		targetIndex = _hoveredIndex;
+	}
+	if (targetIndex < 0 || targetIndex >= static_cast<int>(_ammoEntries.size())) {
+		return;
+	}
+
+	const float targetAngle = getSlotCenterAngle(targetIndex);
+	const float targetRadius = Config::AmmoWheel::WheelRadius * 0.8f;
+	float currentAngle = targetAngle;
+	float currentRadius = targetRadius;
+
+	const float currentLen = std::sqrt(_cursorPos.x * _cursorPos.x + _cursorPos.y * _cursorPos.y);
+	if (currentLen > 0.001f) {
+		currentAngle = std::atan2(_cursorPos.y, _cursorPos.x);
+		currentRadius = currentLen;
+	}
+
+	if (!a_immediate && Config::AmmoWheel::SmoothSlotTransition) {
+		auto wrapSignedAngle = [](float value) -> float {
+			while (value <= -IM_PI) {
+				value += 2.0f * IM_PI;
+			}
+			while (value > IM_PI) {
+				value -= 2.0f * IM_PI;
+			}
+			return value;
+		};
+
+		// Keep the slot-to-slot slide visible, but trim the follow lag so popup/focus
+		// reaches the new slot sooner after a mouse step commit.
+		const float blend = 1.0f - std::exp(-24.0f * a_dt);
+		const float deltaAngle = wrapSignedAngle(targetAngle - currentAngle);
+		currentAngle += deltaAngle * blend;
+		currentRadius += (targetRadius - currentRadius) * blend;
+	} else {
+		currentAngle = targetAngle;
+		currentRadius = targetRadius;
+	}
+
+	_cursorPos.x = currentRadius * std::cos(currentAngle);
+	_cursorPos.y = currentRadius * std::sin(currentAngle);
+}
+
+float AmmoWheel::getCursorMaxRadius() const
+{
+	float maxRadius = Config::AmmoWheel::WheelRadius * 1.5f;
+	const int numEntries = static_cast<int>(_ammoEntries.size());
+	if (numEntries > 0 && numEntries <= 4) {
+		// Keep sparse-wheel cursor on a tighter ring to reduce required travel.
+		const float sparseMaxRadius =
+			Config::AmmoWheel::WheelRadius * (0.65f + 0.08f * static_cast<float>(numEntries));
+		maxRadius = (std::min)(maxRadius, sparseMaxRadius);
+	}
+	return maxRadius;
+}
+
+void AmmoWheel::syncGamepadFilterToCursor()
+{
+	const float maxRadius = getCursorMaxRadius();
+	if (maxRadius <= 0.001f) {
+		_gamepadFilter.Reset();
+		return;
+	}
+
+	_gamepadFilter.smoothedPos = {
+		std::clamp(_cursorPos.x / maxRadius, -1.0f, 1.0f),
+		std::clamp(-_cursorPos.y / maxRadius, -1.0f, 1.0f)
+	};
+}
+
 int AmmoWheel::getHoveredIndex(ImVec2 a_wheelCenter, float a_cursorAngle) const
 {
 	int numEntries = static_cast<int>(_ammoEntries.size());
@@ -5062,8 +7174,12 @@ int AmmoWheel::getHoveredIndex(ImVec2 a_wheelCenter, float a_cursorAngle) const
 	float effectiveHalf = (effectiveSlotAngle * 0.5f) - deadbandRad;
 	
 	// ========== HYSTERESIS ==========
-	// Don't switch slots unless the new candidate is significantly closer than the previous
-	float hysteresisRad = Config::AmmoWheel::GamepadHoverHysteresisDeg * (IM_PI / 180.0f);
+	// Don't switch slots unless the new candidate is significantly closer than the previous.
+	// Mouse feels better at the exact geometric midpoint; keep the extra stickiness for gamepad only.
+	const float hysteresisDeg = (_lastCursorInputSource == CursorInputSource::Gamepad)
+		? Config::AmmoWheel::GamepadHoverHysteresisDeg
+		: 0.0f;
+	float hysteresisRad = hysteresisDeg * (IM_PI / 180.0f);
 	
 	// Get distance to previous slot's center
 	float prevDist = 999.0f;
@@ -5165,8 +7281,8 @@ ImVec2 AmmoWheel::calculateCenterPanelPosition(ImVec2 a_wheelCenter) const
 		return a_wheelCenter;
 	}
 	
-	// For partial arcs, bias panel toward the arc's usable area
-	float insetFactor = Config::AmmoWheel::CenterPanelInsetRatio;
+	// For partial arcs, bias panel toward the arc's usable area.
+	float insetFactor = std::clamp(Config::AmmoWheel::CenterPanelInsetRatio, 0.0f, 1.0f);
 	float pushDistance = _cachedInnerRadius * insetFactor;
 	
 	// Push panel toward arc midpoint (into the visible arc area)
@@ -5179,9 +7295,15 @@ ImVec2 AmmoWheel::calculateCenterPanelPosition(ImVec2 a_wheelCenter) const
 	ImVec2 viewport = ResolutionScale::Context::GetSingleton().GetRenderSize();
 	float margin = Config::AmmoWheel::CenterPanelSafeMargin;
 	
-	// Estimate panel dimensions for clamping
+	// Estimate panel dimensions for clamping. Reuse stable dimensions when available.
 	float panelWidth = _cachedInnerRadius * Config::AmmoWheel::CenterMaxWidthRatio * 2.0f;
+	if (std::isfinite(_centerPanelStableWidth) && _centerPanelStableWidth > 1.0f) {
+		panelWidth = _centerPanelStableWidth;
+	}
 	float panelHeight = Config::AmmoWheel::CenterFontPx * 5.0f;
+	if (std::isfinite(_centerPanelStableHeight) && _centerPanelStableHeight > 1.0f) {
+		panelHeight = _centerPanelStableHeight;
+	}
 	
 	// Clamp X to keep panel on screen
 	biasedCenter.x = std::clamp(biasedCenter.x, 
@@ -5278,10 +7400,11 @@ TextLayout AmmoWheel::wrapTextForSlot(const char* text, float maxWidth, float fo
 	return result;
 }
 
-// ========== PHASE 1: Edge-aware word wrapping for center panel text ==========
-TextLayout AmmoWheel::wrapTextForCenterPanel(const char* text, float fontSize, ImVec2 panelCenter) const
+// ========== Edge-aware word wrapping for center panel text ==========
+TextLayout AmmoWheel::wrapTextForCenterPanel(const char* text, float fontSize, ImVec2 panelCenter, int maxLinesOverride) const
 {
 	TextLayout result;
+	(void)panelCenter;
 	
 	if (!text || !Config::AmmoWheel::EnableWordWrap) {
 		if (text) result.lines.push_back(text);
@@ -5296,22 +7419,22 @@ TextLayout AmmoWheel::wrapTextForCenterPanel(const char* text, float fontSize, I
 		return result;
 	}
 	
-	// Calculate max width based on screen position and safe margins
+	// Compute wrap width from panel geometry limits so edge-positioned half wheels remain stable.
 	ImVec2 viewport = ResolutionScale::Context::GetSingleton().GetRenderSize();
 	float safeMargin = Config::AmmoWheel::WrapSafeMarginPx;
-	
-	// Determine available width based on panel position
-	float availableLeft = panelCenter.x - safeMargin;
-	float availableRight = viewport.x - panelCenter.x - safeMargin;
-	float availableWidth = (std::min)(availableLeft, availableRight) * 2.0f;
-	
-	// Apply configured max width
+	const float panelMaxWidth = (std::max)(
+		1.0f,
+		_cachedInnerRadius * Config::AmmoWheel::CenterMaxWidthRatio * 2.0f *
+			std::clamp(Config::AmmoWheel::CenterTextMaxWidthRatio, 0.1f, 1.0f));
+
+	// Apply optional explicit width cap from config.
 	float configMaxWidth = Config::AmmoWheel::WrapMaxLineWidthPx;
 	if (configMaxWidth <= 0.0f) {
 		configMaxWidth = viewport.x * Config::AmmoWheel::WrapMaxLineWidthRatio;
 	}
-	
-	float maxWidth = (std::min)(availableWidth, configMaxWidth);
+	const float viewportMaxWidth = (std::max)(32.0f, viewport.x - safeMargin * 2.0f);
+	float maxWidth = (std::min)((std::min)(panelMaxWidth, configMaxWidth), viewportMaxWidth);
+	maxWidth = (std::max)(maxWidth, 32.0f);
 	result.maxWidth = maxWidth;
 	
 	// Check if text fits without wrapping
@@ -5341,9 +7464,15 @@ TextLayout AmmoWheel::wrapTextForCenterPanel(const char* text, float fontSize, I
 		return result;
 	}
 	
-	int maxLines = Config::AmmoWheel::WrapMaxLines;
+	int maxLines = (std::max)(1, Config::AmmoWheel::WrapMaxLines);
+	if (maxLinesOverride > 0) {
+		maxLines = maxLinesOverride;
+	} else if (Config::AmmoWheel::CenterTextMaxLines > 0) {
+		maxLines = (std::min)(maxLines, Config::AmmoWheel::CenterTextMaxLines);
+	}
 	bool addHyphen = Config::AmmoWheel::AddWrapHyphen;
 	bool preferWordBoundary = Config::AmmoWheel::WrapAtWordBoundary;
+	bool ellipsisEnabled = Config::AmmoWheel::CenterTextEllipsisEnabled;
 	
 	// Greedy word wrapping
 	std::string currentLine;
@@ -5399,7 +7528,11 @@ TextLayout AmmoWheel::wrapTextForCenterPanel(const char* text, float fontSize, I
 		if (static_cast<int>(result.lines.size()) >= maxLines - 1) {
 			ImVec2 size = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, currentLine.c_str());
 			if (size.x > maxWidth) {
-				currentLine = TruncateTextToFit(currentLine.c_str(), maxWidth - 20.0f, fontSize) + "...";
+				if (ellipsisEnabled) {
+					currentLine = TruncateTextToFit(currentLine.c_str(), maxWidth - 20.0f, fontSize) + "...";
+				} else {
+					currentLine = TruncateTextToFit(currentLine.c_str(), maxWidth, fontSize);
+				}
 			}
 		}
 		result.lines.push_back(currentLine);
@@ -5409,7 +7542,7 @@ TextLayout AmmoWheel::wrapTextForCenterPanel(const char* text, float fontSize, I
 	return result;
 }
 
-// ========== PHASE 4: Clamp cursor angle to arc bounds for half-wheel mode ==========
+// ========== Clamp cursor angle to arc bounds for half-wheel mode ==========
 float AmmoWheel::clampAngleToArc(float angle) const
 {
 	if (Config::AmmoWheel::HalfWheelClampMode == 0) {
@@ -5464,12 +7597,17 @@ float AmmoWheel::clampAngleToArc(float angle) const
 	}
 }
 
-// ========== PHASE 2: Reset navigation filters ==========
+// ========== Reset navigation filters ==========
 void AmmoWheel::ResetNavigationFilters()
 {
 	_mouseFilter.Reset();
 	_gamepadFilter.Reset();
 	_cursorPos = {0, 0};
+	_mousePendingHoverIndex = -1;
+	_mouseAccumulatedDelta = { 0.0f, 0.0f };
+	_mouseAccumulatedPeak = 0.0f;
+	_mouseSlotCarry = 0.0f;
+	_mouseStepLatchDirection = 0;
 	
 	if (Config::AmmoWheel::DebugLogNavigation) {
 		logger::info("[AmmoWheel] Navigation filters reset");
@@ -5477,7 +7615,7 @@ void AmmoWheel::ResetNavigationFilters()
 }
 
 // ========== TASK 1: Mouse button handling - block attack when wheel open ==========
-bool AmmoWheel::HandleMouseButton(int button, bool pressed)
+bool AmmoWheel::HandleMouseButton(int button, bool pressed, bool fromGamepad)
 {
 	if (!IsOpen()) {
 		return false;
@@ -5493,24 +7631,35 @@ bool AmmoWheel::HandleMouseButton(int button, bool pressed)
 		if (!Config::AmmoWheel::ConsumeLMBWhenOpen) {
 			return false;  // Don't consume LMB if disabled
 		}
-		
-		if (pressed) {
-			// Check if we require a valid hover to select
-			bool hasValidHover = (_hoveredIndex >= 0 && _hoveredIndex < static_cast<int>(_ammoEntries.size()));
-			
-			if (Config::AmmoWheel::ClickSelectRequiresHover && !hasValidHover) {
-				// No valid hover - still consume to block attack, but don't select
-				logger::debug("AmmoWheel: LMB blocked (no valid hover)");
-				return true;
+
+		if (!pressed) {
+			if (fromGamepad && _pendingCloseOnReleaseButton == button) {
+				_pendingCloseOnReleaseButton = -1;
+				Close();
 			}
+			return true;  // Consume release to keep the bound gameplay action local to AmmoWheel
+		}
+		
+		// Check if we require a valid hover to select
+		bool hasValidHover = (_hoveredIndex >= 0 && _hoveredIndex < static_cast<int>(_ammoEntries.size()));
+		
+		if (Config::AmmoWheel::ClickSelectRequiresHover && !hasValidHover) {
+			// No valid hover - still consume to block attack, but don't select
+			logger::debug("AmmoWheel: LMB blocked (no valid hover)");
+			return true;
+		}
+		
+		if (hasValidHover) {
+			// Select the hovered ammo
+			ActivateHoveredAmmo();
+			logger::info("AmmoWheel: LMB selected ammo at index {}", _hoveredIndex);
 			
-			if (hasValidHover) {
-				// Select the hovered ammo
-				ActivateHoveredAmmo();
-				logger::info("AmmoWheel: LMB selected ammo at index {}", _hoveredIndex);
-				
-				// Close if configured (works in both RTU and fixed-open modes)
-				if (Config::AmmoWheel::CloseOnSelection) {
+			// For gamepad, defer close until the button release so vanilla shout/power
+			// bindings on the same shoulder button never see a free release edge.
+			if (Config::AmmoWheel::CloseOnSelection) {
+				if (fromGamepad) {
+					_pendingCloseOnReleaseButton = button;
+				} else {
 					Close();
 				}
 			}

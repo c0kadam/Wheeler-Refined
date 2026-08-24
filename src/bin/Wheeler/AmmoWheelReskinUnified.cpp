@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <fmt/format.h>
 #include "SimpleIni.h"
@@ -22,6 +23,9 @@ extern "C" {
 
 namespace
 {
+	constexpr const char* kAmmoWheelIniPath = R"(.\Data\SKSE\Plugins\wheeler\AmmoWheel.ini)";
+	constexpr const char* kAmmoWheelDefaultsIniPath = R"(.\Data\SKSE\Plugins\wheeler\AmmoWheel.defaults.ini)";
+
 	struct SvgSizeInfo
 	{
 		float width = 0.0f;
@@ -308,6 +312,150 @@ namespace
 		outH = height;
 		return true;
 	}
+
+	bool LoadIniFileIntoSimpleIni(const std::string& path, CSimpleIniA& outIni)
+	{
+		try {
+			outIni.Reset();
+			outIni.SetUnicode();
+			if (outIni.LoadFile(path.c_str()) != SI_OK) {
+				logger::warn("[AmmoWheelReskinUnified] Failed to parse ini: {}", path);
+				return false;
+			}
+			return true;
+		} catch (const std::exception& e) {
+			logger::warn("[AmmoWheelReskinUnified] Exception while loading ini '{}': {}", path, e.what());
+			return false;
+		} catch (...) {
+			logger::warn("[AmmoWheelReskinUnified] Unknown exception while loading ini '{}'", path);
+			return false;
+		}
+	}
+
+	void MergeIniInto(const CSimpleIniA& overlay, CSimpleIniA& target)
+	{
+		CSimpleIniA::TNamesDepend sections;
+		overlay.GetAllSections(sections);
+		for (const auto& sectionEntry : sections) {
+			const char* section = sectionEntry.pItem;
+			if (!section) {
+				continue;
+			}
+
+			CSimpleIniA::TNamesDepend keys;
+			overlay.GetAllKeys(section, keys);
+			for (const auto& keyEntry : keys) {
+				const char* key = keyEntry.pItem;
+				const char* value = overlay.GetValue(section, key, nullptr);
+				if (key && value) {
+					target.SetValue(section, key, value);
+				}
+			}
+		}
+	}
+
+	bool LoadAmmoWheelConfigIni(CSimpleIniA& outIni)
+	{
+		outIni.Reset();
+		outIni.SetUnicode();
+
+		bool loadedAny = false;
+		std::error_code ec;
+		if (std::filesystem::exists(kAmmoWheelDefaultsIniPath, ec) && !ec) {
+			if (LoadIniFileIntoSimpleIni(kAmmoWheelDefaultsIniPath, outIni)) {
+				loadedAny = true;
+			}
+		}
+
+		CSimpleIniA userIni;
+		ec.clear();
+		if (std::filesystem::exists(kAmmoWheelIniPath, ec) && !ec) {
+			if (LoadIniFileIntoSimpleIni(kAmmoWheelIniPath, userIni)) {
+				MergeIniInto(userIni, outIni);
+				loadedAny = true;
+			}
+		}
+
+		return loadedAny;
+	}
+
+	std::vector<std::string> GetSortedIniFiles(const std::string& dirPath)
+	{
+		std::vector<std::string> files;
+		std::error_code ec;
+		if (!std::filesystem::exists(dirPath, ec) || ec) {
+			return files;
+		}
+		if (!std::filesystem::is_directory(dirPath, ec) || ec) {
+			return files;
+		}
+
+		std::filesystem::directory_iterator endIt;
+		for (std::filesystem::directory_iterator it(dirPath, ec); !ec && it != endIt; it.increment(ec)) {
+			if (ec) {
+				break;
+			}
+			if (!it->is_regular_file(ec) || ec) {
+				continue;
+			}
+			std::string ext = it->path().extension().string();
+			std::transform(ext.begin(), ext.end(), ext.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			if (ext == ".ini") {
+				files.push_back(it->path().string());
+			}
+		}
+		if (ec) {
+			logger::warn("[AmmoWheelReskinUnified] Failed to enumerate INI files in '{}': {}", dirPath, ec.message());
+		}
+
+		std::sort(files.begin(), files.end(),
+			[](const std::string& a, const std::string& b) {
+				std::string fa = std::filesystem::path(a).filename().string();
+				std::string fb = std::filesystem::path(b).filename().string();
+				std::transform(fa.begin(), fa.end(), fa.begin(),
+					[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				std::transform(fb.begin(), fb.end(), fb.begin(),
+					[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				if (fa != fb) {
+					return fa < fb;
+				}
+				return a < b;
+			});
+		return files;
+	}
+
+	float SanitizeLayoutScale(float value)
+	{
+		if (!std::isfinite(value) || value <= 0.0f) {
+			return 1.0f;
+		}
+		return std::clamp(value, 0.05f, 8.0f);
+	}
+
+	float SanitizeLayoutOffset(float value)
+	{
+		if (!std::isfinite(value)) {
+			return 0.0f;
+		}
+		return std::clamp(value, -5000.0f, 5000.0f);
+	}
+
+	float SanitizeLayoutAngleDeg(float value)
+	{
+		if (!std::isfinite(value)) {
+			return 0.0f;
+		}
+		return std::clamp(value, -720.0f, 720.0f);
+	}
+
+	float SanitizeLayoutOpacity(float value)
+	{
+		if (!std::isfinite(value)) {
+			return 1.0f;
+		}
+		return std::clamp(value, 0.0f, 1.0f);
+	}
 }
 
 namespace AmmoWheelReskinUnified
@@ -325,9 +473,35 @@ namespace AmmoWheelReskinUnified
 			case VisualTarget::IndicatorCharge: return "IndicatorCharge";
 			case VisualTarget::Popup: return "Popup";
 			case VisualTarget::PopupBubble: return "PopupBubble";
+			case VisualTarget::WheelBackdrop: return "WheelBackdrop";
 			case VisualTarget::WheelBackground: return "WheelBackground";
 			case VisualTarget::CenterBackground: return "CenterBackground";
+			case VisualTarget::WheelBorderRing: return "WheelBorderRing";
+			case VisualTarget::SlotDivider: return "SlotDivider";
+			case VisualTarget::NamePanelBackground: return "NamePanelBackground";
+			case VisualTarget::SlotLabelText: return "SlotLabelText";
+			case VisualTarget::CursorIndicator: return "CursorIndicator";
+			case VisualTarget::LowAmmoIndicator: return "LowAmmoIndicator";
+			case VisualTarget::PopupBubbleRim: return "PopupBubbleRim";
+			case VisualTarget::PopupBubbleGlow: return "PopupBubbleGlow";
+			case VisualTarget::CenterPanelFrame: return "CenterPanelFrame";
+			case VisualTarget::CenterDescriptionText: return "CenterDescriptionText";
+			case VisualTarget::DamageDigits: return "DamageDigits";
+			case VisualTarget::MaxDamageDigits: return "MaxDamageDigits";
+			case VisualTarget::AmmoCountDigits: return "AmmoCountDigits";
 			default: return "Unknown";
+		}
+	}
+
+	namespace
+	{
+		bool IsSlotIndicatorTarget(VisualTarget target)
+		{
+			return target == VisualTarget::IndicatorSelected ||
+				target == VisualTarget::IndicatorHovered ||
+				target == VisualTarget::IndicatorActive ||
+				target == VisualTarget::IndicatorCharge ||
+				target == VisualTarget::LowAmmoIndicator;
 		}
 	}
 
@@ -459,6 +633,80 @@ namespace AmmoWheelReskinUnified
 		logger::info("[AmmoWheelReskinUnified] Reloaded");
 	}
 
+	void ReskinSystem::ReloadSmartFromIni()
+	{
+		bool needsHeavyReload = false;
+		{
+			std::lock_guard<std::mutex> lock(_mutex);
+			if (!_initialized) {
+				return;
+			}
+
+			CSimpleIniA ini;
+			if (!LoadAmmoWheelConfigIni(ini)) {
+				return;
+			}
+
+			const bool newEnabled = ini.GetBoolValue("Reskin", "Enabled", false);
+			const std::string newBasePath = ini.GetValue("Reskin", "BasePath",
+				R"(.\Data\SKSE\Plugins\wheeler\resources\ammo_wheel)");
+
+			std::string newActivePresetPath;
+			const int activePreset = static_cast<int>(ini.GetLongValue("Presets", "ActivePreset", 0));
+			if (activePreset > 0 && activePreset <= 3) {
+				newActivePresetPath = fmt::format(R"(.\Data\SKSE\Plugins\wheeler\presets\{})", activePreset);
+			}
+
+			const uint32_t newMaxTotalFrames = static_cast<uint32_t>(
+				ini.GetLongValue("Safety", "MaxTotalFrames", MAX_TOTAL_FRAMES));
+			const uint64_t newMaxTotalBytes = static_cast<uint64_t>(static_cast<uint32_t>(
+				ini.GetLongValue("Safety", "MaxTotalBytesMB", MAX_TOTAL_BYTES_MB))) * 1024ULL * 1024ULL;
+			const uint32_t newMaxTextureSize = static_cast<uint32_t>(
+				ini.GetLongValue("Safety", "MaxTextureSize", MAX_TEXTURE_SIZE));
+			const uint64_t newMaxPngFileBytes = static_cast<uint64_t>(static_cast<uint32_t>(
+				ini.GetLongValue("Safety", "MaxPngFileMB", MAX_PNG_FILE_MB))) * 1024ULL * 1024ULL;
+
+			needsHeavyReload =
+				(newEnabled != _enabled) ||
+				(newBasePath != _basePath) ||
+				(newActivePresetPath != _activePresetPath) ||
+				(newMaxTotalFrames != _maxTotalFrames) ||
+				(newMaxTotalBytes != _maxTotalBytes) ||
+				(newMaxTextureSize != _maxTextureSize) ||
+				(newMaxPngFileBytes != _maxPngFileBytes);
+
+			if (!needsHeavyReload) {
+				auto readColor = [&](const char* key, ImU32 defaultVal) -> ImU32 {
+					const char* val = ini.GetValue("Primitives", key, nullptr);
+					if (!val) {
+						return defaultVal;
+					}
+					try {
+						return static_cast<ImU32>(std::stoul(val, nullptr, 0));
+					} catch (...) {
+						return defaultVal;
+					}
+				};
+
+				_primitiveFallback.slotUnhoveredInner = readColor("SlotUnhoveredInner", _defaultPreset.primitives.slotUnhoveredInner);
+				_primitiveFallback.slotUnhoveredOuter = readColor("SlotUnhoveredOuter", _defaultPreset.primitives.slotUnhoveredOuter);
+				_primitiveFallback.slotHoveredInner = readColor("SlotHoveredInner", _defaultPreset.primitives.slotHoveredInner);
+				_primitiveFallback.slotHoveredOuter = readColor("SlotHoveredOuter", _defaultPreset.primitives.slotHoveredOuter);
+				_primitiveFallback.indicatorSelectedInner = readColor("IndicatorSelectedInner", _defaultPreset.primitives.indicatorSelectedInner);
+				_primitiveFallback.indicatorSelectedOuter = readColor("IndicatorSelectedOuter", _defaultPreset.primitives.indicatorSelectedOuter);
+				_primitiveFallback.textPrimary = readColor("TextPrimary", _defaultPreset.primitives.textPrimary);
+				_primitiveFallback.textShadow = readColor("TextShadow", _defaultPreset.primitives.textShadow);
+
+				LoadLayoutOverrides(ini);
+			}
+		}
+
+		if (needsHeavyReload) {
+			logger::info("[AmmoWheelReskinUnified] ReloadSmartFromIni: critical reskin config changed, doing full reload");
+			Reload();
+		}
+	}
+
 	PerfStats ReskinSystem::ConsumePerfStats()
 	{
 		PerfStats out;
@@ -492,17 +740,17 @@ namespace AmmoWheelReskinUnified
 		// Default primitive colors (Skyrim-inspired)
 		_defaultPreset.primitives = PrimitiveFallback{};
 		_primitiveFallback = _defaultPreset.primitives;
+		_layoutOverrides.fill(LayoutOverride{});
 	}
 
 	void ReskinSystem::LoadConfig()
 	{
-		const char* iniPath = R"(.\Data\SKSE\Plugins\wheeler\AmmoWheel.ini)";
-		
 		CSimpleIniA ini;
 		ini.SetUnicode();
-		if (ini.LoadFile(iniPath) != SI_OK) {
-			logger::info("[AmmoWheelReskinUnified] AmmoWheel.ini not found, reskin disabled");
+		if (!LoadAmmoWheelConfigIni(ini)) {
+			logger::info("[AmmoWheelReskinUnified] AmmoWheel config not found, reskin disabled");
 			_enabled = false;
+			_layoutOverrides.fill(LayoutOverride{});
 			return;
 		}
 		
@@ -563,8 +811,41 @@ namespace AmmoWheelReskinUnified
 			_primitiveFallback.textPrimary);
 		_primitiveFallback.textShadow = readColor("TextShadow",
 			_primitiveFallback.textShadow);
+
+		LoadLayoutOverrides(ini);
 		
 		logger::info("[AmmoWheelReskinUnified] Config loaded: enabled={}", _enabled);
+	}
+
+	void ReskinSystem::LoadLayoutOverrides(const CSimpleIniA& ini)
+	{
+		for (size_t i = 0; i < static_cast<size_t>(VisualTarget::COUNT); ++i) {
+			const auto target = static_cast<VisualTarget>(i);
+			const char* targetName = GetTargetName(target);
+			const std::string section = std::string("Reskin.Layout.") + targetName;
+
+			LayoutOverride overrideValue{};
+			overrideValue.scale = SanitizeLayoutScale(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "Scale", 1.0)));
+			overrideValue.offsetX = SanitizeLayoutOffset(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "OffsetX", 0.0)));
+			overrideValue.offsetY = SanitizeLayoutOffset(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "OffsetY", 0.0)));
+			overrideValue.offsetRadial = SanitizeLayoutOffset(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "OffsetRadial", 0.0)));
+			overrideValue.offsetTangential = SanitizeLayoutOffset(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "OffsetTangential", 0.0)));
+			overrideValue.angleOffsetDeg = SanitizeLayoutAngleDeg(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "AngleOffsetDeg", 0.0)));
+			overrideValue.selfRotationDeg = SanitizeLayoutAngleDeg(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "SelfRotationDeg", 0.0)));
+			overrideValue.opacity = SanitizeLayoutOpacity(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "Opacity", 1.0)));
+			overrideValue.digitSpacingOffsetPx = SanitizeLayoutOffset(static_cast<float>(
+				ini.GetDoubleValue(section.c_str(), "DigitSpacingOffsetPx", 0.0)));
+
+			_layoutOverrides[i] = overrideValue;
+		}
 	}
 
 	void ReskinSystem::LoadPresets()
@@ -573,8 +854,7 @@ namespace AmmoWheelReskinUnified
 		if (!_activePresetPath.empty()) {
 			std::string presetStylesPath = _activePresetPath + "\\Styles.ini";
 			CSimpleIniA presetIni;
-			presetIni.SetUnicode();
-			if (presetIni.LoadFile(presetStylesPath.c_str()) == SI_OK) {
+			if (LoadIniFileIntoSimpleIni(presetStylesPath, presetIni)) {
 				logger::info("[AmmoWheelReskinUnified] Loading preset Styles.ini from {}", presetStylesPath);
 				
 				// Load primitive colors from preset
@@ -604,20 +884,14 @@ namespace AmmoWheelReskinUnified
 		}
 		
 		std::string stylesPath = _basePath + "\\AmmoWheel_Styles.ini";
-		
-		CSimpleIniA ini;
-		ini.SetUnicode();
-		if (ini.LoadFile(stylesPath.c_str()) != SI_OK) {
-			logger::info("[AmmoWheelReskinUnified] AmmoWheel_Styles.ini not found at {}", stylesPath);
-			return;
-		}
-		
-		CSimpleIniA::TNamesDepend sections;
-		ini.GetAllSections(sections);
-		
-		for (const auto& section : sections) {
-			std::string sectionName = section.pItem;
-			if (sectionName.rfind("Preset_", 0) != 0) continue;
+		uint32_t totalPresetSections = 0;
+		uint32_t extraFilesDiscovered = 0;
+		uint32_t extraFilesLoaded = 0;
+
+		auto parsePresetSection = [&](const CSimpleIniA& ini, const std::string& sectionName) -> bool {
+			if (sectionName.rfind("Preset_", 0) != 0) {
+				return false;
+			}
 			
 			std::string presetId = sectionName.substr(7);
 			
@@ -642,21 +916,43 @@ namespace AmmoWheelReskinUnified
 				std::string usePrimitiveKey = std::string(prefix) + "_UsePrimitive";
 				std::string pathKey = std::string(prefix) + "_Path";
 				std::string flipbookKey = std::string(prefix) + "_IsFlipbook";
+				std::string atlasKey = std::string(prefix) + "_IsAtlas";
 				std::string frameCountKey = std::string(prefix) + "_FrameCount";
 				std::string fpsKey = std::string(prefix) + "_FPS";
 				std::string loopKey = std::string(prefix) + "_Loop";
+				std::string progressDrivenKey = std::string(prefix) + "_ProgressDriven";
+				std::string startTimeModeKey = std::string(prefix) + "_StartTimeMode";
 				std::string alphaKey = std::string(prefix) + "_Alpha";
 				std::string rotationModeKey = std::string(prefix) + "_RotationMode";
 				std::string rotationOffsetKey = std::string(prefix) + "_RotationOffsetDeg";
 				std::string fitModeKey = std::string(prefix) + "_FitMode";
 				std::string fixedSizeKey = std::string(prefix) + "_FixedSizePx";
 				std::string safetyScaleKey = std::string(prefix) + "_RotationSafetyScale";
+				// Optional atlas keys (used by AmmoCountDigits):
+				// <Prefix>_AtlasCols, <Prefix>_AtlasRows, <Prefix>_DigitSpacingPx
+				std::string atlasColsKey = std::string(prefix) + "_AtlasCols";
+				std::string atlasRowsKey = std::string(prefix) + "_AtlasRows";
+				std::string digitSpacingKey = std::string(prefix) + "_DigitSpacingPx";
 				
 				asset.enabled = ini.GetBoolValue(sectionName.c_str(), enabledKey.c_str(), false);
 				asset.usePrimitive = ini.GetBoolValue(sectionName.c_str(), usePrimitiveKey.c_str(), false);
 				if (!asset.enabled) return;
+				asset.atlasCols = static_cast<uint8_t>(std::clamp(
+					static_cast<int>(ini.GetLongValue(sectionName.c_str(), atlasColsKey.c_str(), 10)),
+					1, 255));
+				asset.atlasRows = static_cast<uint8_t>(std::clamp(
+					static_cast<int>(ini.GetLongValue(sectionName.c_str(), atlasRowsKey.c_str(), 1)),
+					1, 255));
+				asset.digitSpacingPx = static_cast<float>(
+					ini.GetDoubleValue(sectionName.c_str(), digitSpacingKey.c_str(), 0.0));
 				
 				bool isFlipbook = ini.GetBoolValue(sectionName.c_str(), flipbookKey.c_str(), false);
+				bool isAtlas = ini.GetBoolValue(sectionName.c_str(), atlasKey.c_str(), false);
+				if (isFlipbook && isAtlas) {
+					logger::warn("[AmmoWheelReskinUnified] [{}] {} has both IsFlipbook and IsAtlas=true; preferring flipbook",
+						sectionName, prefix);
+					isAtlas = false;
+				}
 				
 				if (isFlipbook) {
 					asset.type = AssetType::Flipbook;
@@ -666,6 +962,27 @@ namespace AmmoWheelReskinUnified
 					asset.flipbook.fps = static_cast<float>(
 						ini.GetDoubleValue(sectionName.c_str(), fpsKey.c_str(), DEFAULT_FPS));
 					asset.flipbook.loop = ini.GetBoolValue(sectionName.c_str(), loopKey.c_str(), true);
+					// Optional: <Prefix>_ProgressDriven=1 uses DrawContext::progress to pick frame.
+					asset.flipbook.progressDriven = ini.GetBoolValue(
+						sectionName.c_str(), progressDrivenKey.c_str(), false);
+					int startTimeMode = static_cast<int>(ini.GetLongValue(
+						sectionName.c_str(), startTimeModeKey.c_str(),
+						static_cast<long>(StartTimeMode::Global)));
+					asset.flipbook.startTimeMode = static_cast<StartTimeMode>(std::clamp(startTimeMode, 0, 2));
+				} else if (isAtlas) {
+					asset.type = AssetType::AtlasSheet;
+					asset.staticPath = ini.GetValue(sectionName.c_str(), pathKey.c_str(), "");
+					asset.flipbook.frameCount = static_cast<uint32_t>(
+						ini.GetLongValue(sectionName.c_str(), frameCountKey.c_str(), 0));
+					asset.flipbook.fps = static_cast<float>(
+						ini.GetDoubleValue(sectionName.c_str(), fpsKey.c_str(), DEFAULT_FPS));
+					asset.flipbook.loop = ini.GetBoolValue(sectionName.c_str(), loopKey.c_str(), true);
+					asset.flipbook.progressDriven = ini.GetBoolValue(
+						sectionName.c_str(), progressDrivenKey.c_str(), false);
+					int startTimeMode = static_cast<int>(ini.GetLongValue(
+						sectionName.c_str(), startTimeModeKey.c_str(),
+						static_cast<long>(StartTimeMode::Global)));
+					asset.flipbook.startTimeMode = static_cast<StartTimeMode>(std::clamp(startTimeMode, 0, 2));
 				} else {
 					asset.type = AssetType::StaticPNG;
 					asset.staticPath = ini.GetValue(sectionName.c_str(), pathKey.c_str(), "");
@@ -701,68 +1018,173 @@ namespace AmmoWheelReskinUnified
 			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::Popup)], "Popup", RotationMode::Upright);
 			// PopupBubble: the actual popup bubble outside the wheel (distinct from slot hover overlay)
 			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::PopupBubble)], "PopupBubble", RotationMode::Upright);
-			// Wheel and Center backgrounds default to Upright (no rotation)
+			// Wheel backdrop/background and center background default to Upright (no rotation)
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::WheelBackdrop)], "WheelBackdrop", RotationMode::Upright);
 			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::WheelBackground)], "WheelBackground", RotationMode::Upright);
 			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::CenterBackground)], "CenterBackground", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::WheelBorderRing)], "WheelBorderRing", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::SlotDivider)], "SlotDivider", RotationMode::FollowSlot);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::NamePanelBackground)], "NamePanelBackground", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::SlotLabelText)], "SlotLabelText", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::CursorIndicator)], "CursorIndicator", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::LowAmmoIndicator)], "LowAmmoIndicator", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::PopupBubbleRim)], "PopupBubbleRim", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::PopupBubbleGlow)], "PopupBubbleGlow", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::CenterPanelFrame)], "CenterPanelFrame", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::CenterDescriptionText)], "CenterDescriptionText", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::DamageDigits)], "DamageDigits", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::MaxDamageDigits)], "MaxDamageDigits", RotationMode::Upright);
+			loadAsset(preset.assets[static_cast<size_t>(VisualTarget::AmmoCountDigits)], "AmmoCountDigits", RotationMode::Upright);
 			
 			_presets[presetId] = preset;
-			logger::info("[AmmoWheelReskinUnified] Loaded preset: {}", presetId);
+			return true;
+		};
+
+		auto loadPresetSectionsFromIni = [&](const CSimpleIniA& ini, const std::string& sourcePath) {
+			CSimpleIniA::TNamesDepend sections;
+			ini.GetAllSections(sections);
+
+			uint32_t loadedFromFile = 0;
+			for (const auto& section : sections) {
+				const std::string sectionName = section.pItem;
+				if (parsePresetSection(ini, sectionName)) {
+					loadedFromFile++;
+					totalPresetSections++;
+				}
+			}
+
+			if (loadedFromFile > 0 || Config::AmmoWheel::Debug::LogAssetLoading) {
+				logger::info("[AmmoWheelReskinUnified] Preset file '{}' loaded {} preset section(s)",
+					sourcePath, loadedFromFile);
+			}
+		};
+
+		std::error_code ec;
+		if (std::filesystem::exists(stylesPath, ec) && !ec) {
+			CSimpleIniA baseIni;
+			if (LoadIniFileIntoSimpleIni(stylesPath, baseIni)) {
+				loadPresetSectionsFromIni(baseIni, stylesPath);
+			}
+		} else {
+			logger::info("[AmmoWheelReskinUnified] AmmoWheel_Styles.ini not found at {}", stylesPath);
 		}
+
+		const std::string stylesDir = _basePath + "\\styles";
+		const auto styleFiles = GetSortedIniFiles(stylesDir);
+		extraFilesDiscovered = static_cast<uint32_t>(styleFiles.size());
+		for (const auto& styleFile : styleFiles) {
+			CSimpleIniA modularIni;
+			if (!LoadIniFileIntoSimpleIni(styleFile, modularIni)) {
+				continue;
+			}
+			extraFilesLoaded++;
+			loadPresetSectionsFromIni(modularIni, styleFile);
+		}
+
+		logger::info(
+			"[AmmoWheelReskinUnified] Presets summary: sections={} uniquePresets={} extraFilesLoaded={} extraFilesDiscovered={}",
+			totalPresetSections,
+			_presets.size(),
+			extraFilesLoaded,
+			extraFilesDiscovered);
 	}
 
 	void ReskinSystem::LoadMappings()
 	{
 		std::string kidPath = _basePath + "\\AMMO_KID.ini";
-		
-		CSimpleIniA ini;
-		ini.SetUnicode();
-		if (ini.LoadFile(kidPath.c_str()) != SI_OK) {
-			logger::info("[AmmoWheelReskinUnified] AMMO_KID.ini not found at {}", kidPath);
-			return;
-		}
-		
-		// FormID mappings
-		CSimpleIniA::TNamesDepend keys;
-		ini.GetAllKeys("FormIDPresets", keys);
-		for (const auto& key : keys) {
-			std::string formIDStr = key.pItem;
-			std::string presetId = ini.GetValue("FormIDPresets", formIDStr.c_str(), "");
-			if (presetId.empty()) continue;
-			
-			try {
-				// Parse the FormID string (e.g., "020098A0" for Dawnguard)
-				// NOTE: GetFormID() returns compile-time FormIDs, so we store them directly
-				RE::FormID formID = static_cast<RE::FormID>(std::stoul(formIDStr, nullptr, 16));
-				
-				_formIDToPreset[formID] = presetId;
-				
-				if (Config::AmmoWheel::Debug::LogPresetResolution) {
-					if (presetId == "BloodcursedElvenArrow" || presetId == "SunhallowedElvenArrow") {
-						logger::info("[AmmoWheelReskinUnified] Stored mapping: 0x{:08X} = {}", formID, presetId);
-					}
+		uint32_t appliedFormEntries = 0;
+		uint32_t appliedKeywordEntries = 0;
+		uint32_t extraFilesDiscovered = 0;
+		uint32_t extraFilesLoaded = 0;
+
+		auto mergeMappingsFromIni = [&](const CSimpleIniA& ini, const std::string& sourcePath) {
+			uint32_t fileFormCount = 0;
+			uint32_t fileKeywordCount = 0;
+
+			CSimpleIniA::TNamesDepend keys;
+			ini.GetAllKeys("FormIDPresets", keys);
+			for (const auto& key : keys) {
+				const std::string formIDStr = key.pItem;
+				const std::string presetId = ini.GetValue("FormIDPresets", formIDStr.c_str(), "");
+				if (presetId.empty()) {
+					continue;
 				}
-			} catch (...) {
-				logger::warn("[AmmoWheelReskinUnified] Invalid FormID: {}", formIDStr);
+
+				try {
+					RE::FormID formID = static_cast<RE::FormID>(std::stoul(formIDStr, nullptr, 16));
+					_formIDToPreset[formID] = presetId;
+					fileFormCount++;
+					appliedFormEntries++;
+
+					if (Config::AmmoWheel::Debug::LogPresetResolution) {
+						if (presetId == "BloodcursedElvenArrow" || presetId == "SunhallowedElvenArrow") {
+							logger::info("[AmmoWheelReskinUnified] Stored mapping: 0x{:08X} = {}", formID, presetId);
+						}
+					}
+				} catch (...) {
+					logger::warn("[AmmoWheelReskinUnified] Invalid FormID '{}' in {}", formIDStr, sourcePath);
+				}
 			}
-		}
-		
-		// Keyword mappings
-		keys.clear();
-		ini.GetAllKeys("KeywordPresets", keys);
-		for (const auto& key : keys) {
-			std::string keyword = key.pItem;
-			std::string presetId = ini.GetValue("KeywordPresets", keyword.c_str(), "");
-			if (!presetId.empty()) {
-				_keywordToPreset[keyword] = presetId;
+
+			keys.clear();
+			ini.GetAllKeys("KeywordPresets", keys);
+			for (const auto& key : keys) {
+				const std::string keyword = key.pItem;
+				const std::string presetId = ini.GetValue("KeywordPresets", keyword.c_str(), "");
+				if (!presetId.empty()) {
+					_keywordToPreset[keyword] = presetId;
+					fileKeywordCount++;
+					appliedKeywordEntries++;
+				}
 			}
+
+			const char* arrowPreset = ini.GetValue("TypePresets", "Arrow", nullptr);
+			if (arrowPreset && arrowPreset[0] != '\0') {
+				_arrowDefaultPreset = arrowPreset;
+			}
+			const char* boltPreset = ini.GetValue("TypePresets", "Bolt", nullptr);
+			if (boltPreset && boltPreset[0] != '\0') {
+				_boltDefaultPreset = boltPreset;
+			}
+
+			if (fileFormCount > 0 || fileKeywordCount > 0 || Config::AmmoWheel::Debug::LogPresetResolution) {
+				logger::info("[AmmoWheelReskinUnified] Mapping file '{}' applied FormID={} Keyword={}",
+					sourcePath, fileFormCount, fileKeywordCount);
+			}
+		};
+
+		std::error_code ec;
+		if (std::filesystem::exists(kidPath, ec) && !ec) {
+			CSimpleIniA baseIni;
+			if (LoadIniFileIntoSimpleIni(kidPath, baseIni)) {
+				mergeMappingsFromIni(baseIni, kidPath);
+			}
+		} else {
+			logger::info("[AmmoWheelReskinUnified] AMMO_KID.ini not found at {}", kidPath);
 		}
-		
-		// Type defaults
-		_arrowDefaultPreset = ini.GetValue("TypePresets", "Arrow", _arrowDefaultPreset.c_str());
-		_boltDefaultPreset = ini.GetValue("TypePresets", "Bolt", _boltDefaultPreset.c_str());
-		
-		logger::info("[AmmoWheelReskinUnified] Loaded {} FormID mappings, {} Keyword mappings",
-			_formIDToPreset.size(), _keywordToPreset.size());
+
+		const std::string mappingsDir = _basePath + "\\mappings";
+		const auto mappingFiles = GetSortedIniFiles(mappingsDir);
+		extraFilesDiscovered = static_cast<uint32_t>(mappingFiles.size());
+		for (const auto& mappingFile : mappingFiles) {
+			CSimpleIniA modularIni;
+			if (!LoadIniFileIntoSimpleIni(mappingFile, modularIni)) {
+				continue;
+			}
+			extraFilesLoaded++;
+			mergeMappingsFromIni(modularIni, mappingFile);
+		}
+
+		logger::info(
+			"[AmmoWheelReskinUnified] Mappings summary: formIDs={} keywords={} appliedFormEntries={} appliedKeywordEntries={} extraFilesLoaded={} extraFilesDiscovered={} typeDefaults=(Arrow='{}', Bolt='{}')",
+			_formIDToPreset.size(),
+			_keywordToPreset.size(),
+			appliedFormEntries,
+			appliedKeywordEntries,
+			extraFilesLoaded,
+			extraFilesDiscovered,
+			_arrowDefaultPreset,
+			_boltDefaultPreset);
 	}
 
 	void ReskinSystem::PrewarmDefaultWeaponPresets()
@@ -815,9 +1237,16 @@ namespace AmmoWheelReskinUnified
 				continue;
 			}
 
-			if (asset.type == AssetType::StaticPNG) {
+			if (asset.type == AssetType::StaticPNG || asset.type == AssetType::AtlasSheet) {
 				std::string fullPath = _basePath + "\\" + asset.staticPath;
-				(void)GetTexture(fullPath, 256);
+				int warmRequestPx = 256;
+				if (asset.type == AssetType::AtlasSheet) {
+					const int atlasMult = (std::max)(1, (std::max)(
+						static_cast<int>(asset.atlasCols),
+						static_cast<int>(asset.atlasRows)));
+					warmRequestPx = std::clamp(warmRequestPx * atlasMult, 64, static_cast<int>(_maxTextureSize));
+				}
+				(void)GetTexture(fullPath, warmRequestPx);
 			} else if (asset.type == AssetType::Flipbook) {
 				// Warm and cache this flipbook ahead of first render-time use.
 				(void)GetFlipbookFrame(asset.flipbook, 0.0f, 0, 0);
@@ -933,18 +1362,73 @@ namespace AmmoWheelReskinUnified
 			finalizePerf();
 			return false;
 		}
-		
-		// TASK 4: If PopupFlipbookEnabled is false and this is PopupBubble, skip flipbook and use primitive
-		if (target == VisualTarget::PopupBubble && !Config::AmmoWheel::PopupFlipbookEnabled) {
-			if (Config::AmmoWheel::Debug::LogAssetLoading) {
-				static bool loggedOnce = false;
-				if (!loggedOnce) {
-					logger::info("[AmmoWheelReskinUnified] PopupFlipbookEnabled=false, using primitive fallback for PopupBubble");
-					loggedOnce = true;
-				}
+		const bool logThisTarget = Config::AmmoWheel::Debug::LogAssetLoading &&
+			(target == VisualTarget::PopupBubble || target == VisualTarget::SlotDivider);
+
+		DrawContext ctxAdjusted = ctx;
+		if (!(ctxAdjusted.sizeScale > 0.0f) || !std::isfinite(ctxAdjusted.sizeScale)) {
+			ctxAdjusted.sizeScale = 1.0f;
+		}
+		LayoutOverride layoutOverride = GetLayoutOverrideSnapshot(target);
+		if (IsSlotIndicatorTarget(target)) {
+			// Keep indicator transforms locked to SlotFrame so slot-cover
+			// indicator assets stay aligned with frame tuning across all slots.
+			const LayoutOverride slotFrameLayout = GetLayoutOverrideSnapshot(VisualTarget::SlotFrame);
+			layoutOverride.scale = SanitizeLayoutScale(slotFrameLayout.scale * layoutOverride.scale);
+			layoutOverride.offsetX = SanitizeLayoutOffset(slotFrameLayout.offsetX + layoutOverride.offsetX);
+			layoutOverride.offsetY = SanitizeLayoutOffset(slotFrameLayout.offsetY + layoutOverride.offsetY);
+			layoutOverride.offsetRadial = SanitizeLayoutOffset(slotFrameLayout.offsetRadial + layoutOverride.offsetRadial);
+			layoutOverride.offsetTangential = SanitizeLayoutOffset(slotFrameLayout.offsetTangential + layoutOverride.offsetTangential);
+			layoutOverride.angleOffsetDeg = SanitizeLayoutAngleDeg(slotFrameLayout.angleOffsetDeg + layoutOverride.angleOffsetDeg);
+			layoutOverride.selfRotationDeg = SanitizeLayoutAngleDeg(slotFrameLayout.selfRotationDeg + layoutOverride.selfRotationDeg);
+			layoutOverride.opacity = SanitizeLayoutOpacity(slotFrameLayout.opacity * layoutOverride.opacity);
+		}
+		const float baseAngle = ctxAdjusted.slotAngleRad;
+		ctxAdjusted.sizeScale = SanitizeLayoutScale(ctxAdjusted.sizeScale * layoutOverride.scale);
+		ctxAdjusted.center.x += layoutOverride.offsetX;
+		ctxAdjusted.center.y += layoutOverride.offsetY;
+		if (std::fabs(layoutOverride.offsetRadial) > 0.001f || std::fabs(layoutOverride.offsetTangential) > 0.001f) {
+			const float cosA = std::cos(baseAngle);
+			const float sinA = std::sin(baseAngle);
+			ctxAdjusted.center.x += cosA * layoutOverride.offsetRadial - sinA * layoutOverride.offsetTangential;
+			ctxAdjusted.center.y += sinA * layoutOverride.offsetRadial + cosA * layoutOverride.offsetTangential;
+		}
+		ctxAdjusted.slotAngleRad = baseAngle + layoutOverride.angleOffsetDeg * (3.14159265f / 180.0f);
+		ctxAdjusted.alphaMult *= layoutOverride.opacity;
+
+		// Reskin-only pulse for hovered indicator overlays so custom slot-cover
+		// assets can achieve a smooth breathing highlight while hovering.
+		if (target == VisualTarget::IndicatorHovered && ctxAdjusted.hovered && Config::AmmoWheel::HoverPulseEnabled) {
+			const float pulseTime = static_cast<float>(ImGui::GetTime()) * Config::AmmoWheel::HoverPulseSpeed;
+			const float pulse = 0.5f + 0.5f * std::sin(pulseTime);
+			const float sizeAmp = std::clamp(Config::AmmoWheel::HoverPulseSize / 100.0f, 0.0f, 0.30f);
+			ctxAdjusted.sizeScale = SanitizeLayoutScale(ctxAdjusted.sizeScale * (1.0f + sizeAmp * pulse));
+			ctxAdjusted.alphaMult *= (0.70f + 0.30f * pulse);
+		}
+		// Match primitive selected blink behavior for selected-indicator assets:
+		// alpha pulses using SelectedBlink* config so the whole selected slot can
+		// appear to "breathe" when indicator artwork covers the slot.
+		if (target == VisualTarget::IndicatorSelected && ctxAdjusted.selected) {
+			if (Config::AmmoWheel::SelectedBlinkEnabled) {
+				const float time = static_cast<float>(ImGui::GetTime());
+				const float phase = std::sin(time * Config::AmmoWheel::SelectedBlinkSpeedHz * 2.0f * 3.14159f);
+				const float t = 0.5f + 0.5f * phase;
+				const float blinkAlpha = std::clamp(
+					Config::AmmoWheel::SelectedBlinkMinAlpha +
+						(Config::AmmoWheel::SelectedBlinkMaxAlpha - Config::AmmoWheel::SelectedBlinkMinAlpha) * t,
+					0.0f,
+					1.0f);
+				ctxAdjusted.alphaMult *= blinkAlpha;
 			}
-			finalizePerf();
-			return false;  // Force primitive fallback
+			ctxAdjusted.sizeScale = SanitizeLayoutScale(ctxAdjusted.sizeScale * Config::AmmoWheel::SelectedIndicatorSizeScale);
+		}
+		if (IsSlotIndicatorTarget(target)) {
+			// Indicator targets already have explicit pulse wiring in DrawTarget.
+			// Disable generic selected-tint pulse to avoid stacked double blinking.
+			ctxAdjusted.allowSelectedTintPulse = false;
+			// Keep indicator rendering deterministic; geometry is derived from SlotFrame
+			// below so indicator overlays follow the same slot-frame axis/fit.
+			ctxAdjusted.autoCenterByAlphaBounds = false;
 		}
 		
 		size_t idx = static_cast<size_t>(target);
@@ -953,7 +1437,7 @@ namespace AmmoWheelReskinUnified
 		// CHECK FOR PRIMITIVE FALLBACK FLAG
 		// If usePrimitive is true, force primitive fallback regardless of asset
 		if (assetPtr->usePrimitive) {
-			if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+			if (logThisTarget) {
 				logger::info("[AmmoWheelReskinUnified] DrawTarget: {} usePrimitive=true, forcing primitive fallback", 
 					GetTargetName(target));
 			}
@@ -968,7 +1452,7 @@ namespace AmmoWheelReskinUnified
 		
 		if (!assetPtr->enabled || assetPtr->type == AssetType::None) {
 			// Secondary fallback: check Default preset (from _presets, not _defaultPreset)
-			if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+			if (logThisTarget) {
 				logger::info("[AmmoWheelReskinUnified] DrawTarget: {} asset not enabled in preset '{}', checking Default fallback", 
 					GetTargetName(target), entry.preset->id);
 			}
@@ -977,13 +1461,13 @@ namespace AmmoWheelReskinUnified
 			if (defaultIt != _presets.end()) {
 				const AssetDef& defaultAsset = defaultIt->second.assets[idx];
 				if (defaultAsset.enabled && defaultAsset.type != AssetType::None) {
-					if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+					if (logThisTarget) {
 						logger::info("[AmmoWheelReskinUnified] DrawTarget: Using Default preset's {} asset as fallback", 
 							GetTargetName(target));
 					}
 					assetPtr = &defaultAsset;
 				} else {
-					if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+					if (logThisTarget) {
 						logger::info("[AmmoWheelReskinUnified] DrawTarget: Default preset also doesn't have {} enabled, using primitive", 
 							GetTargetName(target));
 					}
@@ -991,7 +1475,7 @@ namespace AmmoWheelReskinUnified
 					return false;  // Default preset also doesn't have this asset enabled
 				}
 			} else {
-				if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+				if (logThisTarget) {
 					logger::warn("[AmmoWheelReskinUnified] DrawTarget: No Default preset found in _presets map!");
 				}
 				finalizePerf();
@@ -1000,34 +1484,113 @@ namespace AmmoWheelReskinUnified
 		}
 		
 		const AssetDef& asset = *assetPtr;
+		const AssetDef* slotFrameGeometryAsset = nullptr;
+		if (IsSlotIndicatorTarget(target)) {
+			const auto isDrawableAsset = [](const AssetDef& candidate) {
+				return candidate.enabled &&
+					!candidate.usePrimitive &&
+					candidate.type != AssetType::None;
+			};
+
+			const size_t slotFrameIdx = static_cast<size_t>(VisualTarget::SlotFrame);
+			if (slotFrameIdx < static_cast<size_t>(VisualTarget::COUNT)) {
+				const AssetDef& presetSlotFrame = entry.preset->assets[slotFrameIdx];
+				if (isDrawableAsset(presetSlotFrame)) {
+					slotFrameGeometryAsset = &presetSlotFrame;
+				} else {
+					auto defaultIt = _presets.find("Default");
+					if (defaultIt != _presets.end()) {
+						const AssetDef& defaultSlotFrame = defaultIt->second.assets[slotFrameIdx];
+						if (isDrawableAsset(defaultSlotFrame)) {
+							slotFrameGeometryAsset = &defaultSlotFrame;
+						}
+					}
+				}
+			}
+		}
+
+		auto buildDrawAssetForTarget = [&](const AssetDef& sourceAsset) {
+			AssetDef drawAsset = sourceAsset;
+			if (slotFrameGeometryAsset) {
+				// For indicator targets, inherit SlotFrame placement geometry so
+				// indicator overlays sit exactly on top of slot frames.
+				drawAsset.fitMode = slotFrameGeometryAsset->fitMode;
+				drawAsset.fixedSizePx = slotFrameGeometryAsset->fixedSizePx;
+				drawAsset.paddingPx = slotFrameGeometryAsset->paddingPx;
+				drawAsset.rotationSafetyScale = slotFrameGeometryAsset->rotationSafetyScale;
+				drawAsset.rotationMode = slotFrameGeometryAsset->rotationMode;
+				drawAsset.rotationOffsetDeg = slotFrameGeometryAsset->rotationOffsetDeg;
+			}
+			drawAsset.rotationOffsetDeg = SanitizeLayoutAngleDeg(drawAsset.rotationOffsetDeg + layoutOverride.selfRotationDeg);
+			return drawAsset;
+		};
+
 		auto computeRequestedMaxPx = [&](const AssetDef& drawAsset) -> int {
 			float drawSize = drawAsset.fixedSizePx;
 			if (drawAsset.fitMode == FitMode::FitInsideSlot) {
-				drawSize = ctx.radius * 2.0f * drawAsset.rotationSafetyScale - drawAsset.paddingPx * 2.0f;
+				const float heightLimit =
+					ctxAdjusted.radius * 2.0f * drawAsset.rotationSafetyScale - drawAsset.paddingPx * 2.0f;
+				float widthLimit = heightLimit;
+				if (ctxAdjusted.maxFitSizePx > 1.0f && std::isfinite(ctxAdjusted.maxFitSizePx)) {
+					widthLimit = ctxAdjusted.maxFitSizePx - drawAsset.paddingPx * 2.0f;
+				}
+				drawSize = (std::max)(heightLimit, widthLimit);
 			}
 			if (!std::isfinite(drawSize)) {
 				drawSize = drawAsset.fixedSizePx;
 			}
+			drawSize *= ctxAdjusted.sizeScale;
 			drawSize = (std::max)(drawSize, 1.0f);
 			return static_cast<int>(std::ceil(drawSize));
 		};
+
+		auto computeRequestedTexturePx = [&](const AssetDef& drawAsset) -> int {
+			int requestedPx = computeRequestedMaxPx(drawAsset);
+			if (drawAsset.type == AssetType::AtlasSheet) {
+				const int atlasMult = (std::max)(1, (std::max)(
+					static_cast<int>(drawAsset.atlasCols),
+					static_cast<int>(drawAsset.atlasRows)));
+				requestedPx = std::clamp(requestedPx * atlasMult, 1, static_cast<int>(_maxTextureSize));
+			}
+			return requestedPx;
+		};
+
+		const bool popupFlipbookBlocked =
+			target == VisualTarget::PopupBubble && !Config::AmmoWheel::PopupFlipbookEnabled;
 		
 		// Try to draw the asset
 		bool drewAsset = false;
-		if (asset.type == AssetType::StaticPNG) {
-			std::string fullPath = _basePath + "\\" + asset.staticPath;
-			TextureHandle* tex = GetTexture(fullPath, computeRequestedMaxPx(asset));
+		const AssetDef drawAsset = buildDrawAssetForTarget(asset);
+		if (drawAsset.type == AssetType::StaticPNG) {
+			std::string fullPath = _basePath + "\\" + drawAsset.staticPath;
+			TextureHandle* tex = GetTexture(fullPath, computeRequestedTexturePx(drawAsset));
 			if (tex && tex->IsValid()) {
-				DrawStaticTexture(tex, asset, ctx, drawList);
+				DrawStaticTexture(tex, drawAsset, ctxAdjusted, drawList);
 				drewAsset = true;
 			}
-		} else if (asset.type == AssetType::Flipbook) {
-			drewAsset = DrawFlipbookTexture(asset.flipbook, asset, ctx, drawList);
+		} else if (drawAsset.type == AssetType::AtlasSheet) {
+			std::string fullPath = _basePath + "\\" + drawAsset.staticPath;
+			TextureHandle* tex = GetTexture(fullPath, computeRequestedTexturePx(drawAsset));
+			if (tex && tex->IsValid()) {
+				drewAsset = DrawAtlasTexture(tex, drawAsset, ctxAdjusted, drawList);
+			}
+		} else if (drawAsset.type == AssetType::Flipbook) {
+			if (popupFlipbookBlocked) {
+				if (logThisTarget) {
+					static bool loggedOnce = false;
+					if (!loggedOnce) {
+						logger::info("[AmmoWheelReskinUnified] PopupFlipbookEnabled=false, blocking PopupBubble flipbook (static/atlas still allowed)");
+						loggedOnce = true;
+					}
+				}
+			} else {
+				drewAsset = DrawFlipbookTexture(drawAsset.flipbook, drawAsset, ctxAdjusted, drawList);
+			}
 		}
 		
 		// If asset loading failed AND we're not already using Default preset, try Default as fallback
 		if (!drewAsset && entry.preset->id != "Default") {
-			if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+			if (logThisTarget) {
 				logger::info("[AmmoWheelReskinUnified] DrawTarget: {} asset loading failed for preset '{}', trying Default fallback", 
 					GetTargetName(target), entry.preset->id);
 			}
@@ -1036,22 +1599,43 @@ namespace AmmoWheelReskinUnified
 			if (defaultIt != _presets.end()) {
 				const AssetDef& defaultAsset = defaultIt->second.assets[idx];
 				if (defaultAsset.enabled && defaultAsset.type != AssetType::None) {
-					if (Config::AmmoWheel::Debug::LogAssetLoading && target == VisualTarget::PopupBubble) {
+					if (logThisTarget) {
 						logger::info("[AmmoWheelReskinUnified] DrawTarget: Using Default preset's {} asset as fallback after load failure", 
 							GetTargetName(target));
 					}
 					
 					// Try to draw Default preset's asset
-					if (defaultAsset.type == AssetType::StaticPNG) {
-						std::string fullPath = _basePath + "\\" + defaultAsset.staticPath;
-						TextureHandle* tex = GetTexture(fullPath, computeRequestedMaxPx(defaultAsset));
+					const AssetDef fallbackDrawAsset = buildDrawAssetForTarget(defaultAsset);
+					if (fallbackDrawAsset.type == AssetType::StaticPNG) {
+						std::string fullPath = _basePath + "\\" + fallbackDrawAsset.staticPath;
+						TextureHandle* tex = GetTexture(fullPath, computeRequestedTexturePx(fallbackDrawAsset));
 						if (tex && tex->IsValid()) {
-							DrawStaticTexture(tex, defaultAsset, ctx, drawList);
+							DrawStaticTexture(tex, fallbackDrawAsset, ctxAdjusted, drawList);
 							finalizePerf();
 							return true;
 						}
-					} else if (defaultAsset.type == AssetType::Flipbook) {
-						const bool drewFallbackFlipbook = DrawFlipbookTexture(defaultAsset.flipbook, defaultAsset, ctx, drawList);
+					} else if (fallbackDrawAsset.type == AssetType::AtlasSheet) {
+						std::string fullPath = _basePath + "\\" + fallbackDrawAsset.staticPath;
+						TextureHandle* tex = GetTexture(fullPath, computeRequestedTexturePx(fallbackDrawAsset));
+						if (tex && tex->IsValid()) {
+							const bool drewFallbackAtlas = DrawAtlasTexture(
+								tex,
+								fallbackDrawAsset,
+								ctxAdjusted,
+								drawList);
+							finalizePerf();
+							return drewFallbackAtlas;
+						}
+					} else if (fallbackDrawAsset.type == AssetType::Flipbook) {
+						if (popupFlipbookBlocked) {
+							finalizePerf();
+							return false;
+						}
+						const bool drewFallbackFlipbook = DrawFlipbookTexture(
+							fallbackDrawAsset.flipbook,
+							fallbackDrawAsset,
+							ctxAdjusted,
+							drawList);
 						finalizePerf();
 						return drewFallbackFlipbook;
 					}
@@ -1061,6 +1645,186 @@ namespace AmmoWheelReskinUnified
 		
 		finalizePerf();
 		return drewAsset;
+	}
+
+	bool ReskinSystem::DrawDigitString(VisualTarget target, const ResolvedEntry& entry,
+		const DrawContext& baseCtx, std::string_view digitsOnly, float digitHeightPx,
+		ImDrawList* drawList, float* outTotalWidthPx)
+	{
+		if (outTotalWidthPx) {
+			*outTotalWidthPx = 0.0f;
+		}
+		const bool isDigitAtlasTarget =
+			target == VisualTarget::AmmoCountDigits ||
+			target == VisualTarget::DamageDigits ||
+			target == VisualTarget::MaxDamageDigits;
+		if (!isDigitAtlasTarget || !_enabled || !entry.preset || !drawList ||
+			digitsOnly.empty() || !(digitHeightPx > 0.0f)) {
+			return false;
+		}
+
+		DrawContext adjustedBaseCtx = baseCtx;
+		if (!(adjustedBaseCtx.sizeScale > 0.0f) || !std::isfinite(adjustedBaseCtx.sizeScale)) {
+			adjustedBaseCtx.sizeScale = 1.0f;
+		}
+		const LayoutOverride layoutOverride = GetLayoutOverrideSnapshot(target);
+		const float baseAngle = adjustedBaseCtx.slotAngleRad;
+		adjustedBaseCtx.sizeScale = SanitizeLayoutScale(adjustedBaseCtx.sizeScale * layoutOverride.scale);
+		adjustedBaseCtx.center.x += layoutOverride.offsetX;
+		adjustedBaseCtx.center.y += layoutOverride.offsetY;
+		if (std::fabs(layoutOverride.offsetRadial) > 0.001f || std::fabs(layoutOverride.offsetTangential) > 0.001f) {
+			const float cosA = std::cos(baseAngle);
+			const float sinA = std::sin(baseAngle);
+			adjustedBaseCtx.center.x += cosA * layoutOverride.offsetRadial - sinA * layoutOverride.offsetTangential;
+			adjustedBaseCtx.center.y += sinA * layoutOverride.offsetRadial + cosA * layoutOverride.offsetTangential;
+		}
+		adjustedBaseCtx.slotAngleRad = baseAngle + layoutOverride.angleOffsetDeg * (3.14159265f / 180.0f);
+		adjustedBaseCtx.alphaMult *= layoutOverride.opacity;
+
+		const size_t idx = static_cast<size_t>(target);
+		const AssetDef* assetPtr = &entry.preset->assets[idx];
+		if (assetPtr->usePrimitive) {
+			return false;
+		}
+		if (!assetPtr->enabled || assetPtr->type == AssetType::None) {
+			auto defaultIt = _presets.find("Default");
+			if (defaultIt == _presets.end()) {
+				return false;
+			}
+			const AssetDef& defaultAsset = defaultIt->second.assets[idx];
+			if (!defaultAsset.enabled || defaultAsset.usePrimitive || defaultAsset.type == AssetType::None) {
+				return false;
+			}
+			assetPtr = &defaultAsset;
+		}
+
+		const AssetDef& asset = *assetPtr;
+		if (asset.type != AssetType::StaticPNG || asset.staticPath.empty()) {
+			return false;
+		}
+
+		const int cols = (std::max)(1, static_cast<int>(asset.atlasCols));
+		const int rows = (std::max)(1, static_cast<int>(asset.atlasRows));
+		const float safeDigitHeightPx = (std::max)(digitHeightPx, 1.0f);
+		const float effectiveScale = SanitizeLayoutScale(adjustedBaseCtx.sizeScale);
+		const int requestedMaxPx = static_cast<int>(std::ceil(
+			safeDigitHeightPx * effectiveScale * static_cast<float>((std::max)(cols, rows))));
+		std::string fullPath = _basePath + "\\" + asset.staticPath;
+		TextureHandle* tex = GetTexture(fullPath, requestedMaxPx);
+		if (!tex || !tex->IsValid()) {
+			return false;
+		}
+
+		const float cellW = static_cast<float>(tex->width) / static_cast<float>(cols);
+		const float cellH = static_cast<float>(tex->height) / static_cast<float>(rows);
+		if (!(cellW > 0.0f) || !(cellH > 0.0f)) {
+			return false;
+		}
+		const float cellAspect = cellW / cellH;
+		if (!(cellAspect > 0.0f) || !std::isfinite(cellAspect)) {
+			return false;
+		}
+		const float digitW = safeDigitHeightPx * cellAspect * effectiveScale;
+		if (!(digitW > 0.0f) || !std::isfinite(digitW)) {
+			return false;
+		}
+
+		size_t validDigitCount = 0;
+		for (char c : digitsOnly) {
+			if (c >= '0' && c <= '9') {
+				++validDigitCount;
+			}
+		}
+		if (validDigitCount == 0) {
+			return false;
+		}
+
+		const float baseSpacing = std::isfinite(asset.digitSpacingPx) ? asset.digitSpacingPx : 0.0f;
+		const float spacingPx = baseSpacing + layoutOverride.digitSpacingOffsetPx;
+		float spacing = spacingPx * effectiveScale;
+		// Keep center-step positive to avoid mirrored/reversed digit order.
+		spacing = (std::max)(spacing, -digitW + 1.0f);
+		const float totalW = static_cast<float>(validDigitCount) * digitW +
+			static_cast<float>((validDigitCount > 1) ? (validDigitCount - 1) : 0) * spacing;
+		if (outTotalWidthPx) {
+			*outTotalWidthPx = totalW;
+		}
+		const float startX = adjustedBaseCtx.center.x - totalW * 0.5f + digitW * 0.5f;
+		AssetDef digitAsset = asset;
+		digitAsset.fitMode = FitMode::FixedPixels;
+		digitAsset.fixedSizePx = safeDigitHeightPx;
+		digitAsset.rotationOffsetDeg = SanitizeLayoutAngleDeg(
+			digitAsset.rotationOffsetDeg + layoutOverride.selfRotationDeg);
+
+		size_t renderIndex = 0;
+		for (char c : digitsOnly) {
+			if (c < '0' || c > '9') {
+				continue;
+			}
+			const int digit = c - '0';
+			const int col = digit % cols;
+			int row = digit / cols;
+			if (row >= rows) {
+				row = rows - 1;
+			}
+
+			const float colsF = static_cast<float>(cols);
+			const float rowsF = static_cast<float>(rows);
+			const ImVec2 uvMin(
+				static_cast<float>(col) / colsF,
+				static_cast<float>(row) / rowsF);
+			const ImVec2 uvMax(
+				static_cast<float>(col + 1) / colsF,
+				static_cast<float>(row + 1) / rowsF);
+
+			DrawContext digitCtx = adjustedBaseCtx;
+			digitCtx.center = ImVec2(
+				startX + static_cast<float>(renderIndex) * (digitW + spacing),
+				adjustedBaseCtx.center.y);
+			digitCtx.radius = safeDigitHeightPx * 0.5f;
+			DrawStaticTextureRegion(tex, digitAsset, digitCtx, drawList, uvMin, uvMax, cellAspect);
+			++renderIndex;
+		}
+
+		return renderIndex > 0;
+	}
+
+	LayoutOverride ReskinSystem::GetLayoutOverrideSnapshot(VisualTarget target) const
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+		return GetLayoutOverride(target);
+	}
+
+	bool ReskinSystem::HasAssetForTarget(VisualTarget target, const ResolvedEntry& entry) const
+	{
+		if (!_enabled || !entry.preset) {
+			return false;
+		}
+
+		std::lock_guard<std::mutex> lock(_mutex);
+		const size_t idx = static_cast<size_t>(target);
+		if (idx >= static_cast<size_t>(VisualTarget::COUNT)) {
+			return false;
+		}
+
+		const AssetDef& presetAsset = entry.preset->assets[idx];
+		if (presetAsset.usePrimitive) {
+			return false;
+		}
+		if (presetAsset.enabled && presetAsset.type != AssetType::None) {
+			return true;
+		}
+
+		auto defaultIt = _presets.find("Default");
+		if (defaultIt == _presets.end()) {
+			return false;
+		}
+
+		const AssetDef& defaultAsset = defaultIt->second.assets[idx];
+		if (defaultAsset.usePrimitive) {
+			return false;
+		}
+		return defaultAsset.enabled && defaultAsset.type != AssetType::None;
 	}
 
 	TextureHandle* ReskinSystem::GetTexture(const std::string& path, int requestedMaxPx)
@@ -1178,6 +1942,38 @@ namespace AmmoWheelReskinUnified
 			return cacheFailureAndReturn();
 		}
 
+		// Compute visible-content center from alpha bounds once per texture.
+		// This is used by indicator targets to auto-center non-uniform canvases.
+		bool hasContentBounds = false;
+		float contentOffsetXNorm = 0.0f;
+		float contentOffsetYNorm = 0.0f;
+		{
+			int minX = width;
+			int minY = height;
+			int maxX = -1;
+			int maxY = -1;
+			const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+			for (size_t p = 0; p < pixelCount; ++p) {
+				const uint8_t alpha = decodedRgba[p * 4 + 3];
+				if (alpha <= 8) {
+					continue;
+				}
+				const int x = static_cast<int>(p % static_cast<size_t>(width));
+				const int y = static_cast<int>(p / static_cast<size_t>(width));
+				minX = (std::min)(minX, x);
+				minY = (std::min)(minY, y);
+				maxX = (std::max)(maxX, x);
+				maxY = (std::max)(maxY, y);
+			}
+			if (maxX >= minX && maxY >= minY) {
+				const float contentCx = (static_cast<float>(minX + maxX) + 1.0f) * 0.5f;
+				const float contentCy = (static_cast<float>(minY + maxY) + 1.0f) * 0.5f;
+				contentOffsetXNorm = std::clamp(contentCx / static_cast<float>(width) - 0.5f, -0.5f, 0.5f);
+				contentOffsetYNorm = std::clamp(contentCy / static_cast<float>(height) - 0.5f, -0.5f, 0.5f);
+				hasContentBounds = true;
+			}
+		}
+
 		const uint64_t bytesEstimate = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4;
 		if (bytesEstimate > _maxTotalBytes) {
 			logger::warn("[AmmoWheelReskinUnified] Texture exceeds Safety.MaxTotalBytesMB: {} ({} bytes > {})",
@@ -1258,6 +2054,9 @@ namespace AmmoWheelReskinUnified
 		handle.bytesEstimate = bytesEstimate;
 		handle.valid = true;
 		handle.lastUsed = std::chrono::steady_clock::now();
+		handle.hasContentBounds = hasContentBounds;
+		handle.contentCenterOffsetXNorm = contentOffsetXNorm;
+		handle.contentCenterOffsetYNorm = contentOffsetYNorm;
 
 		_textureCache[cacheKey] = handle;
 		_totalTextureBytes += handle.bytesEstimate;
@@ -1270,22 +2069,73 @@ namespace AmmoWheelReskinUnified
 	void ReskinSystem::DrawStaticTexture(TextureHandle* tex, const AssetDef& asset,
 		const DrawContext& ctx, ImDrawList* drawList)
 	{
-		if (!tex || !tex->IsValid() || !drawList) return;
-		
-		float drawSize = asset.fixedSizePx;
-		if (asset.fitMode == FitMode::FitInsideSlot) {
-			drawSize = ctx.radius * 2.0f * asset.rotationSafetyScale - asset.paddingPx * 2.0f;
+		if (!tex || !tex->IsValid()) {
+			return;
 		}
-		
-		float aspectRatio = static_cast<float>(tex->width) / static_cast<float>(tex->height);
+		const float fullAspect = static_cast<float>(tex->width) / static_cast<float>(tex->height);
+		DrawStaticTextureRegion(tex, asset, ctx, drawList,
+			ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), fullAspect);
+	}
+
+	void ReskinSystem::DrawStaticTextureRegion(TextureHandle* tex, const AssetDef& asset,
+		const DrawContext& ctx, ImDrawList* drawList,
+		ImVec2 uvMin, ImVec2 uvMax, float regionAspectRatio)
+	{
+		if (!tex || !tex->IsValid() || !drawList) {
+			return;
+		}
+
+		float drawSize = asset.fixedSizePx;
+		float widthLimit = drawSize;
+		float heightLimit = drawSize;
+		bool hasFitBox = false;
+		if (asset.fitMode == FitMode::FitInsideSlot) {
+			heightLimit = ctx.radius * 2.0f * asset.rotationSafetyScale - asset.paddingPx * 2.0f;
+			if (!std::isfinite(heightLimit) || heightLimit <= 0.0f) {
+				heightLimit = asset.fixedSizePx;
+			}
+			widthLimit = heightLimit;
+			if (ctx.maxFitSizePx > 1.0f && std::isfinite(ctx.maxFitSizePx)) {
+				widthLimit = ctx.maxFitSizePx - asset.paddingPx * 2.0f;
+			}
+			if (!std::isfinite(widthLimit) || widthLimit <= 0.0f) {
+				widthLimit = heightLimit;
+			}
+			drawSize = (std::max)(heightLimit, widthLimit);
+			hasFitBox = (widthLimit > 0.0f && heightLimit > 0.0f);
+		}
+		if (!std::isfinite(drawSize) || drawSize <= 0.0f) {
+			drawSize = asset.fixedSizePx;
+		}
+		if (!std::isfinite(drawSize) || drawSize <= 0.0f) {
+			drawSize = 1.0f;
+		}
+
+		float aspectRatio = regionAspectRatio;
+		if (!(aspectRatio > 0.0f) || !std::isfinite(aspectRatio)) {
+			aspectRatio = static_cast<float>(tex->width) / static_cast<float>(tex->height);
+		}
 		float drawWidth = drawSize;
 		float drawHeight = drawSize;
-		if (aspectRatio > 1.0f) {
+		if (hasFitBox) {
+			// Preserve asset aspect while fitting to slot box (tangential width + radial height).
+			const float boxAspect = widthLimit / heightLimit;
+			if (aspectRatio >= boxAspect) {
+				drawWidth = widthLimit;
+				drawHeight = widthLimit / aspectRatio;
+			} else {
+				drawHeight = heightLimit;
+				drawWidth = heightLimit * aspectRatio;
+			}
+		} else if (aspectRatio > 1.0f) {
 			drawHeight = drawSize / aspectRatio;
 		} else {
 			drawWidth = drawSize * aspectRatio;
 		}
-		
+		const float sizeScale = SanitizeLayoutScale(ctx.sizeScale);
+		drawWidth *= sizeScale;
+		drawHeight *= sizeScale;
+
 		float rotation = 0.0f;
 		switch (asset.rotationMode) {
 			case RotationMode::FollowSlot:
@@ -1296,9 +2146,9 @@ namespace AmmoWheelReskinUnified
 				rotation = asset.rotationOffsetDeg * (3.14159265f / 180.0f);
 				break;
 		}
-		
+
 		ImU32 tint = asset.tintColor;
-		
+
 		// Apply hover brightness effect if enabled (tint the PNG brighter)
 		if (ctx.hovered && Config::AmmoWheel::HoverBrightnessEnabled) {
 			float strength = Config::AmmoWheel::HoverBrightnessStrength;
@@ -1308,44 +2158,52 @@ namespace AmmoWheelReskinUnified
 			f.z = (std::min)(f.z * strength, 1.0f);
 			tint = ImGui::ColorConvertFloat4ToU32(f);
 		}
-		
+
 		// Apply selected blink effect if enabled (brightness pulse)
-		if (ctx.selected && Config::AmmoWheel::SelectedBlinkEnabled) {
+		if (ctx.allowSelectedTintPulse && ctx.selected && Config::AmmoWheel::SelectedBlinkEnabled) {
 			float time = static_cast<float>(ImGui::GetTime());
 			float blinkPhase = std::sin(time * Config::AmmoWheel::SelectedBlinkSpeedHz * 2.0f * 3.14159f);
 			float blinkT = 0.5f + 0.5f * blinkPhase;  // 0 to 1
 			float blinkStrength = 1.0f + Config::AmmoWheel::SelectedSlotBlinkStrength * blinkT;
-			
+
 			ImVec4 f = ImGui::ColorConvertU32ToFloat4(tint);
 			f.x = (std::min)(f.x * blinkStrength, 1.0f);
 			f.y = (std::min)(f.y * blinkStrength, 1.0f);
 			f.z = (std::min)(f.z * blinkStrength, 1.0f);
 			tint = ImGui::ColorConvertFloat4ToU32(f);
 		}
-		
+
 		uint8_t alpha = static_cast<uint8_t>((tint >> 24) * asset.alpha * ctx.alphaMult);
 		tint = (tint & 0x00FFFFFF) | (alpha << 24);
-		
+
 		float halfW = drawWidth * 0.5f;
 		float halfH = drawHeight * 0.5f;
 		float cosR = std::cos(rotation);
 		float sinR = std::sin(rotation);
-		
+		float localCenterX = 0.0f;
+		float localCenterY = 0.0f;
+		if (ctx.autoCenterByAlphaBounds && tex->hasContentBounds) {
+			localCenterX = -tex->contentCenterOffsetXNorm * drawWidth;
+			localCenterY = -tex->contentCenterOffsetYNorm * drawHeight;
+		}
+
 		ImVec2 corners[4] = {
-			{ -halfW, -halfH }, {  halfW, -halfH },
-			{  halfW,  halfH }, { -halfW,  halfH }
+			{ localCenterX - halfW, localCenterY - halfH }, { localCenterX + halfW, localCenterY - halfH },
+			{ localCenterX + halfW, localCenterY + halfH }, { localCenterX - halfW, localCenterY + halfH }
 		};
 		ImVec2 uvs[4] = {
-			{ 0.0f, 0.0f }, { 1.0f, 0.0f },
-			{ 1.0f, 1.0f }, { 0.0f, 1.0f }
+			{ std::clamp(uvMin.x, 0.0f, 1.0f), std::clamp(uvMin.y, 0.0f, 1.0f) },
+			{ std::clamp(uvMax.x, 0.0f, 1.0f), std::clamp(uvMin.y, 0.0f, 1.0f) },
+			{ std::clamp(uvMax.x, 0.0f, 1.0f), std::clamp(uvMax.y, 0.0f, 1.0f) },
+			{ std::clamp(uvMin.x, 0.0f, 1.0f), std::clamp(uvMax.y, 0.0f, 1.0f) }
 		};
-		
+
 		for (int i = 0; i < 4; ++i) {
 			float x = corners[i].x * cosR - corners[i].y * sinR;
 			float y = corners[i].x * sinR + corners[i].y * cosR;
 			corners[i] = ImVec2(ctx.center.x + x, ctx.center.y + y);
 		}
-		
+
 		drawList->AddImageQuad(
 			reinterpret_cast<ImTextureID>(tex->srv),
 			corners[0], corners[1], corners[2], corners[3],
@@ -1353,12 +2211,110 @@ namespace AmmoWheelReskinUnified
 			tint);
 	}
 
+	bool ReskinSystem::DrawAtlasTexture(TextureHandle* tex, const AssetDef& asset,
+		const DrawContext& ctx, ImDrawList* drawList)
+	{
+		if (!tex || !tex->IsValid() || !drawList) {
+			return false;
+		}
+
+		const int cols = (std::max)(1, static_cast<int>(asset.atlasCols));
+		const int rows = (std::max)(1, static_cast<int>(asset.atlasRows));
+		const int totalCells = (std::max)(1, cols * rows);
+		const int configuredFrameCount = static_cast<int>(asset.flipbook.frameCount);
+		const int frameCount = std::clamp(
+			configuredFrameCount > 0 ? configuredFrameCount : totalCells,
+			1,
+			totalCells);
+
+		int frameIndex = 0;
+		if (frameCount > 1) {
+			if (asset.flipbook.progressDriven) {
+				if (ctx.progress > 1.0f) {
+					frameIndex = static_cast<int>(std::lround(ctx.progress));
+				} else {
+					const float t = std::clamp(ctx.progress, 0.0f, 1.0f);
+					frameIndex = static_cast<int>(std::lround(t * static_cast<float>(frameCount - 1)));
+				}
+			} else {
+				const float fps = std::clamp(asset.flipbook.fps, MIN_FPS, MAX_FPS);
+				const float safeFps = (fps > 0.0f && std::isfinite(fps)) ? fps : DEFAULT_FPS;
+				float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - _startTime).count();
+
+				if (asset.flipbook.startTimeMode == StartTimeMode::PerSlot && ctx.slotIndex >= 0) {
+					t += static_cast<float>(ctx.slotIndex) * 0.1f;
+				} else if (asset.flipbook.startTimeMode == StartTimeMode::PerEntry) {
+					t += static_cast<float>(ctx.formID % 1000) * 0.001f;
+				}
+
+				float framePos = t * safeFps;
+				if (asset.flipbook.loop) {
+					framePos = std::fmod(framePos, static_cast<float>(frameCount));
+					if (framePos < 0.0f) {
+						framePos += static_cast<float>(frameCount);
+					}
+				} else {
+					framePos = std::clamp(framePos, 0.0f, static_cast<float>(frameCount - 1));
+				}
+				frameIndex = static_cast<int>(std::floor(framePos));
+			}
+		}
+
+		frameIndex = std::clamp(frameIndex, 0, frameCount - 1);
+		const int frameX = frameIndex % cols;
+		const int frameY = frameIndex / cols;
+
+		const float invCols = 1.0f / static_cast<float>(cols);
+		const float invRows = 1.0f / static_cast<float>(rows);
+		const ImVec2 uvMin(frameX * invCols, frameY * invRows);
+		const ImVec2 uvMax((frameX + 1) * invCols, (frameY + 1) * invRows);
+
+		const float cellW = static_cast<float>(tex->width) * invCols;
+		const float cellH = static_cast<float>(tex->height) * invRows;
+		const float cellAspect = (cellH > 0.0f) ? (cellW / cellH) : 1.0f;
+
+		DrawStaticTextureRegion(tex, asset, ctx, drawList, uvMin, uvMax, cellAspect);
+		return true;
+	}
+
+	const LayoutOverride& ReskinSystem::GetLayoutOverride(VisualTarget target) const
+	{
+		static const LayoutOverride kDefault{};
+		const size_t idx = static_cast<size_t>(target);
+		if (idx >= _layoutOverrides.size()) {
+			return kDefault;
+		}
+		return _layoutOverrides[idx];
+	}
+
 	bool ReskinSystem::DrawFlipbookTexture(const FlipbookDef& def, const AssetDef& asset,
 		const DrawContext& ctx, ImDrawList* drawList)
 	{
-		TextureHandle* frame = GetFlipbookFrame(def, 
-			std::chrono::duration<float>(std::chrono::steady_clock::now() - _startTime).count(),
-			ctx.slotIndex, ctx.formID);
+		TextureHandle* frame = nullptr;
+		if (def.progressDriven) {
+			// Ensure frames are loaded/cached; frame choice below is driven by DrawContext::progress.
+			(void)GetFlipbookFrame(def, 0.0f, ctx.slotIndex, ctx.formID);
+
+			const std::string key = def.pattern + "|" + std::to_string(def.frameCount);
+			auto it = _flipbookCache.find(key);
+			if (it != _flipbookCache.end() && it->second.loaded && !it->second.frames.empty()) {
+				const int frameCount = static_cast<int>(it->second.frames.size());
+				int frameIndex = 0;
+				if (ctx.progress > 1.0f) {
+					// progress > 1 uses absolute frame index mode.
+					frameIndex = static_cast<int>(std::lround(ctx.progress));
+				} else {
+					const float t = std::clamp(ctx.progress, 0.0f, 1.0f);
+					frameIndex = static_cast<int>(std::lround(t * static_cast<float>(frameCount - 1)));
+				}
+				frameIndex = std::clamp(frameIndex, 0, frameCount - 1);
+				frame = it->second.frames[static_cast<size_t>(frameIndex)];
+			}
+		} else {
+			frame = GetFlipbookFrame(def,
+				std::chrono::duration<float>(std::chrono::steady_clock::now() - _startTime).count(),
+				ctx.slotIndex, ctx.formID);
+		}
 		
 		if (frame && frame->IsValid()) {
 			DrawStaticTexture(frame, asset, ctx, drawList);
@@ -1482,6 +2438,12 @@ namespace AmmoWheelReskinUnified
 				if (asset.enabled && asset.type != AssetType::None) {
 					if (asset.type == AssetType::StaticPNG) {
 						info.targets[i].status = "asset: " + asset.staticPath;
+					} else if (asset.type == AssetType::AtlasSheet) {
+						info.targets[i].status = fmt::format(
+							"atlas: {} [{}x{}]",
+							asset.staticPath,
+							static_cast<int>(asset.atlasCols),
+							static_cast<int>(asset.atlasRows));
 					} else {
 						info.targets[i].status = "flipbook: " + asset.flipbook.pattern;
 						info.targets[i].flipbookFps = asset.flipbook.fps;

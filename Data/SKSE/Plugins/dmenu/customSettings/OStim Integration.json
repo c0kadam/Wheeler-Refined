@@ -1,0 +1,680 @@
+{
+  "data": [
+    {
+      "control": {
+        "failAction": "disable"
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable",
+            "id": "ostim_enabled"
+          },
+          "default": false,
+          "ini": {
+            "id": "Enabled",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Enable OStim Integration",
+            "desc": "Master switch for Wheeler's optional OStim bridge. The bridge still stays inactive if OStim is not detected."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "AutoDetect",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Auto Detect OStim",
+            "desc": "Probe OStim at runtime and disable the bridge gracefully if the quest/scripts are missing."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": false,
+          "ini": {
+            "id": "DebugLog",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Debug Logging",
+            "desc": "Reserved toggle for OStim bridge diagnostics. Leave OFF for normal play."
+          },
+          "type": "checkbox"
+        }
+      ],
+      "text": {
+        "name": "General",
+        "desc": "Global OStim bridge availability and runtime detection."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ostim_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable",
+            "id": "ostim_managed_wheel"
+          },
+          "default": true,
+          "ini": {
+            "id": "CreateManagedWheel",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Create Managed OStim Wheel",
+            "desc": "Build a dedicated temporary Wheeler wheel while an OStim scene is active."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_managed_wheel",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": false,
+          "ini": {
+            "id": "AutoSwitchToSceneWheel",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Auto Switch To OStim Wheel",
+            "desc": "Jump to the managed OStim control wheel automatically when a scene starts."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_managed_wheel",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "RestorePreviousWheelOnSceneEnd",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Restore Previous Wheel",
+            "desc": "Return to the last normal wheel after the OStim scene ends."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_managed_wheel",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "HideInvalidActions",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Hide Invalid OStim Actions",
+            "desc": "Suppress stage/swap/variant controls when the current OStim build does not expose a safe native API."
+          },
+          "type": "checkbox"
+        }
+      ],
+      "text": {
+        "name": "Scene Wheel",
+        "desc": "Managed control wheel behavior during active OStim scenes."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ostim_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable",
+            "id": "ostim_position_browser"
+          },
+          "default": true,
+          "ini": {
+            "id": "AllowPositionBrowsing",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Allow Position Browsing",
+            "desc": "Expose runtime-filtered OStim scene positions through Wheeler browser pages."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "ShowOnlyValidPositions",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Show Only Valid Positions",
+            "desc": "Keep browser output restricted to runtime-compatible candidates. This build already prefers filtered live data, so leaving this ON is safest."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "ShowPositionNames",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Show Position Names",
+            "desc": "Prefer OStim display names over raw scene IDs in the browser wheel."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "ShowPositionPreviews",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Show Position Previews",
+            "desc": "Allow OStim metadata previews or Wheeler resource fallback icons for browser entries."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              },
+              {
+                "id": "ostim_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "PreferMetadataPreviews",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Prefer OStim Metadata Previews",
+            "desc": "If a future OStim build exposes preview paths directly, prefer those before Wheeler fallback mappings."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              },
+              {
+                "id": "ostim_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "UseResourcePreviewFallback",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Use Wheeler Preview Fallback",
+            "desc": "Resolve preview/icon PNGs from Data\\SKSE\\Plugins\\wheeler\\resources\\ostim when OStim does not expose native artwork."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "PreferCurrentAnimationClass",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Prefer Current Animation Class",
+            "desc": "Prioritize positions from the active OStim animation class before broader actor-count-compatible results."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_position_browser",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": 6,
+          "ini": {
+            "id": "MaxPositionsPerPage",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": 4,
+            "max": 10,
+            "step": 1
+          },
+          "text": {
+            "name": "Max Positions Per Page",
+            "desc": "Maximum number of OStim position entries per Wheeler browser page."
+          },
+          "type": "slider"
+        }
+      ],
+      "text": {
+        "name": "Position Browser",
+        "desc": "Runtime position browsing, naming, and preview fallback behavior."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ostim_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "text": {
+            "name": "SVG Slot Icons",
+            "desc": "Wheeler-authored OStim control/browser SVG icons rendered inside slots."
+          },
+          "type": "text"
+        },
+        {
+          "default": 1.0,
+          "ini": {
+            "id": "SVGSlotScale",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": 0.1,
+            "max": 4.0,
+            "step": 0.01
+          },
+          "text": {
+            "name": "SVG Slot Scale",
+            "desc": "Scales Wheeler's OStim SVG control/browser icons in slot view."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "SVGSlotOffsetX",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "SVG Slot Offset X",
+            "desc": "Moves OStim SVG slot icons horizontally. Positive = right, negative = left."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "SVGSlotOffsetY",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "SVG Slot Offset Y",
+            "desc": "Moves OStim SVG slot icons vertically. Positive = down, negative = up."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "text": {
+            "name": "SVG Center Icons",
+            "desc": "Wheeler-authored OStim SVG icons shown in the wheel center/highlight."
+          },
+          "type": "text"
+        },
+        {
+          "default": 1.0,
+          "ini": {
+            "id": "SVGCenterScale",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": 0.1,
+            "max": 4.0,
+            "step": 0.01
+          },
+          "text": {
+            "name": "SVG Center Scale",
+            "desc": "Scales Wheeler's OStim SVG control/browser icons in the center highlight."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "SVGCenterOffsetX",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "SVG Center Offset X",
+            "desc": "Moves OStim SVG center icons horizontally. Positive = right, negative = left."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "SVGCenterOffsetY",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "SVG Center Offset Y",
+            "desc": "Moves OStim SVG center icons vertically. Positive = down, negative = up."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "text": {
+            "name": "DDS Slot Icons",
+            "desc": "OStim DDS/PNG position previews rendered inside slots."
+          },
+          "type": "text"
+        },
+        {
+          "default": 1.0,
+          "ini": {
+            "id": "DDSSlotScale",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": 0.1,
+            "max": 4.0,
+            "step": 0.01
+          },
+          "text": {
+            "name": "DDS Slot Scale",
+            "desc": "Scales OStim DDS/PNG previews in slot view."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "DDSSlotOffsetX",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "DDS Slot Offset X",
+            "desc": "Moves OStim DDS/PNG slot previews horizontally. Positive = right, negative = left."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "DDSSlotOffsetY",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "DDS Slot Offset Y",
+            "desc": "Moves OStim DDS/PNG slot previews vertically. Positive = down, negative = up."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "text": {
+            "name": "DDS Center Icons",
+            "desc": "OStim DDS/PNG position previews shown in the wheel center/highlight."
+          },
+          "type": "text"
+        },
+        {
+          "default": 1.0,
+          "ini": {
+            "id": "DDSCenterScale",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": 0.1,
+            "max": 4.0,
+            "step": 0.01
+          },
+          "text": {
+            "name": "DDS Center Scale",
+            "desc": "Scales OStim DDS/PNG previews in the wheel center/highlight."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "DDSCenterOffsetX",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "DDS Center Offset X",
+            "desc": "Moves OStim DDS/PNG center previews horizontally. Positive = right, negative = left."
+          },
+          "type": "slider"
+        },
+        {
+          "default": 0.0,
+          "ini": {
+            "id": "DDSCenterOffsetY",
+            "section": "OStimIntegration"
+          },
+          "style": {
+            "min": -500.0,
+            "max": 500.0,
+            "step": 1.0
+          },
+          "text": {
+            "name": "DDS Center Offset Y",
+            "desc": "Moves OStim DDS/PNG center previews vertically. Positive = down, negative = up."
+          },
+          "type": "slider"
+        }
+      ],
+      "text": {
+        "name": "Icon Layout",
+        "desc": "OStim-specific scale and offset controls for Wheeler SVG control icons and DDS/PNG preview art."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ostim_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": false,
+          "ini": {
+            "id": "RestrictRegularWheelActionsDuringScenes",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Restrict Regular Wheel Actions",
+            "desc": "Block non-OStim Wheeler entry activation while an OStim scene is active."
+          },
+          "type": "checkbox"
+        }
+      ],
+      "text": {
+        "name": "Safety",
+        "desc": "Scene-time execution guards that keep standard Wheeler actions isolated."
+      },
+      "type": "group"
+    }
+  ],
+  "ini": "Data\\SKSE\\Plugins\\wheeler\\OStimIntegration.ini",
+  "name": "OStim Integration"
+}

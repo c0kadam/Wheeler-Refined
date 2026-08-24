@@ -1,0 +1,770 @@
+{
+  "data": [
+    {
+      "control": {
+        "failAction": "disable"
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable",
+            "id": "ahb_enabled"
+          },
+          "default": false,
+          "ini": {
+            "id": "Enabled",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Enable Bridge",
+            "desc": "Mirror Action Hotkeys tiles into dedicated Wheeler bridge wheels."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": "Data\\SKSE\\Plugins\\ActionHotkeys.ini",
+          "ini": {
+            "id": "SourceIniPath",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Settings INI Path",
+            "desc": "Path to ActionHotkeys.ini. This file now carries appearance and global settings such as NumberOfSlots."
+          },
+          "type": "textbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": "Data\\SKSE\\Plugins\\ActionSlots.ini",
+          "ini": {
+            "id": "SourceSlotsIniPath",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Slots INI Path",
+            "desc": "Path to ActionSlots.ini. Leave it on the default for new Action Hotkeys builds; older single-file builds still fall back to ActionHotkeys.ini automatically."
+          },
+          "type": "textbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": "",
+          "ini": {
+            "id": "SourceIconsPath",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Source Icons Override",
+            "desc": "Optional icon folder override. Leave empty to use auto-detected Action Hotkeys icon folders."
+          },
+          "type": "textbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "id": "ahb_auto_injection",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "AutoInjection",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Auto Injection",
+            "desc": "When ON, Wheeler mirrors Action Hotkeys slot files automatically. When OFF, Wheeler ignores source auto-mirroring and only shows hotkeys injected through the bridge API."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              },
+              {
+                "id": "ahb_auto_injection",
+                "type": "checkbox",
+                "value": false
+              }
+            ]
+          },
+          "default": 2,
+          "ini": {
+            "id": "ManualWheelCount",
+            "section": "ActionHotkeysBridge"
+          },
+          "style": {
+            "min": 1,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Manual Wheel Count",
+            "desc": "When Auto Injection is OFF, keep this many dedicated API-driven bridge wheels active even if some are empty."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "AutoRefresh",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Auto Refresh",
+            "desc": "Watch the Action Hotkeys settings and slot INI files for changes and rebuild the mirror automatically."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": 500,
+          "ini": {
+            "id": "RefreshDebounceMs",
+            "section": "ActionHotkeysBridge"
+          },
+          "style": {
+            "min": 0,
+            "max": 10000,
+            "step": 50
+          },
+          "text": {
+            "name": "Refresh Debounce (ms)",
+            "desc": "Delay before mirror rebuild after Action Hotkeys source changes."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": 150,
+          "ini": {
+            "id": "DispatchCooldownMs",
+            "section": "ActionHotkeysBridge"
+          },
+          "style": {
+            "min": 50,
+            "max": 2000,
+            "step": 10
+          },
+          "text": {
+            "name": "Dispatch Cooldown (ms)",
+            "desc": "Minimum delay between identical deferred hotkey dispatches."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "id": "ahb_close_assist_enabled",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "CloseAssistEnabled",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Enable Close Assist",
+            "desc": "After a bridge-launched menu opens, let the next ESC or gamepad B try ESC first and only fall back to the last toggle hotkey if nothing tracked closes."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              },
+              {
+                "id": "ahb_close_assist_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "CloseAssistUseEsc",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Use ESC Trigger",
+            "desc": "Consume the next ESC press after a successful bridge launch and run close assist."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              },
+              {
+                "id": "ahb_close_assist_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "CloseAssistUseGamepadB",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Use Gamepad B Trigger",
+            "desc": "Consume the next gamepad B press after a successful bridge launch and run close assist."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              },
+              {
+                "id": "ahb_close_assist_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": 2000,
+          "ini": {
+            "id": "CloseAssistTimeoutMs",
+            "section": "ActionHotkeysBridge"
+          },
+          "style": {
+            "min": 250,
+            "max": 30000,
+            "step": 50
+          },
+          "text": {
+            "name": "Close Assist Timeout (ms)",
+            "desc": "How long Wheeler should remember the last successful bridge launch for ESC/B-assisted closing."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "BlockConflictingWheelerHotkeys",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Block Wheeler Toggle Conflicts",
+            "desc": "Prevent dispatch when the mirrored hotkey matches Wheeler's own open/close chord."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "MirrorSecondaryActivate",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Secondary Uses Same Action",
+            "desc": "Allow Wheeler secondary activate to queue the same mirrored external hotkey."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": false,
+          "ini": {
+            "id": "MirrorSpecialActivate",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Special Uses Same Action",
+            "desc": "Allow Wheeler special activate to queue the same mirrored external hotkey."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ahb_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": true,
+          "ini": {
+            "id": "DebugLog",
+            "section": "ActionHotkeysBridge"
+          },
+          "text": {
+            "name": "Debug Log",
+            "desc": "Write bridge parse, rebuild, and dispatch diagnostics to wheeler.log."
+          },
+          "type": "checkbox"
+        }
+      ],
+      "text": {
+        "name": "General",
+        "desc": "Dedicated runtime settings for the Action Hotkeys bridge."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ahb_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 0,
+          "ini": {
+            "id": "ResetLayout",
+            "section": "ActionHotkeysBridge.Bindings"
+          },
+          "text": {
+            "name": "Reset Layout Key",
+            "desc": "Optional shortcut that clears saved bridge slot placement and rebuilds the mirror from current capacity rules."
+          },
+          "type": "keymap"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 0,
+          "ini": {
+            "id": "ResetLayoutModifier",
+            "section": "ActionHotkeysBridge.Bindings"
+          },
+          "text": {
+            "name": "Reset Layout Modifier",
+            "desc": "Optional modifier for Reset Layout Key."
+          },
+          "type": "keymap"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 0,
+          "ini": {
+            "id": "RefreshMirror",
+            "section": "ActionHotkeysBridge.Bindings"
+          },
+          "text": {
+            "name": "Refresh Key",
+            "desc": "Optional manual rebuild shortcut for the bridge mirror."
+          },
+          "type": "keymap"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 0,
+          "ini": {
+            "id": "RefreshMirrorModifier",
+            "section": "ActionHotkeysBridge.Bindings"
+          },
+          "text": {
+            "name": "Refresh Modifier",
+            "desc": "Optional modifier for Refresh Key."
+          },
+          "type": "keymap"
+        }
+      ],
+      "text": {
+        "name": "Navigation",
+        "desc": "Bridge wheel jump keys toggle back to the previous wheel. Refresh and layout reset are available as optional maintenance shortcuts."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ahb_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "style": {
+        "color": {
+          "a": 1.0,
+          "b": 1.0,
+          "g": 1.0,
+          "r": 1.0
+        }
+      },
+      "text": {
+        "name": "Layout Persistence Note",
+        "desc": "Slot Capacity does not repack existing mirrored slots by itself. Bridge slot positions stay pinned by ActionHotkeysBridge.layout.ini so manual sorting is preserved. If you previously used a lower capacity and want auto-injected slots to fill earlier wheels again, use Reset Bridge Layout once and rebuild the mirror."
+      },
+      "type": "text"
+    },
+    {
+      "control": {
+        "failAction": "disable"
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "id": "wheeler_actionhotkeysbridge_reset_layout",
+          "text": {
+            "name": "Reset Bridge Layout",
+            "desc": "Clear saved bridge slot placement and let Wheeler repack mirrored slots from scratch using the current wheel capacities."
+          },
+          "type": "button"
+        }
+      ],
+      "text": {
+        "name": "Layout Reset",
+        "desc": "Use this after changing Slot Capacity, or whenever you want Wheeler to rebuild the Action Hotkeys bridge layout from a clean state."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ahb_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "text": {
+        "name": "Wheel Layout",
+        "desc": "Per-wheel capacity and direct jump keys for the bridge."
+      },
+      "type": "text"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ahb_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 10,
+          "ini": {
+            "id": "EntryCapacity",
+            "section": "ActionHotkeysBridge.Wheel1"
+          },
+          "style": {
+            "min": 1,
+            "max": 64,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot Capacity",
+            "desc": "Reserved slot count for bridge wheel 1. Empty slots stay available for persistent layout positioning. Increasing this does not automatically repack older persisted slots."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 30,
+          "ini": {
+            "id": "JumpKey",
+            "section": "ActionHotkeysBridge.Wheel1"
+          },
+          "text": {
+            "name": "Jump Key",
+            "desc": "Open bridge wheel 1 while Wheeler is already open."
+          },
+          "type": "keymap"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 0,
+          "ini": {
+            "id": "JumpKeyModifier",
+            "section": "ActionHotkeysBridge.Wheel1"
+          },
+          "text": {
+            "name": "Jump Modifier",
+            "desc": "Optional modifier for bridge wheel 1 jump."
+          },
+          "type": "keymap"
+        }
+      ],
+      "text": {
+        "name": "Wheel 1",
+        "desc": "Capacity and direct hotkey for bridge wheel 1."
+      },
+      "type": "group"
+    },
+    {
+      "control": {
+        "failAction": "disable",
+        "requirements": [
+          {
+            "id": "ahb_enabled",
+            "type": "checkbox",
+            "value": true
+          }
+        ]
+      },
+      "entries": [
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 10,
+          "ini": {
+            "id": "EntryCapacity",
+            "section": "ActionHotkeysBridge.Wheel2"
+          },
+          "style": {
+            "min": 1,
+            "max": 64,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot Capacity",
+            "desc": "Reserved slot count for bridge wheel 2. Increasing this does not automatically repack older persisted slots."
+          },
+          "type": "slider"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 31,
+          "ini": {
+            "id": "JumpKey",
+            "section": "ActionHotkeysBridge.Wheel2"
+          },
+          "text": {
+            "name": "Jump Key",
+            "desc": "Open bridge wheel 2 while Wheeler is already open."
+          },
+          "type": "keymap"
+        },
+        {
+          "control": {
+            "failAction": "disable"
+          },
+          "default": 0,
+          "ini": {
+            "id": "JumpKeyModifier",
+            "section": "ActionHotkeysBridge.Wheel2"
+          },
+          "text": {
+            "name": "Jump Modifier",
+            "desc": "Optional modifier for bridge wheel 2 jump."
+          },
+          "type": "keymap"
+        }
+      ],
+      "text": {
+        "name": "Wheel 2",
+        "desc": "Capacity and direct hotkey for bridge wheel 2."
+      },
+      "type": "group"
+    },
+    {
+      "control": { "failAction": "disable", "requirements": [ { "id": "ahb_enabled", "type": "checkbox", "value": true } ] },
+      "entries": [
+        { "control": { "failAction": "disable" }, "default": 10, "ini": { "id": "EntryCapacity", "section": "ActionHotkeysBridge.Wheel3" }, "style": { "min": 1, "max": 64, "step": 1 }, "text": { "name": "Slot Capacity", "desc": "Reserved slot count for bridge wheel 3. Increasing this does not automatically repack older persisted slots." }, "type": "slider" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKey", "section": "ActionHotkeysBridge.Wheel3" }, "text": { "name": "Jump Key", "desc": "Direct jump key for bridge wheel 3." }, "type": "keymap" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKeyModifier", "section": "ActionHotkeysBridge.Wheel3" }, "text": { "name": "Jump Modifier", "desc": "Optional modifier for bridge wheel 3 jump." }, "type": "keymap" }
+      ],
+      "text": { "name": "Wheel 3", "desc": "Capacity and direct hotkey for bridge wheel 3." },
+      "type": "group"
+    },
+    {
+      "control": { "failAction": "disable", "requirements": [ { "id": "ahb_enabled", "type": "checkbox", "value": true } ] },
+      "entries": [
+        { "control": { "failAction": "disable" }, "default": 10, "ini": { "id": "EntryCapacity", "section": "ActionHotkeysBridge.Wheel4" }, "style": { "min": 1, "max": 64, "step": 1 }, "text": { "name": "Slot Capacity", "desc": "Reserved slot count for bridge wheel 4. Increasing this does not automatically repack older persisted slots." }, "type": "slider" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKey", "section": "ActionHotkeysBridge.Wheel4" }, "text": { "name": "Jump Key", "desc": "Direct jump key for bridge wheel 4." }, "type": "keymap" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKeyModifier", "section": "ActionHotkeysBridge.Wheel4" }, "text": { "name": "Jump Modifier", "desc": "Optional modifier for bridge wheel 4 jump." }, "type": "keymap" }
+      ],
+      "text": { "name": "Wheel 4", "desc": "Capacity and direct hotkey for bridge wheel 4." },
+      "type": "group"
+    },
+    {
+      "control": { "failAction": "disable", "requirements": [ { "id": "ahb_enabled", "type": "checkbox", "value": true } ] },
+      "entries": [
+        { "control": { "failAction": "disable" }, "default": 10, "ini": { "id": "EntryCapacity", "section": "ActionHotkeysBridge.Wheel5" }, "style": { "min": 1, "max": 64, "step": 1 }, "text": { "name": "Slot Capacity", "desc": "Reserved slot count for bridge wheel 5. Increasing this does not automatically repack older persisted slots." }, "type": "slider" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKey", "section": "ActionHotkeysBridge.Wheel5" }, "text": { "name": "Jump Key", "desc": "Direct jump key for bridge wheel 5." }, "type": "keymap" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKeyModifier", "section": "ActionHotkeysBridge.Wheel5" }, "text": { "name": "Jump Modifier", "desc": "Optional modifier for bridge wheel 5 jump." }, "type": "keymap" }
+      ],
+      "text": { "name": "Wheel 5", "desc": "Capacity and direct hotkey for bridge wheel 5." },
+      "type": "group"
+    },
+    {
+      "control": { "failAction": "disable", "requirements": [ { "id": "ahb_enabled", "type": "checkbox", "value": true } ] },
+      "entries": [
+        { "control": { "failAction": "disable" }, "default": 10, "ini": { "id": "EntryCapacity", "section": "ActionHotkeysBridge.Wheel6" }, "style": { "min": 1, "max": 64, "step": 1 }, "text": { "name": "Slot Capacity", "desc": "Reserved slot count for bridge wheel 6. Increasing this does not automatically repack older persisted slots." }, "type": "slider" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKey", "section": "ActionHotkeysBridge.Wheel6" }, "text": { "name": "Jump Key", "desc": "Direct jump key for bridge wheel 6." }, "type": "keymap" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKeyModifier", "section": "ActionHotkeysBridge.Wheel6" }, "text": { "name": "Jump Modifier", "desc": "Optional modifier for bridge wheel 6 jump." }, "type": "keymap" }
+      ],
+      "text": { "name": "Wheel 6", "desc": "Capacity and direct hotkey for bridge wheel 6." },
+      "type": "group"
+    },
+    {
+      "control": { "failAction": "disable", "requirements": [ { "id": "ahb_enabled", "type": "checkbox", "value": true } ] },
+      "entries": [
+        { "control": { "failAction": "disable" }, "default": 10, "ini": { "id": "EntryCapacity", "section": "ActionHotkeysBridge.Wheel7" }, "style": { "min": 1, "max": 64, "step": 1 }, "text": { "name": "Slot Capacity", "desc": "Reserved slot count for bridge wheel 7. Increasing this does not automatically repack older persisted slots." }, "type": "slider" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKey", "section": "ActionHotkeysBridge.Wheel7" }, "text": { "name": "Jump Key", "desc": "Direct jump key for bridge wheel 7." }, "type": "keymap" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKeyModifier", "section": "ActionHotkeysBridge.Wheel7" }, "text": { "name": "Jump Modifier", "desc": "Optional modifier for bridge wheel 7 jump." }, "type": "keymap" }
+      ],
+      "text": { "name": "Wheel 7", "desc": "Capacity and direct hotkey for bridge wheel 7." },
+      "type": "group"
+    },
+    {
+      "control": { "failAction": "disable", "requirements": [ { "id": "ahb_enabled", "type": "checkbox", "value": true } ] },
+      "entries": [
+        { "control": { "failAction": "disable" }, "default": 10, "ini": { "id": "EntryCapacity", "section": "ActionHotkeysBridge.Wheel8" }, "style": { "min": 1, "max": 64, "step": 1 }, "text": { "name": "Slot Capacity", "desc": "Reserved slot count for bridge wheel 8. Increasing this does not automatically repack older persisted slots." }, "type": "slider" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKey", "section": "ActionHotkeysBridge.Wheel8" }, "text": { "name": "Jump Key", "desc": "Direct jump key for bridge wheel 8." }, "type": "keymap" },
+        { "control": { "failAction": "disable" }, "default": 0, "ini": { "id": "JumpKeyModifier", "section": "ActionHotkeysBridge.Wheel8" }, "text": { "name": "Jump Modifier", "desc": "Optional modifier for bridge wheel 8 jump." }, "type": "keymap" }
+      ],
+      "text": { "name": "Wheel 8", "desc": "Capacity and direct hotkey for bridge wheel 8." },
+      "type": "group"
+    }
+  ],
+  "ini": "Data\\SKSE\\Plugins\\wheeler\\ActionHotkeysBridge.ini",
+  "name": "Action Hotkeys Bridge"
+}

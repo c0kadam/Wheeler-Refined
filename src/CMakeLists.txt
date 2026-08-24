@@ -1,7 +1,40 @@
 set(ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 set(SOURCE_DIR "${ROOT_DIR}/src")
-file(GLOB_RECURSE SOURCE_FILES "${SOURCE_DIR}/*.cpp" "${SOURCE_DIR}/*.h" "${SOURCE_DIR}/*.hpp")	
+file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "${SOURCE_DIR}/*.cpp" "${SOURCE_DIR}/*.h" "${SOURCE_DIR}/*.hpp")
+
+# Exclude the bundled imgui_freetype implementation; it targets older
+# ImGui internals and is not needed when we use the built-in font rasterizer.
+list(FILTER SOURCE_FILES EXCLUDE REGEX "imgui_freetype\\.cpp$")
+
+# Explicitly include newly added capability helpers (guards against stale glob caches).
+list(APPEND SOURCE_FILES
+	"${SOURCE_DIR}/bin/Utilities/ItemCapabilities.cpp"
+	"${SOURCE_DIR}/bin/Utilities/ItemCapabilities.h"
+	"${SOURCE_DIR}/bin/Integrations/ExternalFavWheelState.cpp"
+	"${SOURCE_DIR}/bin/Integrations/ExternalFavWheelState.h"
+	"${SOURCE_DIR}/bin/Wheeler/SlotHandIndicators.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/SlotHandIndicators.h"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemExternalHotkey.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemExternalHotkey.h"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemIngredient.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemIngredient.h"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemOStimAction.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemOStimAction.h"
+	"${SOURCE_DIR}/bin/Integrations/ActionHotkeysBridge.cpp"
+	"${SOURCE_DIR}/bin/Integrations/ActionHotkeysBridge.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimBridge.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimBridge.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimNGThreadAPI.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimNGThreadAPI.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimIntegration.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimIntegration.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimPreviewResolver.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimPreviewResolver.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimStateTracker.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimStateTracker.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimTypes.h"
+)
 
 # 对 SourceFile 变量里面的所有文件分类(保留资源管理器的目录结构)
 foreach(fileItem ${SOURCE_FILES})       
@@ -64,6 +97,9 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 
 			"/wd4200" # nonstandard extension used : zero-sized array in struct/union
 
+			# Privacy: Strip absolute paths from __FILE__ macro (use basename only)
+			"/d1trimfile:${CMAKE_SOURCE_DIR}/"
+
 			"$<$<CONFIG:DEBUG>:>"
 			"$<$<CONFIG:RELEASE>:/Zc:inline;/JMC-;/Ob3>"
 	)
@@ -75,7 +111,6 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
 			"$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF;/DEBUG:FULL>"
 	)
 endif()
-
 target_include_directories(
 	"${PROJECT_NAME}"
 	PRIVATE
@@ -83,9 +118,17 @@ target_include_directories(
 		"${SOURCE_DIR}"
 )
 
+# Privacy: Prevent absolute source paths from being embedded in the binary
+target_compile_definitions(
+	"${PROJECT_NAME}"
+	PRIVATE
+		SPDLOG_NO_SOURCE_LOC
+		WHEELER_EXPORTS  # Enable DLL export for External API (GetWheelerAPI)
+)
+
 set(SKSE_SUPPORT_XBYAK ON)
 
-add_subdirectory("$ENV{CommonLibSSEPath_NG}" CommonLibSSE EXCLUDE_FROM_ALL)
+add_subdirectory("${CommonLibSSEPath_NG}" CommonLibSSE EXCLUDE_FROM_ALL)
 
 find_package(xbyak REQUIRED CONFIG)
 
@@ -102,6 +145,8 @@ target_link_libraries(
 		xbyak::xbyak
 		imgui::imgui
 		Freetype::Freetype
+		ole32
+		windowscodecs
 )
 
 target_precompile_headers(
@@ -119,9 +164,29 @@ install(
 
 install(
 	FILES
+		"${ROOT_DIR}/README.md"
+		"${ROOT_DIR}/LICENSE"
+		"${ROOT_DIR}/NOTICE.md"
+		"${ROOT_DIR}/THIRD_PARTY_NOTICES.md"
+	DESTINATION "."
+	COMPONENT "main"
+)
+
+install(
+	FILES
 		"$<TARGET_PDB_FILE:${PROJECT_NAME}>"
 	DESTINATION "/"
 	COMPONENT "pdbs"
+)
+
+add_custom_command(
+	TARGET "${PROJECT_NAME}"
+	POST_BUILD
+	COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/README.md" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/README.md"
+	COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/LICENSE" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/LICENSE"
+	COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/NOTICE.md" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/NOTICE.md"
+	COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/THIRD_PARTY_NOTICES.md"
+	VERBATIM
 )
 
 if("${COPY_OUTPUT}")
@@ -130,6 +195,10 @@ if("${COPY_OUTPUT}")
 		POST_BUILD
 		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:${PROJECT_NAME}>" "${CompiledPluginsPath}/SKSE/Plugins/"
 		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_PDB_FILE:${PROJECT_NAME}>" "${CompiledPluginsPath}/SKSE/Plugins/"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/README.md" "${CompiledPluginsPath}/SKSE/Plugins/"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/LICENSE" "${CompiledPluginsPath}/SKSE/Plugins/"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/NOTICE.md" "${CompiledPluginsPath}/SKSE/Plugins/"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "${CompiledPluginsPath}/SKSE/Plugins/"
 		VERBATIM
 	)
 endif()

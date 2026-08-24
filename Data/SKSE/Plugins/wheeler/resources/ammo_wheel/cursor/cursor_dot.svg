@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+
+  <defs>
+    <radialGradient id="cursorGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#e6c86a" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#e6c86a" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="metalEdge" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f0d98a"/>
+      <stop offset="50%" stop-color="#b9953c"/>
+      <stop offset="100%" stop-color="#f0d98a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Soft Glow -->
+  <circle cx="128" cy="128" r="80" fill="url(#cursorGlow)" />
+
+  <!-- Outer Thin Ring -->
+  <circle cx="128" cy="128" r="60"
+          fill="none"
+          stroke="#7b6225"
+          stroke-width="3"
+          opacity="0.6"/>
+
+  <!-- Main Arrow Marker -->
+  <g fill="url(#metalEdge)">
+    <!-- Top Arrowhead -->
+    <path d="M128 50 
+             L112 90 
+             L128 80 
+             L144 90 Z"/>
+
+    <!-- Bottom Arrowhead -->
+    <path d="M128 206 
+             L112 166 
+             L128 176 
+             L144 166 Z"/>
+
+    <!-- Left Arrowhead -->
+    <path d="M50 128 
+             L90 112 
+             L80 128 
+             L90 144 Z"/>
+
+    <!-- Right Arrowhead -->
+    <path d="M206 128 
+             L166 112 
+             L176 128 
+             L166 144 Z"/>
+  </g>
+
+  <!-- Central Rune Cross -->
+  <g stroke="#d8b45a" stroke-width="4" stroke-linecap="round">
+    <line x1="128" y1="105" x2="128" y2="151"/>
+    <line x1="105" y1="128" x2="151" y2="128"/>
+  </g>
+
+  <!-- Inner Core -->
+  <circle cx="128" cy="128" r="12" fill="#caa94a"/>
+
+</svg>

@@ -11,6 +11,7 @@
 #include "bin/Wheeler/WheelEntry.h"
 #include "bin/Wheeler/WheelItems/WheelItem.h"
 #include "bin/Wheeler/WheelItems/WheelItemFactory.h"
+#include "bin/Integrations/ActionHotkeysBridge.h"
 #include "bin/InputBroker.h"
 
 namespace WheelerAPI
@@ -35,6 +36,7 @@ namespace WheelerAPI
 			case Result::NotManagedWheel: return "NotManagedWheel";
 			case Result::InEditMode: return "InEditMode";
 			case Result::EntryNotEmpty: return "EntryNotEmpty";
+			case Result::InvalidArgument: return "InvalidArgument";
 			case Result::InternalError: return "InternalError";
 			default: return "Unknown";
 		}
@@ -647,6 +649,62 @@ namespace WheelerAPI
 		return Result::OK;
 	}
 
+	static Result API_UpsertExternalHotkey(const ExternalHotkeyConfig* config)
+	{
+		if (!s_initialized) {
+			logger::warn("[WheelerAPI] UpsertExternalHotkey failed: API not initialized");
+			return Result::NotInitialized;
+		}
+		if (!config || !config->sourceTag || !config->sourceTag[0] || config->scanCode == 0) {
+			logger::warn("[WheelerAPI] UpsertExternalHotkey failed: invalid arguments");
+			return Result::InvalidArgument;
+		}
+
+		ActionHotkeysInjectedSlot slot{};
+		slot.sourceTag = config->sourceTag;
+		slot.displayName = config->displayName ? config->displayName : "";
+		slot.scanCode = config->scanCode;
+		slot.modifier = config->modifier;
+		slot.iconPath = config->iconPath ? config->iconPath : "";
+		slot.iconTintARGB = config->iconTintARGB;
+		slot.wheelNumber = config->wheelNumber;
+		slot.entryIndex = config->entryIndex;
+
+		if (!ActionHotkeysBridge::UpsertInjectedSlot(slot)) {
+			logger::warn("[WheelerAPI] UpsertExternalHotkey failed: bridge rejected sourceTag='{}'", slot.sourceTag);
+			return Result::InvalidArgument;
+		}
+
+		logger::info(
+			"[WheelerAPI] UpsertExternalHotkey: SUCCESS sourceTag='{}' wheel={} entry={} scanCode=0x{:X}",
+			slot.sourceTag,
+			slot.wheelNumber,
+			slot.entryIndex,
+			slot.scanCode);
+		return Result::OK;
+	}
+
+	static Result API_RemoveExternalHotkey(const char* sourceTag)
+	{
+		if (!s_initialized) {
+			logger::warn("[WheelerAPI] RemoveExternalHotkey failed: API not initialized");
+			return Result::NotInitialized;
+		}
+		if (!sourceTag || !sourceTag[0]) {
+			return Result::InvalidArgument;
+		}
+
+		const bool removed = ActionHotkeysBridge::RemoveInjectedSlot(sourceTag);
+		logger::info("[WheelerAPI] RemoveExternalHotkey: sourceTag='{}' removed={}", sourceTag, removed);
+		return Result::OK;
+	}
+
+	static void API_ClearExternalHotkeys()
+	{
+		ActionHotkeysBridge::ClearInjectedSlots();
+		logger::info("[WheelerAPI] ClearExternalHotkeys");
+	}
+
 	static void API_RegisterItemActivatedCallback(ItemActivatedCallback callback)
 	{
 		std::lock_guard<std::mutex> lock(s_callbackLock);
@@ -752,6 +810,9 @@ namespace WheelerAPI
 		.GetItemFormID = API_GetItemFormID,
 		.GetSelectedItemIndex = API_GetSelectedItemIndex,
 		.SetSelectedItemIndex = API_SetSelectedItemIndex,
+		.UpsertExternalHotkey = API_UpsertExternalHotkey,
+		.RemoveExternalHotkey = API_RemoveExternalHotkey,
+		.ClearExternalHotkeys = API_ClearExternalHotkeys,
 		.RegisterItemActivatedCallback = API_RegisterItemActivatedCallback,
 		.RegisterEditModeCallback = API_RegisterEditModeCallback,
 		.RegisterWheelStateCallback = API_RegisterWheelStateCallback,

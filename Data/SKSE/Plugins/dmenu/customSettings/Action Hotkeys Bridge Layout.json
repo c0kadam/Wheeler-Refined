@@ -1,0 +1,369 @@
+{
+  "name": "Legacy - Action Hotkeys Bridge Layout Reset",
+  "ini": "Data\\SKSE\\Plugins\\wheeler\\ActionHotkeysBridge.layout.ini",
+  "data": [
+    {
+      "type": "text",
+      "text": {
+        "name": "How It Works",
+        "desc": "Legacy helper for older Wheeler builds that do not have the native Reset Bridge Layout action. Current builds should use the main Action Hotkeys Bridge panel instead."
+      }
+    },
+    {
+      "type": "text",
+      "text": {
+        "name": "Important",
+        "desc": "This panel still writes Wheel overrides directly to ActionHotkeysBridge.layout.ini. Saving with every slot left at 0 behaves like a layout reset for the first 20 auto-injected slots."
+      }
+    },
+    {
+      "type": "group",
+      "text": {
+        "name": "Slots 1-20",
+        "desc": "Set any slot to 0 to clear its saved wheel placement and let Wheeler auto-place it again."
+      },
+      "entries": [
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot1",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 1",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot2",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 2",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot3",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 3",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot4",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 4",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot5",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 5",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot6",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 6",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot7",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 7",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot8",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 8",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot9",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 9",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot10",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 10",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot11",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 11",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot12",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 12",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot13",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 13",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot14",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 14",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot15",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 15",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot16",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 16",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot17",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 17",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot18",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 18",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot19",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 19",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        },
+        {
+          "type": "slider",
+          "default": 0,
+          "ini": {
+            "section": "ActionHotkeysBridge.Layout.Slot20",
+            "id": "Wheel"
+          },
+          "style": {
+            "min": 0,
+            "max": 8,
+            "step": 1
+          },
+          "text": {
+            "name": "Slot 20",
+            "desc": "0 resets this slot back to auto placement. 1-8 pins it to a bridge wheel."
+          }
+        }
+      ]
+    }
+  ]
+}

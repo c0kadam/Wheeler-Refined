@@ -1,6 +1,7 @@
 #include "WheelItemAmmo.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Rendering/TextureManager.h"
+#include "bin/Utilities/ItemCapabilities.h"
 
 WheelItemAmmo::WheelItemAmmo(RE::TESAmmo* a_ammo)
 {
@@ -23,10 +24,11 @@ void WheelItemAmmo::DrawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREFR:
 
 void WheelItemAmmo::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
 {
-	this->drawHighlightText(a_center, _ammo->GetName(), a_drawArgs);
+	const float textShiftY = calculateHighlightTextShiftY(this->_description.c_str());
+	this->drawHighlightText(a_center, _ammo->GetName(), a_drawArgs, textShiftY);
 	this->drawHighlightTexture(a_center, a_drawArgs);
 	if (!this->_description.empty()) {
-		this->drawHighlightDescription(a_center, this->_description.data(), a_drawArgs);
+		this->drawHighlightDescription(a_center, this->_description.data(), a_drawArgs, textShiftY);
 	}
 	float ammoDamage = 0;
 
@@ -52,6 +54,12 @@ bool WheelItemAmmo::IsActive(RE::TESObjectREFR::InventoryItemMap& a_inv)
 bool WheelItemAmmo::IsAvailable(RE::TESObjectREFR::InventoryItemMap& a_inv)
 {
 	return a_inv.contains(this->_ammo);
+}
+
+bool WheelItemAmmo::IsInPlayerInventory() const
+{
+	RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
+	return ItemCapabilities::IsInInventory(pc, _ammo, nullptr);
 }
 
 void WheelItemAmmo::ActivateItemSecondary()

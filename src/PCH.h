@@ -1,6 +1,9 @@
-
 #pragma once
 #define IMGUI_DEFINE_MATH_OPERATORS
+
+// Privacy: Disable spdlog source location to prevent absolute paths in logs/binary
+// This must be defined BEFORE including any spdlog headers
+#define SPDLOG_NO_SOURCE_LOC
 
 #pragma warning(push)
 #include <RE/Skyrim.h>
@@ -17,9 +20,19 @@
 #endif
 #pragma warning(pop)
 
+// Avoid Windows GDI macro clashing with InventoryEntryData::GetObject()
+#ifdef GetObject
+#	undef GetObject
+#endif
+
 using namespace std::literals;
 
 namespace logger = SKSE::log;
+
+// Simple logging helpers for convenience (match dMenu)
+#define INFO(...)  ::logger::info(__VA_ARGS__)
+#define WARN(...)  ::logger::warn(__VA_ARGS__)
+#define ERROR(...) ::logger::error(__VA_ARGS__)
 
 namespace util
 {

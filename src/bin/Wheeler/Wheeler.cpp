@@ -3,9 +3,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <limits>
+#include <mutex>
 #include <optional>
+#include <thread>
 
 #include "Wheel.h"
 #include "Wheeler.h"
@@ -16,9 +23,13 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include "bin/API/WheelerAPI.h"
+#include "bin/Integrations/OStimIntegration.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Rendering/ResolutionScaleContext.h"
 #include "bin/Rendering/TextureManager.h"
+#include "bin/Integrations/ActionHotkeysBridge.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Utilities/Utils.h"
 #include "bin/Utilities/EquipEventDispatcher.h"
 #include "bin/Utilities/HandMemory.h"
@@ -31,6 +42,7 @@
 #include "WheelItems/WheelItem.h"
 #include "WheelItems/WheelItemMutable.h"
 #include "WheelItems/WheelItemAlchemy.h"
+#include "WheelItems/WheelItemIngredient.h"
 #include "WheelItems/WheelItemMisc.h"
 #include "WheelItems/WheelItemShout.h"
 #include "WheelItems/WheelItemMissing.h"
@@ -39,6 +51,10 @@
 
 namespace
 {
+	constexpr double kMountedMomentumAssistSeconds = 1.00;
+	constexpr float kMountedMinimumSlowScale = 0.35f;
+	constexpr float kShoutVoiceSelectionRestoreDelaySec = 1.25f;
+
 	ImVec2 ClampMainWheelCenter(ImVec2 center, float radius, float safePad,
 		const Config::MainWheel::LayoutScaling::RuntimeState& scaleState, float* outClampDistance)
 	{
@@ -110,6 +126,975 @@ namespace
 		static const auto s_start = Clock::now();
 		return std::chrono::duration<double>(Clock::now() - s_start).count();
 	}
+
+	bool IsPhysicalEscDown()
+	{
+		return (::GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+	}
+
+	std::unordered_set<std::string> CaptureOpenMenuNames(RE::UI* ui)
+	{
+		std::unordered_set<std::string> openMenus;
+		if (!ui) {
+			return openMenus;
+		}
+
+		for (const auto& [menuKey, menuEntry] : ui->menuMap) {
+			const auto* menu = menuEntry.menu.get();
+			if (!menu || !menu->OnStack()) {
+				continue;
+			}
+			const char* rawName = menuKey.c_str();
+			if (rawName && rawName[0] != '\0') {
+				openMenus.emplace(rawName);
+			}
+		}
+
+		return openMenus;
+	}
+
+	std::unordered_set<std::string> CaptureNewMenuNamesSinceBaseline(
+		RE::UI* ui,
+		const std::unordered_set<std::string>& baselineMenus)
+	{
+		auto openMenus = CaptureOpenMenuNames(ui);
+		for (const auto& menuName : baselineMenus) {
+			openMenus.erase(menuName);
+		}
+		return openMenus;
+	}
+
+	bool AnyTrackedMenuClosed(RE::UI* ui, const std::unordered_set<std::string>& trackedMenus)
+	{
+		if (trackedMenus.empty()) {
+			return false;
+		}
+
+		const auto openMenus = CaptureOpenMenuNames(ui);
+		for (const auto& menuName : trackedMenus) {
+			if (!openMenus.contains(menuName)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	std::string BuildExternalHotkeyLabel(std::uint32_t scanCode, std::uint32_t modifier)
+	{
+		const std::string keyName = Controls::GetKeyNameForMkb(scanCode);
+		if (modifier == 0) {
+			return keyName.empty() || keyName == "Unbound" ? fmt::format("0x{:X}", scanCode) : keyName;
+		}
+
+		const std::string modifierName = Controls::GetKeyNameForMkb(modifier);
+		if (modifierName.empty() || modifierName == "Unbound") {
+			return keyName.empty() || keyName == "Unbound" ? fmt::format("0x{:X}", scanCode) : keyName;
+		}
+		if (keyName.empty() || keyName == "Unbound") {
+			return fmt::format("{} + 0x{:X}", modifierName, scanCode);
+		}
+		return fmt::format("{} + {}", modifierName, keyName);
+	}
+
+	bool IsMkbToggleChordConflict(std::uint32_t scanCode, std::uint32_t modifier)
+	{
+		using namespace Config::InputBindings::MKB;
+		const auto matches = [&](std::uint32_t key, std::uint32_t requiredModifier) {
+			return key != 0 && key == scanCode && requiredModifier == modifier;
+		};
+
+		return matches(toggleWheel, toggleWheelModifier);
+	}
+
+	bool BuildScanCodeInput(std::uint32_t directInputCode, bool keyUp, INPUT& outInput)
+	{
+		if (directInputCode == 0) {
+			return false;
+		}
+
+		std::uint32_t scanCode = directInputCode;
+		DWORD flags = KEYEVENTF_SCANCODE;
+		if (scanCode > 0x7Fu) {
+			scanCode &= 0x7Fu;
+			flags |= KEYEVENTF_EXTENDEDKEY;
+		}
+		if (keyUp) {
+			flags |= KEYEVENTF_KEYUP;
+		}
+
+		outInput = {};
+		outInput.type = INPUT_KEYBOARD;
+		outInput.ki.wVk = static_cast<WORD>(::MapVirtualKeyA(scanCode, MAPVK_VSC_TO_VK_EX));
+		outInput.ki.wScan = static_cast<WORD>(scanCode);
+		outInput.ki.dwFlags = flags;
+		return true;
+	}
+
+	bool SendSingleKeyboardInput(const INPUT& input)
+	{
+		INPUT copy = input;
+		return ::SendInput(1, &copy, sizeof(INPUT)) == 1;
+	}
+
+	bool DispatchExternalHotkeyNow(std::uint32_t scanCode, std::uint32_t modifier)
+	{
+		std::array<INPUT, 4> inputs{};
+		UINT inputCount = 0;
+		if (modifier != 0 && !BuildScanCodeInput(modifier, false, inputs[inputCount])) {
+			return false;
+		}
+		if (modifier != 0) {
+			++inputCount;
+		}
+		if (!BuildScanCodeInput(scanCode, false, inputs[inputCount])) {
+			return false;
+		}
+		++inputCount;
+		if (!BuildScanCodeInput(scanCode, true, inputs[inputCount])) {
+			return false;
+		}
+		++inputCount;
+		if (modifier != 0) {
+			if (!BuildScanCodeInput(modifier, true, inputs[inputCount])) {
+				return false;
+			}
+			++inputCount;
+		}
+
+		const auto stagedInputs = inputs;
+		std::thread([stagedInputs, inputCount]() {
+			static std::mutex s_dispatchMutex;
+			std::lock_guard<std::mutex> lock(s_dispatchMutex);
+
+			for (UINT i = 0; i < inputCount; ++i) {
+				SendSingleKeyboardInput(stagedInputs[i]);
+				if (i + 1 < inputCount) {
+					::Sleep(100);
+				}
+			}
+		}).detach();
+
+		return true;
+	}
+
+	bool IsBoundWeaponSpell(RE::SpellItem* spell);
+
+	constexpr std::array<std::string_view, 3> kLootOverrideMenus{
+		RE::ContainerMenu::MENU_NAME,
+		"LootMenu",   // QuickLoot / QuickLoot RE
+		"LootMenuCF"  // QuickLoot EE (Container First)
+	};
+
+	bool SetMenuMovieVisibility(RE::UI* ui, std::string_view menuName, bool visible)
+	{
+		if (!ui) {
+			return false;
+		}
+		auto menu = ui->GetMenu(menuName.data());
+		if (!menu) {
+			return false;
+		}
+		if (auto* movie = menu->uiMovie.get()) {
+			movie->SetVisible(visible);
+			return true;
+		}
+		return false;
+	}
+
+	bool IsSpellBlockedByTransformGuard(RE::SpellItem* spell, const char* sourceLabel)
+	{
+		if (!spell) {
+			return false;
+		}
+		if (!TransformWheelManager::IsSpellActivationBlocked(spell, sourceLabel)) {
+			return false;
+		}
+
+		logger::info(
+			"TransformWheels: blocked spell activation source={} formId={:08X} edid='{}' name='{}'",
+			sourceLabel ? sourceLabel : "",
+			spell->GetFormID(),
+			spell->GetFormEditorID() ? spell->GetFormEditorID() : "",
+			spell->GetName() ? spell->GetName() : "");
+		return true;
+	}
+
+	bool IsShoutBlockedByTransformGuard(RE::TESShout* shout, const char* sourceLabel)
+	{
+		if (!shout) {
+			return false;
+		}
+		if (!TransformWheelManager::IsShoutActivationBlocked(shout, sourceLabel)) {
+			return false;
+		}
+
+		logger::info(
+			"TransformWheels: blocked shout activation source={} formId={:08X} edid='{}' name='{}'",
+			sourceLabel ? sourceLabel : "",
+			shout->GetFormID(),
+			shout->GetFormEditorID() ? shout->GetFormEditorID() : "",
+			shout->GetName() ? shout->GetName() : "");
+		return true;
+	}
+
+	enum class EditHintDisplayMode : std::uint32_t
+	{
+		Auto = 0,
+		Mkb = 1,
+		Gamepad = 2,
+		Both = 3
+	};
+
+	enum class EditHintGamepadIconSet : std::uint32_t
+	{
+		Xbox = 0,
+		PlayStation = 1
+	};
+
+	struct EditHintActionBinding
+	{
+		const char* label = "";
+		struct Binding
+		{
+			std::uint32_t key = 0;
+			std::uint32_t modifier = 0;
+		};
+
+		Binding mkb{};
+		Binding gamepad{};
+	};
+
+	struct EditHintBindingVisual
+	{
+		struct Segment
+		{
+			Texture::Image icon{};
+			std::string text;
+			float width = 0.0f;
+		};
+
+		std::vector<Segment> segments;
+		float width = 0.0f;
+	};
+
+	struct DMenuToggleBindings
+	{
+		EditHintActionBinding::Binding mkb{};
+		EditHintActionBinding::Binding gamepad{};
+	};
+
+	constexpr std::size_t kEditHintActionCount = 12;
+	constexpr std::uint32_t kGamepadOffset = 266;
+	constexpr std::uint32_t kGamepadMax = kGamepadOffset + 15;
+	constexpr std::uint32_t kDefaultDMenuToggleMkb = 199;  // DIK_HOME
+	constexpr std::uint32_t kDefaultDMenuToggleGamepad = kGamepadOffset + 4;  // Start
+	constexpr const char* kDMenuIniPath = R"(Data\SKSE\Plugins\dmenu\dmenu.ini)";
+
+	bool IsGamepadInputCode(std::uint32_t key)
+	{
+		return key >= kGamepadOffset && key <= kGamepadMax;
+	}
+
+	bool TryReadIniUInt32(const CSimpleIniA& ini, const char* section, const char* key, std::uint32_t& value)
+	{
+		const char* raw = ini.GetValue(section, key);
+		if (!raw || !raw[0]) {
+			return false;
+		}
+
+		char* end = nullptr;
+		const auto parsed = std::strtoul(raw, &end, 10);
+		if (end == raw) {
+			return false;
+		}
+
+		while (*end && std::isspace(static_cast<unsigned char>(*end))) {
+			++end;
+		}
+		if (*end != '\0') {
+			return false;
+		}
+
+		value = static_cast<std::uint32_t>(parsed);
+		return true;
+	}
+
+	DMenuToggleBindings GetDMenuToggleBindings()
+	{
+		struct Cache
+		{
+			bool initialized = false;
+			double nextPollTime = 0.0;
+			std::filesystem::file_time_type lastWriteTime{};
+			DMenuToggleBindings bindings{};
+		};
+
+		static Cache cache;
+
+		auto resetDefaults = [&]() {
+			cache.bindings.mkb = { kDefaultDMenuToggleMkb, 0 };
+			cache.bindings.gamepad = { kDefaultDMenuToggleGamepad, 0 };
+		};
+
+		const double now = ImGui::GetTime();
+		if (cache.initialized && now < cache.nextPollTime) {
+			return cache.bindings;
+		}
+		cache.nextPollTime = now + 0.5;
+
+		std::error_code ec;
+		std::filesystem::file_time_type currentWriteTime{};
+		if (std::filesystem::exists(kDMenuIniPath, ec)) {
+			currentWriteTime = std::filesystem::last_write_time(kDMenuIniPath, ec);
+			if (ec) {
+				currentWriteTime = {};
+			}
+		}
+
+		if (cache.initialized && cache.lastWriteTime == currentWriteTime) {
+			return cache.bindings;
+		}
+
+		cache.initialized = true;
+		cache.lastWriteTime = currentWriteTime;
+		resetDefaults();
+
+		if (currentWriteTime == std::filesystem::file_time_type{}) {
+			return cache.bindings;
+		}
+
+		CSimpleIniA ini;
+		ini.SetUnicode();
+		if (ini.LoadFile(kDMenuIniPath) < 0) {
+			return cache.bindings;
+		}
+
+		std::uint32_t legacyToggle = 0;
+		std::uint32_t legacyModifier = 0;
+		std::uint32_t mkbToggle = 0;
+		std::uint32_t mkbModifier = 0;
+		std::uint32_t gamepadToggle = 0;
+		std::uint32_t gamepadModifier = 0;
+
+		const bool hasLegacyToggle = TryReadIniUInt32(ini, "UI", "key_toggle_dmenu", legacyToggle);
+		const bool hasLegacyModifier = TryReadIniUInt32(ini, "UI", "key_toggle_modifier", legacyModifier);
+		const bool hasMkbToggle = TryReadIniUInt32(ini, "UI", "key_toggle_dmenu_mkb", mkbToggle);
+		const bool hasMkbModifier = TryReadIniUInt32(ini, "UI", "key_toggle_modifier_mkb", mkbModifier);
+		const bool hasGamepadToggle = TryReadIniUInt32(ini, "UI", "key_toggle_dmenu_gamepad", gamepadToggle);
+		const bool hasGamepadModifier = TryReadIniUInt32(ini, "UI", "key_toggle_modifier_gamepad", gamepadModifier);
+
+		if (hasMkbToggle) {
+			cache.bindings.mkb.key = mkbToggle;
+		}
+		if (hasMkbModifier) {
+			cache.bindings.mkb.modifier = mkbModifier;
+		}
+		if (hasGamepadToggle) {
+			cache.bindings.gamepad.key = gamepadToggle;
+		}
+		if (hasGamepadModifier) {
+			cache.bindings.gamepad.modifier = gamepadModifier;
+		}
+
+		if (hasLegacyToggle) {
+			if (IsGamepadInputCode(legacyToggle)) {
+				if (!hasGamepadToggle) {
+					cache.bindings.gamepad.key = legacyToggle;
+				}
+			} else if (!hasMkbToggle) {
+				cache.bindings.mkb.key = legacyToggle;
+			}
+		}
+		if (hasLegacyModifier) {
+			if (IsGamepadInputCode(legacyModifier)) {
+				if (!hasGamepadModifier) {
+					cache.bindings.gamepad.modifier = legacyModifier;
+				}
+			} else if (!hasMkbModifier) {
+				cache.bindings.mkb.modifier = legacyModifier;
+			}
+		}
+
+		return cache.bindings;
+	}
+
+	std::array<EditHintActionBinding, kEditHintActionCount> BuildEditHintActions()
+	{
+		const auto dmenuBindings = GetDMenuToggleBindings();
+		return {
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionUsePlaceItem), { Config::InputBindings::MKB::activatePrimary }, { Config::InputBindings::GamePad::activatePrimary } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionRemoveItemWheel), { Config::InputBindings::MKB::activateSecondary }, { Config::InputBindings::GamePad::activateSecondary } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionAddEmptySlot), { Config::InputBindings::MKB::addEmptyEntry }, { Config::InputBindings::GamePad::addEmptyEntry } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionAddWheel), { Config::InputBindings::MKB::addWheel }, { Config::InputBindings::GamePad::addWheel } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionNextWheel), { Config::InputBindings::MKB::nextWheel }, { Config::InputBindings::GamePad::nextWheel } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionPreviousWheel), { Config::InputBindings::MKB::prevWheel }, { Config::InputBindings::GamePad::prevWheel } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionMoveSlotForward), { Config::InputBindings::MKB::moveEntryForward }, { Config::InputBindings::GamePad::moveEntryForward } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionMoveSlotBack), { Config::InputBindings::MKB::moveEntryBack }, { Config::InputBindings::GamePad::moveEntryBack } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionMoveWheelForward), { Config::InputBindings::MKB::moveWheelForward }, { Config::InputBindings::GamePad::moveWheelForward } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionMoveWheelBack), { Config::InputBindings::MKB::moveWheelBack }, { Config::InputBindings::GamePad::moveWheelBack } },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionSettingsDMenu), dmenuBindings.mkb, dmenuBindings.gamepad },
+			EditHintActionBinding{ Texts::GetText(Texts::TextType::EditHintActionExitWheel), { Config::InputBindings::MKB::closeWheel }, { Config::InputBindings::GamePad::exitWheel } }
+		};
+	}
+
+	std::string GetEditHintBindingName(bool isGamepad, const EditHintActionBinding::Binding& binding);
+
+	std::string BuildEditModeHintsToggleLine(bool isGamepad)
+	{
+		EditHintActionBinding::Binding binding{};
+		binding.key = isGamepad ?
+			              Config::InputBindings::GamePad::toggleEditHints :
+			              Config::InputBindings::MKB::toggleEditHints;
+
+		const std::string bindingName = GetEditHintBindingName(isGamepad, binding);
+		if (bindingName == "Unbound") {
+			return {};
+		}
+
+		return fmt::format("{} for keybind hints", bindingName);
+	}
+
+	std::string MakeKeyAssetPath(const std::string& fileName)
+	{
+		if (fileName.empty()) {
+			return {};
+		}
+		return std::string(R"(Data\SKSE\Plugins\wheeler\resources\key\)") + fileName;
+	}
+
+	std::string ResolveMkbIconFile(const std::string& keyName)
+	{
+		if (keyName.empty() || keyName == "Unbound") {
+			return {};
+		}
+		if (keyName == "Mouse Left") {
+			return "Mouse_Left_Key_Dark.svg";
+		}
+		if (keyName == "Mouse Right") {
+			return "Mouse_Right_Key_Dark.svg";
+		}
+		if (keyName == "Mouse Middle") {
+			return "Mouse_Middle_Key_Dark.svg";
+		}
+		if (keyName == "Esc") {
+			return "Esc_Key_Dark.svg";
+		}
+		if (keyName == "Tab") {
+			return "Tab_Key_Dark.svg";
+		}
+		if (keyName == "Enter") {
+			return "Enter_Key_Dark.svg";
+		}
+		if (keyName == "Space") {
+			return "Space_Key_Dark.svg";
+		}
+		if (keyName == "Backspace") {
+			return "Backspace_Key_Dark.svg";
+		}
+		if (keyName == "Caps Lock") {
+			return "Caps_Lock_Key_Dark.svg";
+		}
+		if (keyName == "Left Shift" || keyName == "Right Shift") {
+			return "Shift_Key_Dark.svg";
+		}
+		if (keyName == "Left Ctrl" || keyName == "Right Ctrl") {
+			return "Ctrl_Key_Dark.svg";
+		}
+		if (keyName == "Left Alt" || keyName == "Right Alt") {
+			return "Alt_Key_Dark.svg";
+		}
+		if (keyName == "Left Win" || keyName == "Right Win") {
+			return "Win_Key_Dark.svg";
+		}
+		if (keyName == "Insert") {
+			return "Insert_Key_Dark.svg";
+		}
+		if (keyName == "Delete") {
+			return "Del_Key_Dark.svg";
+		}
+		if (keyName == "Home") {
+			return "Home_Key_Dark.svg";
+		}
+		if (keyName == "End") {
+			return "End_Key_Dark.svg";
+		}
+		if (keyName == "Page Up") {
+			return "Page_Up_Key_Dark.svg";
+		}
+		if (keyName == "Page Down") {
+			return "Page_Down_Key_Dark.svg";
+		}
+		if (keyName == "Up") {
+			return "Arrow_Up_Key_Dark.svg";
+		}
+		if (keyName == "Down") {
+			return "Arrow_Down_Key_Dark.svg";
+		}
+		if (keyName == "Left") {
+			return "Arrow_Left_Key_Dark.svg";
+		}
+		if (keyName == "Right") {
+			return "Arrow_Right_Key_Dark.svg";
+		}
+		if (keyName == "-") {
+			return "Minus_Key_Dark.svg";
+		}
+		if (keyName == "=") {
+			return "Plus_Key_Dark.svg";
+		}
+		if (keyName == "[") {
+			return "Bracket_Left_Key_Dark.svg";
+		}
+		if (keyName == "]") {
+			return "Bracket_Right_Key_Dark.svg";
+		}
+		if (keyName == ";") {
+			return "Semicolon_Key_Dark.svg";
+		}
+		if (keyName == "/") {
+			return "Slash_Key_Dark.svg";
+		}
+		if (keyName == "'") {
+			return "Mark_Left_Key_Dark.svg";
+		}
+		if (keyName == "\\") {
+			return "Mark_Right_Key_Dark.svg";
+		}
+		if (keyName.size() == 1) {
+			const unsigned char ch = static_cast<unsigned char>(keyName[0]);
+			if (std::isalnum(ch)) {
+				char upper = static_cast<char>(std::toupper(ch));
+				return std::string(1, upper) + "_Key_Dark.svg";
+			}
+		}
+		if (keyName.size() >= 2 && keyName[0] == 'F') {
+			bool isFunction = true;
+			for (std::size_t i = 1; i < keyName.size(); ++i) {
+				if (!std::isdigit(static_cast<unsigned char>(keyName[i]))) {
+					isFunction = false;
+					break;
+				}
+			}
+			if (isFunction) {
+				return keyName + "_Key_Dark.svg";
+			}
+		}
+		return {};
+	}
+
+	std::string ResolveGamepadIconFile(const std::uint32_t key, EditHintGamepadIconSet iconSet)
+	{
+		if (key < kGamepadOffset) {
+			return {};
+		}
+		const std::uint32_t index = key - kGamepadOffset;
+		if (iconSet == EditHintGamepadIconSet::PlayStation) {
+			switch (index) {
+			case 0:
+				return "PS5_Dpad_Up.svg";
+			case 1:
+				return "PS5_Dpad_Down.svg";
+			case 2:
+				return "PS5_Dpad_Left.svg";
+			case 3:
+				return "PS5_Dpad_Right.svg";
+			case 4:
+				return "PS5_Options_Alt.svg";
+			case 5:
+				return "PS5_Share_Alt.svg";
+			case 6:
+				return "PS5_Left_Stick_Click.svg";
+			case 7:
+				return "PS5_Right_Stick_Click.svg";
+			case 8:
+				return "PS5_L1.svg";
+			case 9:
+				return "PS5_R1.svg";
+			case 10:
+				return "PS5_Cross.svg";
+			case 11:
+				return "PS5_Circle.svg";
+			case 12:
+				return "PS5_Square.svg";
+			case 13:
+				return "PS5_Triangle.svg";
+			case 14:
+				return "PS5_L2.svg";
+			case 15:
+				return "PS5_R2.svg";
+			default:
+				return {};
+			}
+		}
+
+		switch (index) {
+		case 0:
+			return "XboxSeriesX_Dpad_Up.svg";
+		case 1:
+			return "XboxSeriesX_Dpad_Down.svg";
+		case 2:
+			return "XboxSeriesX_Dpad_Left.svg";
+		case 3:
+			return "XboxSeriesX_Dpad_Right.svg";
+		case 4:
+			return "XboxSeriesX_Menu.svg";
+		case 5:
+			return "XboxSeriesX_View.svg";
+		case 6:
+			return "XboxSeriesX_Left_Stick_Click.svg";
+		case 7:
+			return "XboxSeriesX_Right_Stick_Click.svg";
+		case 8:
+			return "XboxSeriesX_LB.svg";
+		case 9:
+			return "XboxSeriesX_RB.svg";
+		case 10:
+			return "XboxSeriesX_A.svg";
+		case 11:
+			return "XboxSeriesX_B.svg";
+		case 12:
+			return "XboxSeriesX_X.svg";
+		case 13:
+			return "XboxSeriesX_Y.svg";
+		case 14:
+			return "XboxSeriesX_LT.svg";
+		case 15:
+			return "XboxSeriesX_RTsvg.svg";
+		default:
+			return {};
+		}
+	}
+
+	std::string GetEditHintBindingName(bool isGamepad, const EditHintActionBinding::Binding& binding)
+	{
+		const auto getKeyName = [&](std::uint32_t key) {
+			return isGamepad ? Controls::GetKeyNameForGamepad(key) : Controls::GetKeyNameForMkb(key);
+		};
+
+		const std::string keyName = getKeyName(binding.key);
+		if (binding.key == 0 || keyName == "Unbound") {
+			return "Unbound";
+		}
+		if (binding.modifier == 0) {
+			return keyName;
+		}
+
+		const std::string modifierName = getKeyName(binding.modifier);
+		if (modifierName == "Unbound") {
+			return keyName;
+		}
+
+		return modifierName + " + " + keyName;
+	}
+
+	float MeasureEditHintBindingTextWidth(ImFont* font, const std::string& text)
+	{
+		const float fontSize = Config::MainWheel::EditHints::FontSize;
+		const ImVec2 textSize = font ?
+			                        font->CalcTextSizeA(fontSize, 10000.0f, 0.0f, text.c_str()) :
+			                        ImGui::CalcTextSize(text.c_str());
+		return textSize.x;
+	}
+
+	float GetEditHintBindingSegmentGap()
+	{
+		return std::clamp(Config::MainWheel::EditHints::IconSize * 0.2f, 4.0f, 14.0f);
+	}
+
+	std::string ResolveEditHintIconFile(bool isGamepad, std::uint32_t key, const std::string& keyName)
+	{
+		if (key == 0 || keyName.empty() || keyName == "Unbound") {
+			return {};
+		}
+		if (isGamepad) {
+			const auto iconSet =
+				(Config::MainWheel::EditHints::GamepadIconSet == 1) ? EditHintGamepadIconSet::PlayStation : EditHintGamepadIconSet::Xbox;
+			return ResolveGamepadIconFile(key, iconSet);
+		}
+		return ResolveMkbIconFile(keyName);
+	}
+
+	EditHintBindingVisual::Segment BuildEditHintBindingSegment(
+		bool isGamepad,
+		std::uint32_t key,
+		const std::string& text,
+		ImFont* font,
+		bool allowIcon = true)
+	{
+		EditHintBindingVisual::Segment segment;
+		segment.text = text;
+
+		std::string iconFile;
+		if (allowIcon) {
+			iconFile = ResolveEditHintIconFile(isGamepad, key, text);
+		}
+		if (!iconFile.empty()) {
+			segment.icon = Texture::GetImageByPath(MakeKeyAssetPath(iconFile));
+			if (!segment.icon.texture && iconFile == "XboxSeriesX_RTsvg.svg") {
+				segment.icon = Texture::GetImageByPath(MakeKeyAssetPath("XboxSeriesX_RT.svg"));
+			}
+		}
+
+		const float iconSize = Config::MainWheel::EditHints::IconSize;
+		if (segment.icon.texture && segment.icon.width > 0 && segment.icon.height > 0) {
+			segment.width = iconSize * (static_cast<float>(segment.icon.width) / static_cast<float>(segment.icon.height));
+		} else {
+			segment.icon = {};
+			segment.width = MeasureEditHintBindingTextWidth(font, segment.text);
+		}
+		return segment;
+	}
+
+	EditHintBindingVisual BuildEditHintBindingVisual(bool isGamepad, const EditHintActionBinding::Binding& binding, ImFont* font)
+	{
+		EditHintBindingVisual visual;
+
+		const auto getKeyName = [&](std::uint32_t key) {
+			return isGamepad ? Controls::GetKeyNameForGamepad(key) : Controls::GetKeyNameForMkb(key);
+		};
+
+		const std::string keyName = getKeyName(binding.key);
+		if (binding.key == 0 || keyName == "Unbound") {
+			visual.segments.push_back(BuildEditHintBindingSegment(isGamepad, 0, "Unbound", font, false));
+		} else {
+			const std::string modifierName = (binding.modifier != 0) ? getKeyName(binding.modifier) : std::string();
+			if (binding.modifier != 0 && !modifierName.empty() && modifierName != "Unbound") {
+				visual.segments.push_back(BuildEditHintBindingSegment(isGamepad, binding.modifier, modifierName, font));
+				visual.segments.push_back(BuildEditHintBindingSegment(false, 0, "+", font, false));
+			}
+			visual.segments.push_back(BuildEditHintBindingSegment(isGamepad, binding.key, keyName, font));
+		}
+
+		const float segmentGap = GetEditHintBindingSegmentGap();
+		for (std::size_t i = 0; i < visual.segments.size(); ++i) {
+			visual.width += visual.segments[i].width;
+			if (i + 1 < visual.segments.size()) {
+				visual.width += segmentGap;
+			}
+		}
+		return visual;
+	}
+
+	void DrawEditHintBindingVisual(float x, float rowTop, float rowHeight, const EditHintBindingVisual& visual,
+		ImFont* font, const DrawArgs& drawArgs)
+	{
+		const float iconSize = Config::MainWheel::EditHints::IconSize;
+		const float fontSize = Config::MainWheel::EditHints::FontSize;
+		const float segmentGap = GetEditHintBindingSegmentGap();
+		float cursorX = x;
+		for (std::size_t i = 0; i < visual.segments.size(); ++i) {
+			const auto& segment = visual.segments[i];
+			if (segment.icon.texture && segment.icon.width > 0 && segment.icon.height > 0) {
+				Drawer::draw_texture(
+					segment.icon.texture,
+					ImVec2(cursorX + segment.width * 0.5f, rowTop + rowHeight * 0.5f),
+					0.0f,
+					0.0f,
+					ImVec2(segment.width, iconSize),
+					C_SKYRIMWHITE,
+					drawArgs);
+			} else {
+				const ImVec2 textSize = font ?
+					                        font->CalcTextSizeA(fontSize, 10000.0f, 0.0f, segment.text.c_str()) :
+					                        ImGui::CalcTextSize(segment.text.c_str());
+				const float textY = rowTop + (rowHeight - textSize.y) * 0.5f;
+				Drawer::draw_text_with_font(cursorX, textY, segment.text.c_str(), Config::MainWheel::EditHints::TextColor,
+					font, fontSize, drawArgs, false);
+			}
+			cursorX += segment.width;
+			if (i + 1 < visual.segments.size()) {
+				cursorX += segmentGap;
+			}
+		}
+	}
+
+	void DrawEditModeHintsOverlay(const DrawArgs& drawArgs, bool lastInputGamepad)
+	{
+		if (!Config::MainWheel::EditHints::Enabled) {
+			return;
+		}
+
+		bool showMkb = false;
+		bool showGamepad = false;
+		const auto mode = static_cast<EditHintDisplayMode>(Config::MainWheel::EditHints::DisplayMode);
+		switch (mode) {
+		case EditHintDisplayMode::Mkb:
+			showMkb = true;
+			break;
+		case EditHintDisplayMode::Gamepad:
+			showGamepad = true;
+			break;
+		case EditHintDisplayMode::Both:
+			showMkb = true;
+			showGamepad = true;
+			break;
+		case EditHintDisplayMode::Auto:
+		default:
+			showGamepad = lastInputGamepad;
+			showMkb = !showGamepad;
+			break;
+		}
+		if (!showMkb && !showGamepad) {
+			showMkb = true;
+		}
+
+		ImFont* font = ImGui::GetDefaultFont();
+		const auto actions = BuildEditHintActions();
+
+		std::array<EditHintBindingVisual, kEditHintActionCount> mkbVisuals{};
+		std::array<EditHintBindingVisual, kEditHintActionCount> gamepadVisuals{};
+		float mkbColumnWidth = 0.0f;
+		float gamepadColumnWidth = 0.0f;
+		float measuredLabelWidth = 0.0f;
+
+		for (std::size_t i = 0; i < actions.size(); ++i) {
+			const ImVec2 labelSize = font ?
+				                         font->CalcTextSizeA(Config::MainWheel::EditHints::FontSize, 10000.0f, 0.0f, actions[i].label) :
+				                         ImGui::CalcTextSize(actions[i].label);
+			measuredLabelWidth = (std::max)(measuredLabelWidth, labelSize.x);
+
+			if (showMkb) {
+				mkbVisuals[i] = BuildEditHintBindingVisual(false, actions[i].mkb, font);
+				mkbColumnWidth = (std::max)(mkbColumnWidth, mkbVisuals[i].width);
+			}
+			if (showGamepad) {
+				gamepadVisuals[i] = BuildEditHintBindingVisual(true, actions[i].gamepad, font);
+				gamepadColumnWidth = (std::max)(gamepadColumnWidth, gamepadVisuals[i].width);
+			}
+		}
+
+		const float padX = Config::MainWheel::EditHints::PanelPaddingX;
+		const float padY = Config::MainWheel::EditHints::PanelPaddingY;
+		const float keyGap = Config::MainWheel::EditHints::KeyGap;
+		const float rowSpacing = Config::MainWheel::EditHints::RowSpacing;
+		const float rowHeight = (std::max)(Config::MainWheel::EditHints::IconSize, Config::MainWheel::EditHints::FontSize);
+		const float labelWidth = (std::max)(Config::MainWheel::EditHints::LabelWidth, measuredLabelWidth);
+		const bool showDeviceHeader = showMkb && showGamepad;
+
+		float panelWidth = padX * 2.0f + labelWidth + keyGap;
+		if (showMkb) {
+			panelWidth += mkbColumnWidth;
+		}
+		if (showGamepad) {
+			if (showMkb) {
+				panelWidth += keyGap;
+			}
+			panelWidth += gamepadColumnWidth;
+		}
+
+		float panelHeight = padY * 2.0f + static_cast<float>(actions.size()) * rowHeight +
+		                    static_cast<float>((actions.size() > 0) ? actions.size() - 1 : 0) * rowSpacing;
+		if (Config::MainWheel::EditHints::ShowTitle) {
+			panelHeight += Config::MainWheel::EditHints::HeaderFontSize + rowSpacing;
+		}
+		if (showDeviceHeader) {
+			panelHeight += Config::MainWheel::EditHints::FontSize + rowSpacing * 0.5f;
+		}
+
+		ImVec2 renderSize = ResolutionScale::Context::GetSingleton().GetRenderSize();
+		float panelX = Config::MainWheel::EditHints::AnchorX;
+		float panelY = Config::MainWheel::EditHints::AnchorY;
+		panelX = std::clamp(panelX, 0.0f, (std::max)(0.0f, renderSize.x - panelWidth));
+		panelY = std::clamp(panelY, 0.0f, (std::max)(0.0f, renderSize.y - panelHeight));
+
+		auto* drawList = ImGui::GetWindowDrawList();
+		if (Config::MainWheel::EditHints::ShowBackground) {
+			ImU32 bgColor = Config::MainWheel::EditHints::BackgroundColor;
+			Utils::Color::MultAlpha(bgColor, drawArgs.alphaMult);
+			drawList->AddRectFilled(ImVec2(panelX, panelY), ImVec2(panelX + panelWidth, panelY + panelHeight), bgColor, 6.0f);
+		}
+
+		float cursorY = panelY + padY;
+		const float contentX = panelX + padX;
+		if (Config::MainWheel::EditHints::ShowTitle) {
+			Drawer::draw_text_with_font(contentX, cursorY, Texts::GetText(Texts::TextType::EditHintTitle), Config::MainWheel::EditHints::HeaderColor,
+				font, Config::MainWheel::EditHints::HeaderFontSize, drawArgs, false);
+			cursorY += Config::MainWheel::EditHints::HeaderFontSize + rowSpacing;
+		}
+
+		const float keyColumnX = contentX + labelWidth + keyGap;
+		if (showDeviceHeader) {
+			Drawer::draw_text_with_font(keyColumnX, cursorY, Texts::GetText(Texts::TextType::EditHintDeviceHeaderMkb), Config::MainWheel::EditHints::HeaderColor,
+				font, Config::MainWheel::EditHints::FontSize, drawArgs, false);
+			Drawer::draw_text_with_font(keyColumnX + mkbColumnWidth + keyGap, cursorY, Texts::GetText(Texts::TextType::EditHintDeviceHeaderGamepad),
+				Config::MainWheel::EditHints::HeaderColor, font, Config::MainWheel::EditHints::FontSize, drawArgs, false);
+			cursorY += Config::MainWheel::EditHints::FontSize + rowSpacing * 0.5f;
+		}
+
+		for (std::size_t i = 0; i < actions.size(); ++i) {
+			const float rowTop = cursorY + static_cast<float>(i) * (rowHeight + rowSpacing);
+			const ImVec2 labelSize = font ?
+				                         font->CalcTextSizeA(Config::MainWheel::EditHints::FontSize, 10000.0f, 0.0f, actions[i].label) :
+				                         ImGui::CalcTextSize(actions[i].label);
+			const float labelY = rowTop + (rowHeight - labelSize.y) * 0.5f;
+			Drawer::draw_text_with_font(contentX, labelY, actions[i].label, Config::MainWheel::EditHints::TextColor,
+				font, Config::MainWheel::EditHints::FontSize, drawArgs, false);
+
+			float colX = keyColumnX;
+			if (showMkb) {
+				DrawEditHintBindingVisual(colX, rowTop, rowHeight, mkbVisuals[i], font, drawArgs);
+				colX += mkbColumnWidth + keyGap;
+			}
+			if (showGamepad) {
+				DrawEditHintBindingVisual(colX, rowTop, rowHeight, gamepadVisuals[i], font, drawArgs);
+			}
+		}
+	}
+
+	void DrawEditModeNavigationText(const DrawArgs& drawArgs)
+	{
+		if (!Config::MainWheel::EditHints::Enabled) {
+			return;
+		}
+
+		ImFont* font = ImGui::GetDefaultFont();
+		const float fontSize = std::clamp(Config::MainWheel::EditHints::FontSize - 2.0f, 12.0f, 40.0f);
+		constexpr float marginX = 24.0f;
+		constexpr float marginY = 24.0f;
+		constexpr float lineGap = 4.0f;
+		const std::string line1 = BuildEditModeHintsToggleLine(false);
+		const std::string line2 = BuildEditModeHintsToggleLine(true);
+		if (line1.empty() && line2.empty()) {
+			return;
+		}
+
+		const ImVec2 line1Size =
+			line1.empty() ?
+				ImVec2(0.0f, 0.0f) :
+				(font ? font->CalcTextSizeA(fontSize, 10000.0f, 0.0f, line1.c_str()) : ImGui::CalcTextSize(line1.c_str()));
+		const ImVec2 line2Size =
+			line2.empty() ?
+				ImVec2(0.0f, 0.0f) :
+				(font ? font->CalcTextSizeA(fontSize, 10000.0f, 0.0f, line2.c_str()) : ImGui::CalcTextSize(line2.c_str()));
+		const float blockWidth = (std::max)(line1Size.x, line2Size.x);
+		const float blockHeight =
+			(line1.empty() ? 0.0f : line1Size.y) +
+			(line2.empty() ? 0.0f : line2Size.y) +
+			((!line1.empty() && !line2.empty()) ? lineGap : 0.0f);
+
+		ImVec2 renderSize = ResolutionScale::Context::GetSingleton().GetRenderSize();
+		float textX = renderSize.x - marginX - blockWidth;
+		float textY = marginY;
+		textX = std::clamp(textX, 0.0f, (std::max)(0.0f, renderSize.x - blockWidth));
+		textY = std::clamp(textY, 0.0f, (std::max)(0.0f, renderSize.y - blockHeight));
+
+		float cursorY = textY;
+		if (!line1.empty()) {
+			Drawer::draw_text_with_font(textX, cursorY, line1.c_str(), Config::MainWheel::EditHints::HeaderColor,
+				font, fontSize, drawArgs, false);
+			cursorY += line1Size.y;
+			if (!line2.empty()) {
+				cursorY += lineGap;
+			}
+		}
+		if (!line2.empty()) {
+			Drawer::draw_text_with_font(textX, cursorY, line2.c_str(), Config::MainWheel::EditHints::HeaderColor,
+				font, fontSize, drawArgs, false);
+		}
+	}
+
+	InventorySnapshotCache g_mainWheelInventorySnapshot;
+	constexpr double kMainWheelInventorySnapshotIntervalSeconds = 0.25;
 
 	class WheelerPauseMenu : public RE::IMenu
 	{
@@ -199,8 +1184,10 @@ namespace
 		RE::FormID lastNon2HRight = 0;
 		RE::FormID memLeft = 0;
 		RE::FormID memRight = 0;
+		RE::FormID active2HFormID = 0;
 		bool restoreArmed = false;
 		double restoreStartTime = 0.0;
+		bool diagRestoreWaitLogged = false;
 
 		void Reset()
 		{
@@ -223,6 +1210,52 @@ namespace
 		       weaponType == RE::WEAPON_TYPE::kTwoHandAxe;
 	}
 
+	static bool IsBowLikeForm(RE::TESForm* form)
+	{
+		auto* weapon = form ? form->As<RE::TESObjectWEAP>() : nullptr;
+		return weapon && (weapon->IsBow() || weapon->IsCrossbow());
+	}
+
+	static bool IsBowLikeFormID(RE::FormID formID)
+	{
+		return formID != 0 && IsBowLikeForm(RE::TESForm::LookupByID(formID));
+	}
+
+	static RE::FormID GetFormIDOrZero(RE::TESForm* form)
+	{
+		return form ? form->GetFormID() : 0;
+	}
+
+	static const char* GetTwoHandedKindName(RE::TESForm* form)
+	{
+		auto* weapon = form ? form->As<RE::TESObjectWEAP>() : nullptr;
+		if (!weapon) {
+			return "none";
+		}
+		if (weapon->IsBow()) {
+			return "bow";
+		}
+		if (weapon->IsCrossbow()) {
+			return "crossbow";
+		}
+		switch (weapon->GetWeaponType()) {
+		case RE::WEAPON_TYPE::kTwoHandSword:
+			return "two_hand_sword";
+		case RE::WEAPON_TYPE::kTwoHandAxe:
+			return "two_hand_axe";
+		default:
+			return "other_weapon";
+		}
+	}
+
+	static bool IsTwoHandedFormID(RE::FormID formID)
+	{
+		if (formID == 0) {
+			return false;
+		}
+		return IsTwoHandedForm(RE::TESForm::LookupByID(formID));
+	}
+
 	static bool IsHandMemoryMenuBlocked()
 	{
 		auto* ui = RE::UI::GetSingleton();
@@ -235,6 +1268,111 @@ namespace
 		return ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME) ||
 		       ui->IsMenuOpen(RE::MagicMenu::MENU_NAME) ||
 		       ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME);
+	}
+
+	static bool HasInventoryBackedBoundObject(const RE::TESObjectREFR::InventoryItemMap& inv, RE::TESBoundObject* obj)
+	{
+		if (!obj) {
+			return false;
+		}
+
+		auto it = inv.find(obj);
+		if (it != inv.end() && it->second.first > 0) {
+			return true;
+		}
+
+		const RE::FormID formID = obj->GetFormID();
+		for (auto& [boundObj, data] : inv) {
+			if (boundObj && boundObj->GetFormID() == formID && data.first > 0) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static bool HasInventoryBackedBoundObject(RE::PlayerCharacter* pc, RE::TESBoundObject* obj)
+	{
+		if (!pc || !obj) {
+			return false;
+		}
+
+		RE::TESObjectREFR::InventoryItemMap inv;
+		if (!Utils::Inventory::TryGetInventorySnapshot(pc, inv, "HasInventoryBackedBoundObject")) {
+			return false;
+		}
+		return HasInventoryBackedBoundObject(inv, obj);
+	}
+
+	static bool IsTransientBoundWeaponForm(const RE::TESForm* form)
+	{
+		const auto* weapon = form ? form->As<RE::TESObjectWEAP>() : nullptr;
+		return weapon && weapon->IsBound();
+	}
+
+	static RE::FormID NormalizeRestorableHandFormID(
+		RE::PlayerCharacter* pc,
+		const RE::TESObjectREFR::InventoryItemMap* inventory,
+		RE::TESForm* form)
+	{
+		if (!form) {
+			return 0;
+		}
+		if (auto* spell = form->As<RE::SpellItem>()) {
+			return spell->GetFormID();
+		}
+		if (IsTransientBoundWeaponForm(form)) {
+			return 0;
+		}
+		if (auto* boundObj = form->As<RE::TESBoundObject>()) {
+			if (inventory) {
+				return HasInventoryBackedBoundObject(*inventory, boundObj) ? boundObj->GetFormID() : 0;
+			}
+			return HasInventoryBackedBoundObject(pc, boundObj) ? boundObj->GetFormID() : 0;
+		}
+		return 0;
+	}
+
+	static RE::FormID NormalizeRestorableHandFormID(const RE::TESObjectREFR::InventoryItemMap& inventory, RE::TESForm* form)
+	{
+		return NormalizeRestorableHandFormID(nullptr, &inventory, form);
+	}
+
+	static RE::FormID NormalizeRestorableHandFormID(RE::PlayerCharacter* pc, RE::TESForm* form)
+	{
+		return NormalizeRestorableHandFormID(pc, nullptr, form);
+	}
+
+	static RE::FormID NormalizeRestorableHandFormID(RE::PlayerCharacter* pc, RE::FormID formID)
+	{
+		if (formID == 0) {
+			return 0;
+		}
+		if (auto* form = RE::TESForm::LookupByID(formID)) {
+			return NormalizeRestorableHandFormID(pc, form);
+		}
+		return formID;
+	}
+
+	static bool TryGetTrackedPersistentHandRestoreFormIDForHandMemory(
+		RE::PlayerCharacter* pc,
+		bool isLeft,
+		RE::TESForm* currentForm,
+		RE::FormID& outRestoreFormID)
+	{
+		const RE::FormID currentFormID = currentForm ? currentForm->GetFormID() : 0;
+		if (!Wheeler::TryGetTrackedPersistentRestoreTargetForHandMemory(isLeft, currentFormID, outRestoreFormID)) {
+			const bool currentLooksTransient =
+				!currentForm ||
+				NormalizeRestorableHandFormID(pc, currentForm) == 0 ||
+				(currentForm->As<RE::SpellItem>() && IsBoundWeaponSpell(currentForm->As<RE::SpellItem>()));
+			if (!currentLooksTransient ||
+				!Wheeler::TryGetTrackedPersistentRestoreTargetForHandMemory(isLeft, 0, outRestoreFormID)) {
+				return false;
+			}
+		}
+		outRestoreFormID = NormalizeRestorableHandFormID(pc, outRestoreFormID);
+		return true;
 	}
 
 	static bool EquipFormToHand(RE::PlayerCharacter* pc, RE::FormID formID, HandMemoryHand hand)
@@ -262,9 +1400,20 @@ namespace
 		}
 
 		if (auto* boundObj = form->As<RE::TESBoundObject>()) {
+			if (NormalizeRestorableHandFormID(pc, form) != formID) {
+				return false;
+			}
 			RE::ActorEquipManager* aeMan = RE::ActorEquipManager::GetSingleton();
 			if (!aeMan) {
 				return false;
+			}
+			if (IsTwoHandedForm(form)) {
+				logger::info("[HandMemoryDiag] EquipFormToHand form={:08X} kind={} requestedHand={} leftNow={:08X} rightNow={:08X}",
+					formID,
+					GetTwoHandedKindName(form),
+					hand == HandMemoryHand::Left ? "LEFT" : "RIGHT",
+					GetFormIDOrZero(pc->GetEquippedObject(true)),
+					GetFormIDOrZero(pc->GetEquippedObject(false)));
 			}
 			RE::BGSEquipSlot* slot = (hand == HandMemoryHand::Left) ?
 				Utils::Slot::GetLeftHandSlot() : Utils::Slot::GetRightHandSlot();
@@ -293,22 +1442,91 @@ namespace
 		RE::TESForm* curLeft = pc->GetEquippedObject(true);
 		RE::TESForm* curRight = pc->GetEquippedObject(false);
 		const bool in2H = IsTwoHandedForm(curRight) || IsTwoHandedForm(curLeft);
+		RE::TESForm* current2HForm = IsTwoHandedForm(curRight) ? curRight :
+			(IsTwoHandedForm(curLeft) ? curLeft : nullptr);
+		if (in2H && current2HForm) {
+			g_handMemory.active2HFormID = current2HForm->GetFormID();
+		}
+		RE::TESObjectREFR::InventoryItemMap inventory;
+		if (!Utils::Inventory::TryGetInventorySnapshot(pc, inventory, "UpdateHandMemory")) {
+			return;
+		}
+
+		auto getRestorableHandMemoryFormID = [&](bool isLeft, RE::TESForm* form) -> RE::FormID {
+			RE::FormID trackedRestoreFormID = 0;
+			if (TryGetTrackedPersistentHandRestoreFormIDForHandMemory(pc, isLeft, form, trackedRestoreFormID)) {
+				return trackedRestoreFormID;
+			}
+			return NormalizeRestorableHandFormID(inventory, form);
+		};
+
+		auto clearInvalidRestoreForm = [&](RE::FormID& formID, const char* handName) {
+			if (formID == 0) {
+				return;
+			}
+			auto* form = RE::TESForm::LookupByID(formID);
+			if (NormalizeRestorableHandFormID(inventory, form) == formID) {
+				return;
+			}
+			if (HM::DebugLog) {
+				logger::info("[HandMemory] Drop non-restorable {} restore {:08X}",
+					handName ? handName : "hand",
+					formID);
+			}
+			formID = 0;
+		};
+
+		// Direct-cast can temporarily equip spells/powers to hands. Those transient equips
+		// must not pollute hand-memory snapshots used for non-direct normal gameplay transitions.
+		if (Wheeler::IsDirectCastPipelineActiveForHandMemory()) {
+			if (HM::DebugLog && (g_handMemory.restoreArmed || g_handMemory.memLeft != 0 || g_handMemory.memRight != 0)) {
+				logger::info("[HandMemory] Suppress during direct-cast pipeline (clear pending restore left={:08X} right={:08X})",
+					g_handMemory.memLeft, g_handMemory.memRight);
+			}
+			g_handMemory.restoreArmed = false;
+			g_handMemory.memLeft = 0;
+			g_handMemory.memRight = 0;
+			g_handMemory.diagRestoreWaitLogged = false;
+			// Keep transition baseline synchronized without recording transient hands.
+			g_handMemory.was2H = in2H;
+			return;
+		}
 
 		if (!in2H) {
-			g_handMemory.lastNon2HLeft = curLeft ? curLeft->GetFormID() : 0;
-			g_handMemory.lastNon2HRight = curRight ? curRight->GetFormID() : 0;
+			g_handMemory.lastNon2HLeft = getRestorableHandMemoryFormID(true, curLeft);
+			g_handMemory.lastNon2HRight = getRestorableHandMemoryFormID(false, curRight);
 		}
 
 		if (!g_handMemory.was2H && in2H) {
 			g_handMemory.memLeft = g_handMemory.lastNon2HLeft;
 			g_handMemory.memRight = g_handMemory.lastNon2HRight;
+			clearInvalidRestoreForm(g_handMemory.memLeft, "left");
+			clearInvalidRestoreForm(g_handMemory.memRight, "right");
 			g_handMemory.restoreArmed = false;
+			g_handMemory.diagRestoreWaitLogged = false;
+			logger::info("[HandMemoryDiag] Enter2H kind={} active2H={:08X} leftNow={:08X} rightNow={:08X} lastNon2HLeft={:08X} lastNon2HRight={:08X} captureLeft={:08X} captureRight={:08X}",
+				GetTwoHandedKindName(current2HForm),
+				g_handMemory.active2HFormID,
+				GetFormIDOrZero(curLeft),
+				GetFormIDOrZero(curRight),
+				g_handMemory.lastNon2HLeft,
+				g_handMemory.lastNon2HRight,
+				g_handMemory.memLeft,
+				g_handMemory.memRight);
 			if (HM::DebugLog) {
 				logger::info("[HandMemory] Enter2H capture left={:08X} right={:08X}", g_handMemory.memLeft, g_handMemory.memRight);
 			}
 		} else if (g_handMemory.was2H && !in2H) {
 			g_handMemory.restoreArmed = true;
 			g_handMemory.restoreStartTime = GetSafeInputTimestampSeconds();
+			g_handMemory.diagRestoreWaitLogged = false;
+			logger::info("[HandMemoryDiag] Exit2H active2H={:08X} kind={} leftNow={:08X} rightNow={:08X} restoreLeft={:08X} restoreRight={:08X}",
+				g_handMemory.active2HFormID,
+				GetTwoHandedKindName(RE::TESForm::LookupByID(g_handMemory.active2HFormID)),
+				GetFormIDOrZero(curLeft),
+				GetFormIDOrZero(curRight),
+				g_handMemory.memLeft,
+				g_handMemory.memRight);
 			if (HM::DebugLog) {
 				logger::info("[HandMemory] Exit2H arm restore (left={:08X} right={:08X})", g_handMemory.memLeft, g_handMemory.memRight);
 			}
@@ -332,12 +1550,66 @@ namespace
 			g_handMemory.memLeft = 0;
 			g_handMemory.memRight = 0;
 			g_handMemory.restoreArmed = false;
+			g_handMemory.diagRestoreWaitLogged = false;
 			return;
 		}
 
 		if (IsHandMemoryMenuBlocked()) {
 			return;
 		}
+
+		clearInvalidRestoreForm(g_handMemory.memLeft, "left");
+		clearInvalidRestoreForm(g_handMemory.memRight, "right");
+
+		auto shouldIgnoreCurrentOccupantForRestore = [&](RE::TESForm* currentForm, RE::FormID targetRestoreFormID) {
+			if (!currentForm) {
+				return false;
+			}
+			if (IsTransientBoundWeaponForm(currentForm)) {
+				return NormalizeRestorableHandFormID(inventory, currentForm) != targetRestoreFormID;
+			}
+			if (auto* currentSpell = currentForm->As<RE::SpellItem>(); currentSpell && IsBoundWeaponSpell(currentSpell)) {
+				return currentSpell->GetFormID() != targetRestoreFormID;
+			}
+			return false;
+		};
+
+		auto clearIgnoredOccupantForRestore = [&](bool isLeft, RE::FormID targetRestoreFormID, RE::TESForm*& currentForm) {
+			if (!shouldIgnoreCurrentOccupantForRestore(currentForm, targetRestoreFormID)) {
+				return false;
+			}
+			RE::BGSEquipSlot* slot = isLeft ? Utils::Slot::GetLeftHandSlot() : Utils::Slot::GetRightHandSlot();
+			if (!slot) {
+				return false;
+			}
+			logger::info("[HandMemoryDiag] ClearIgnoredOccupant hand={} active2H={:08X} targetRestore={:08X} current={:08X}",
+				isLeft ? "LEFT" : "RIGHT",
+				g_handMemory.active2HFormID,
+				targetRestoreFormID,
+				GetFormIDOrZero(currentForm));
+			Utils::Slot::CleanSlot(pc, slot);
+			currentForm = pc->GetEquippedObject(isLeft);
+			return true;
+		};
+
+		auto reconcilePendingRestoreAgainstCurrentOccupant = [&](const char* handName, RE::TESForm* currentForm, RE::FormID& pendingRestoreFormID) {
+			if (pendingRestoreFormID == 0 || !currentForm) {
+				return;
+			}
+
+			const RE::FormID currentRestorableFormID = NormalizeRestorableHandFormID(inventory, currentForm);
+			if (currentRestorableFormID == 0) {
+				return;
+			}
+
+			logger::info("[HandMemoryDiag] DropPendingRestore hand={} active2H={:08X} pending={:08X} current={:08X} currentRestorable={:08X}",
+				handName ? handName : "?",
+				g_handMemory.active2HFormID,
+				pendingRestoreFormID,
+				GetFormIDOrZero(currentForm),
+				currentRestorableFormID);
+			pendingRestoreFormID = 0;
+		};
 
 		if (!HM::RestoreLeftIfEmpty) {
 			g_handMemory.memLeft = 0;
@@ -346,17 +1618,48 @@ namespace
 			g_handMemory.memRight = 0;
 		}
 
-		if (curLeft != nullptr) {
-			g_handMemory.memLeft = 0;
+		const bool clearedIgnoredRight = clearIgnoredOccupantForRestore(false, g_handMemory.memRight, curRight);
+		const bool clearedIgnoredLeft = clearIgnoredOccupantForRestore(true, g_handMemory.memLeft, curLeft);
+
+		reconcilePendingRestoreAgainstCurrentOccupant("LEFT", curLeft, g_handMemory.memLeft);
+		reconcilePendingRestoreAgainstCurrentOccupant("RIGHT", curRight, g_handMemory.memRight);
+
+		const bool waitingOnOccupiedRight =
+			g_handMemory.memRight != 0 &&
+			HM::RestoreRightIfEmpty &&
+			curRight != nullptr;
+		const bool waitingOnOccupiedLeft =
+			g_handMemory.memLeft != 0 &&
+			HM::RestoreLeftIfEmpty &&
+			curLeft != nullptr;
+		if ((waitingOnOccupiedLeft || waitingOnOccupiedRight) && !g_handMemory.diagRestoreWaitLogged) {
+			logger::info("[HandMemoryDiag] RestoreWaiting active2H={:08X} leftPending={:08X} rightPending={:08X} curLeft={:08X} curRight={:08X}",
+				g_handMemory.active2HFormID,
+				g_handMemory.memLeft,
+				g_handMemory.memRight,
+				GetFormIDOrZero(curLeft),
+				GetFormIDOrZero(curRight));
+			g_handMemory.diagRestoreWaitLogged = true;
 		}
-		if (curRight != nullptr) {
-			g_handMemory.memRight = 0;
-		}
+
+		bool restoredSpellThisFrame = false;
 
 		if (g_handMemory.memRight != 0 && HM::RestoreRightIfEmpty && curRight == nullptr) {
 			const RE::FormID toEquip = g_handMemory.memRight;
 			g_handMemory.memRight = 0;
 			const bool ok = EquipFormToHand(pc, toEquip, HandMemoryHand::Right);
+			logger::info("[HandMemoryDiag] RestoreAttempt hand=RIGHT active2H={:08X} target={:08X} targetKind={} ok={} leftNow={:08X} rightNow={:08X}",
+				g_handMemory.active2HFormID,
+				toEquip,
+				GetTwoHandedKindName(RE::TESForm::LookupByID(toEquip)),
+				ok ? 1 : 0,
+				GetFormIDOrZero(pc->GetEquippedObject(true)),
+				GetFormIDOrZero(pc->GetEquippedObject(false)));
+			if (ok) {
+				if (auto* restoredForm = RE::TESForm::LookupByID(toEquip); restoredForm && restoredForm->As<RE::SpellItem>()) {
+					restoredSpellThisFrame = true;
+				}
+			}
 			if (HM::DebugLog) {
 				logger::info("[HandMemory] Restore right {:08X} ok={}", toEquip, ok ? 1 : 0);
 			}
@@ -369,13 +1672,36 @@ namespace
 			const RE::FormID toEquip = g_handMemory.memLeft;
 			g_handMemory.memLeft = 0;
 			const bool ok = EquipFormToHand(pc, toEquip, HandMemoryHand::Left);
+			logger::info("[HandMemoryDiag] RestoreAttempt hand=LEFT active2H={:08X} target={:08X} targetKind={} ok={} leftNow={:08X} rightNow={:08X}",
+				g_handMemory.active2HFormID,
+				toEquip,
+				GetTwoHandedKindName(RE::TESForm::LookupByID(toEquip)),
+				ok ? 1 : 0,
+				GetFormIDOrZero(pc->GetEquippedObject(true)),
+				GetFormIDOrZero(pc->GetEquippedObject(false)));
+			if (ok) {
+				if (auto* restoredForm = RE::TESForm::LookupByID(toEquip); restoredForm && restoredForm->As<RE::SpellItem>()) {
+					restoredSpellThisFrame = true;
+				}
+			}
 			if (HM::DebugLog) {
 				logger::info("[HandMemory] Restore left {:08X} ok={}", toEquip, ok ? 1 : 0);
 			}
 		}
 
+		if (restoredSpellThisFrame) {
+			if (clearedIgnoredLeft || clearedIgnoredRight) {
+				pc->DrawWeaponMagicHands(false);
+			}
+			pc->DrawWeaponMagicHands(true);
+		}
+
 		if (g_handMemory.memLeft == 0 && g_handMemory.memRight == 0) {
 			g_handMemory.restoreArmed = false;
+			g_handMemory.diagRestoreWaitLogged = false;
+			if (!in2H) {
+				g_handMemory.active2HFormID = 0;
+			}
 		}
 	}
 
@@ -383,14 +1709,47 @@ namespace
 
 namespace HandMemory
 {
-	void NotifyWheelEquipOrCast()
+	void NotifyWheelEquipOrCast(const std::shared_ptr<WheelItem>& item, Wheeler::ReleaseAction action)
 	{
+		const auto actionName = [](Wheeler::ReleaseAction currentAction) {
+			switch (currentAction) {
+			case Wheeler::ReleaseAction::Equip:
+				return "Equip";
+			case Wheeler::ReleaseAction::CastSpell:
+				return "CastSpell";
+			case Wheeler::ReleaseAction::CastShout:
+				return "CastShout";
+			case Wheeler::ReleaseAction::None:
+			default:
+				return "None";
+			}
+		};
+		const RE::FormID itemFormID = item ? item->GetFormID() : 0;
+		// While actively in a 2H state, memLeft/memRight represent the captured pre-2H build.
+		// Preserve that capture until the 2H state actually exits, otherwise wheel actions
+		// taken while a bow/2H item is equipped can erase the pre-2H restore target.
+		if (g_handMemory.was2H && !g_handMemory.restoreArmed) {
+			logger::info("[HandMemoryDiag] NotifyPreservedDuringActive2H action={} item={:08X} active2H={:08X} memLeft={:08X} memRight={:08X}",
+				actionName(action),
+				itemFormID,
+				g_handMemory.active2HFormID,
+				g_handMemory.memLeft,
+				g_handMemory.memRight);
+			return;
+		}
 		if (!g_handMemory.restoreArmed && g_handMemory.memLeft == 0 && g_handMemory.memRight == 0) {
 			return;
 		}
+		logger::info("[HandMemoryDiag] NotifyClearedPendingRestore action={} item={:08X} active2H={:08X} memLeft={:08X} memRight={:08X}",
+			actionName(action),
+			itemFormID,
+			g_handMemory.active2HFormID,
+			g_handMemory.memLeft,
+			g_handMemory.memRight);
 		g_handMemory.restoreArmed = false;
 		g_handMemory.memLeft = 0;
 		g_handMemory.memRight = 0;
+		g_handMemory.diagRestoreWaitLogged = false;
 	}
 }
 
@@ -625,6 +1984,379 @@ namespace
 		return true;
 	}
 
+	bool DispatchTempRefOnRead(RE::PlayerCharacter* pc, RE::TESObjectBOOK* book)
+	{
+		if (!pc || !book) {
+			return false;
+		}
+		auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+		if (!vm) {
+			return false;
+		}
+
+		auto tempRefPtr = pc->PlaceObjectAtMe(book, false);
+		RE::TESObjectREFR* tempRef = tempRefPtr.get();
+		if (!tempRef) {
+			return false;
+		}
+
+		RE::VMHandle handle = vm->GetObjectHandlePolicy()->GetHandleForObject(
+			RE::FormType::Reference, tempRef);
+
+		if (handle == 0) {
+			SKSE::GetTaskInterface()->AddTask([tempRefPtr]() {
+				RE::TESObjectREFR* ref = tempRefPtr.get();
+				if (ref) {
+					ref->Disable();
+					ref->SetDelete(true);
+				}
+			});
+			return false;
+		}
+
+		auto args = RE::MakeFunctionArguments();
+		vm->SendEvent(handle, RE::BSFixedString("OnRead"), args);
+		delete args;
+
+		SKSE::GetTaskInterface()->AddTask([tempRefPtr]() {
+			RE::TESObjectREFR* ref = tempRefPtr.get();
+			if (ref) {
+				ref->Disable();
+				ref->SetDelete(true);
+			}
+		});
+		return true;
+	}
+
+	std::string TrimBookReadCompatToken(std::string_view token)
+	{
+		auto begin = token.begin();
+		auto end = token.end();
+		while (begin != end && std::isspace(static_cast<unsigned char>(*begin))) {
+			++begin;
+		}
+		while (end != begin) {
+			auto prev = end;
+			--prev;
+			if (!std::isspace(static_cast<unsigned char>(*prev))) {
+				break;
+			}
+			end = prev;
+		}
+		return std::string(begin, end);
+	}
+
+	bool EqualsBookReadCompatIgnoreCase(std::string_view lhs, std::string_view rhs)
+	{
+		if (lhs.size() != rhs.size()) {
+			return false;
+		}
+		for (std::size_t i = 0; i < lhs.size(); ++i) {
+			if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
+				std::tolower(static_cast<unsigned char>(rhs[i]))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool ContainsBookReadCompatIgnoreCase(std::string_view haystack, std::string_view needle)
+	{
+		if (needle.empty()) {
+			return false;
+		}
+		if (needle.size() > haystack.size()) {
+			return false;
+		}
+		return std::search(
+			haystack.begin(),
+			haystack.end(),
+			needle.begin(),
+			needle.end(),
+			[](char lhs, char rhs) {
+				return std::tolower(static_cast<unsigned char>(lhs)) ==
+					std::tolower(static_cast<unsigned char>(rhs));
+			}) != haystack.end();
+	}
+
+	enum class BookReadCompatAllowListMatch
+	{
+		None,
+		FormID,
+		Plugin,
+		NameToken
+	};
+
+	std::optional<RE::FormID> ParseBookReadCompatFormIDToken(std::string_view token)
+	{
+		std::string text = TrimBookReadCompatToken(token);
+		if (text.empty()) {
+			return std::nullopt;
+		}
+
+		char* endPtr = nullptr;
+		errno = 0;
+		const unsigned long value = std::strtoul(text.c_str(), &endPtr, 16);
+		if (errno != 0 || endPtr == text.c_str() || (endPtr && *endPtr != '\0') ||
+			value > (std::numeric_limits<std::uint32_t>::max)()) {
+			return std::nullopt;
+		}
+
+		return static_cast<RE::FormID>(value);
+	}
+
+	std::optional<RE::FormID> ResolveBookReadCompatFormIDToken(std::string_view token)
+	{
+		std::string text = TrimBookReadCompatToken(token);
+		if (text.empty()) {
+			return std::nullopt;
+		}
+
+		const auto sep = text.find_first_of("|:");
+		if (sep == std::string::npos) {
+			return ParseBookReadCompatFormIDToken(text);
+		}
+
+		const std::string pluginName = TrimBookReadCompatToken(std::string_view(text).substr(0, sep));
+		const std::string relativeText = TrimBookReadCompatToken(std::string_view(text).substr(sep + 1));
+		if (pluginName.empty() || relativeText.empty()) {
+			return std::nullopt;
+		}
+
+		auto relativeId = ParseBookReadCompatFormIDToken(relativeText);
+		if (!relativeId.has_value()) {
+			return std::nullopt;
+		}
+
+		auto* handler = RE::TESDataHandler::GetSingleton();
+		if (!handler) {
+			return std::nullopt;
+		}
+		if (auto* resolvedBook = handler->LookupForm<RE::TESObjectBOOK>(*relativeId, pluginName.c_str())) {
+			return resolvedBook->GetFormID();
+		}
+		return std::nullopt;
+	}
+
+	bool IsBookReadCompatFormIDAllowListed(RE::TESObjectBOOK* book)
+	{
+		if (!book) {
+			return false;
+		}
+
+		std::string_view csv = Config::WheelBehavior::BookReadCompat::OnReadFormIDs;
+		std::size_t start = 0;
+		while (start <= csv.size()) {
+			std::size_t comma = csv.find(',', start);
+			if (comma == std::string_view::npos) {
+				comma = csv.size();
+			}
+
+			const std::string token = TrimBookReadCompatToken(csv.substr(start, comma - start));
+			if (!token.empty()) {
+				const auto resolvedFormID = ResolveBookReadCompatFormIDToken(token);
+				if (resolvedFormID.has_value() && *resolvedFormID == book->GetFormID()) {
+					return true;
+				}
+				if (!resolvedFormID.has_value() && Config::WheelBehavior::BookReadCompat::DebugLog) {
+					logger::info("BookReadCompat: unresolved allowlist token '{}'", token);
+				}
+			}
+
+			if (comma == csv.size()) {
+				break;
+			}
+			start = comma + 1;
+		}
+
+		return false;
+	}
+
+	bool IsBookReadCompatPluginAllowListed(RE::TESObjectBOOK* book)
+	{
+		if (!book) {
+			return false;
+		}
+
+		const auto* file = book->GetFile(0);
+		if (!file) {
+			return false;
+		}
+
+		const auto fileName = file->GetFilename();
+		if (fileName.empty()) {
+			return false;
+		}
+
+		std::string_view csv = Config::WheelBehavior::BookReadCompat::OnReadPlugins;
+		std::size_t start = 0;
+		while (start <= csv.size()) {
+			std::size_t comma = csv.find(',', start);
+			if (comma == std::string_view::npos) {
+				comma = csv.size();
+			}
+
+			const std::string token = TrimBookReadCompatToken(csv.substr(start, comma - start));
+			if (!token.empty() && EqualsBookReadCompatIgnoreCase(fileName, token)) {
+				return true;
+			}
+
+			if (comma == csv.size()) {
+				break;
+			}
+			start = comma + 1;
+		}
+
+		return false;
+	}
+
+	bool IsBookReadCompatNameTokenAllowListed(RE::TESObjectBOOK* book)
+	{
+		if (!book) {
+			return false;
+		}
+
+		const char* rawName = book->GetName();
+		const std::string_view bookName = rawName ? rawName : "";
+		if (bookName.empty()) {
+			return false;
+		}
+
+		std::string_view csv = Config::WheelBehavior::BookReadCompat::OnReadNameTokens;
+		std::size_t start = 0;
+		while (start <= csv.size()) {
+			std::size_t comma = csv.find(',', start);
+			if (comma == std::string_view::npos) {
+				comma = csv.size();
+			}
+
+			const std::string token = TrimBookReadCompatToken(csv.substr(start, comma - start));
+			if (!token.empty() && ContainsBookReadCompatIgnoreCase(bookName, token)) {
+				return true;
+			}
+
+			if (comma == csv.size()) {
+				break;
+			}
+			start = comma + 1;
+		}
+
+		return false;
+	}
+
+	BookReadCompatAllowListMatch GetBookReadCompatAllowListMatch(RE::TESObjectBOOK* book, bool scriptBacked)
+	{
+		if (IsBookReadCompatFormIDAllowListed(book)) {
+			return BookReadCompatAllowListMatch::FormID;
+		}
+		if (!scriptBacked) {
+			return BookReadCompatAllowListMatch::None;
+		}
+		if (IsBookReadCompatPluginAllowListed(book)) {
+			return BookReadCompatAllowListMatch::Plugin;
+		}
+		if (IsBookReadCompatNameTokenAllowListed(book)) {
+			return BookReadCompatAllowListMatch::NameToken;
+		}
+		return BookReadCompatAllowListMatch::None;
+	}
+
+	const char* BookReadCompatModeName(std::uint32_t mode)
+	{
+		mode = std::clamp(mode, 0u, 2u);
+		switch (static_cast<Config::WheelBehavior::BookReadCompatMode>(mode)) {
+		case Config::WheelBehavior::BookReadCompatMode::AutoScripted:
+			return "AutoScripted";
+		case Config::WheelBehavior::BookReadCompatMode::AllowListOnly:
+			return "AllowListOnly";
+		case Config::WheelBehavior::BookReadCompatMode::Disabled:
+			return "Disabled";
+		default:
+			return "Unknown";
+		}
+	}
+
+	bool ShouldUseBookReadCompatOnRead(RE::TESObjectBOOK* book, bool scriptBacked, bool& allowListed, const char*& reason)
+	{
+		const auto allowListMatch = GetBookReadCompatAllowListMatch(book, scriptBacked);
+		allowListed = allowListMatch != BookReadCompatAllowListMatch::None;
+		reason = "legacy_bookmenu";
+
+		const auto mode = static_cast<Config::WheelBehavior::BookReadCompatMode>(
+			std::clamp(Config::WheelBehavior::BookReadCompat::Mode, 0u, 2u));
+
+		if (mode == Config::WheelBehavior::BookReadCompatMode::Disabled) {
+			reason = allowListed ? "disabled_allowlisted" : "disabled";
+			return false;
+		}
+		if (allowListed) {
+			switch (allowListMatch) {
+			case BookReadCompatAllowListMatch::FormID:
+				reason = "allowlist_formid";
+				break;
+			case BookReadCompatAllowListMatch::Plugin:
+				reason = "allowlist_plugin";
+				break;
+			case BookReadCompatAllowListMatch::NameToken:
+				reason = "allowlist_name_token";
+				break;
+			case BookReadCompatAllowListMatch::None:
+			default:
+				reason = "allowlist";
+				break;
+			}
+			return true;
+		}
+		if (mode == Config::WheelBehavior::BookReadCompatMode::AllowListOnly) {
+			reason = "allowlist_only";
+			return false;
+		}
+		if (scriptBacked) {
+			reason = "auto_scripted";
+			return true;
+		}
+		return false;
+	}
+
+	bool OpenBookMenuNow(RE::FormID bookFormID, RE::TESObjectBOOK* book, std::string_view source)
+	{
+		if (!book) {
+			return false;
+		}
+
+		RE::BSString desc;
+		book->GetDescription(desc, nullptr);
+
+		RE::NiMatrix3 rot;
+		rot.entry[0][0] = 1.0f; rot.entry[0][1] = 0.0f; rot.entry[0][2] = 0.0f;
+		rot.entry[1][0] = 0.0f; rot.entry[1][1] = 1.0f; rot.entry[1][2] = 0.0f;
+		rot.entry[2][0] = 0.0f; rot.entry[2][1] = 0.0f; rot.entry[2][2] = 1.0f;
+
+		RE::BookMenu::OpenBookMenu(desc, nullptr, nullptr, book, {0, 0, 0}, rot, 1.0f, true);
+
+		if (MainWheelDebug::IsEnabled()) {
+			MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Issued",
+				"OpenBookMenu called ({}), formID={:08X}", source, bookFormID);
+		}
+
+		SKSE::GetTaskInterface()->AddTask([bookFormID]() {
+			RE::UI* deferredUI = RE::UI::GetSingleton();
+			if (deferredUI && deferredUI->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
+				if (MainWheelDebug::IsEnabled()) {
+					MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_MenuOpen",
+						"BookMenu IS OPEN (formID={:08X})", bookFormID);
+				}
+			} else {
+				if (MainWheelDebug::IsEnabled()) {
+					MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_MenuFailed",
+						"BookMenu did NOT open (formID={:08X})", bookFormID);
+				}
+			}
+		});
+
+		return true;
+	}
+
 	bool IsControllerDebugOverlayEnabled()
 	{
 		return IsControllerDebugEnabled() &&
@@ -732,7 +2464,395 @@ namespace
 
 	const char* GetTargetHandName(Wheeler::TargetHand hand)
 	{
-		return hand == Wheeler::TargetHand::Left ? "LEFT" : "RIGHT";
+		switch (hand) {
+		case Wheeler::TargetHand::Left:
+			return "LEFT";
+		case Wheeler::TargetHand::Both:
+			return "BOTH";
+		case Wheeler::TargetHand::Right:
+		default:
+			return "RIGHT";
+		}
+	}
+
+	constexpr bool UsesLeftAttack(Wheeler::TargetHand hand)
+	{
+		return hand == Wheeler::TargetHand::Left || hand == Wheeler::TargetHand::Both;
+	}
+
+	constexpr bool UsesRightAttack(Wheeler::TargetHand hand)
+	{
+		return hand == Wheeler::TargetHand::Right || hand == Wheeler::TargetHand::Both;
+	}
+
+	bool IsModuleLoadedCompat(std::wstring_view dllName)
+	{
+		return dllName.empty() ? false : (::GetModuleHandleW(dllName.data()) != nullptr);
+	}
+
+	bool HasLoadedPluginCompat(std::string_view pluginName)
+	{
+		auto* dataHandler = RE::TESDataHandler::GetSingleton();
+		if (!dataHandler || pluginName.empty()) {
+			return false;
+		}
+
+		if (dataHandler->LookupModByName(pluginName.data()) != nullptr) {
+			return true;
+		}
+
+		if (dataHandler->LookupLoadedLightModByName(pluginName.data()) != nullptr) {
+			return true;
+		}
+
+		return false;
+	}
+
+	bool IsHeavyDrawnWeaponRiskProfile()
+	{
+		static const bool cached = []() {
+			const int score =
+				static_cast<int>(HasLoadedPluginCompat("Left Hand Equipment Overhaul.esp")) +
+				static_cast<int>(HasLoadedPluginCompat("Draw Fix - Move Equip Animation Fix.esp")) +
+				static_cast<int>(HasLoadedPluginCompat("ValhallaCombat.esp")) +
+				static_cast<int>(HasLoadedPluginCompat("Attack_DXP.esp")) +
+				static_cast<int>(HasLoadedPluginCompat("MCO - First Person Patch.esp")) +
+				static_cast<int>(HasLoadedPluginCompat("OCPA.esl")) +
+				static_cast<int>(HasLoadedPluginCompat("DynamicCollisionAdjustment.esl")) +
+				static_cast<int>(IsModuleLoadedCompat(L"CombatPathingRevolution.dll")) +
+				static_cast<int>(IsModuleLoadedCompat(L"UnequipQuiverNG.dll")) +
+				static_cast<int>(HasLoadedPluginCompat("Lux Via.esp")) +
+				static_cast<int>(HasLoadedPluginCompat("NAT-ENB.esp"));
+			return score >= 6;
+		}();
+		return cached;
+	}
+
+	bool IsEquipmentDurabilitySystemProfile()
+	{
+		static const bool cached =
+			IsModuleLoadedCompat(L"EquipmentDurabilitySystemNG.dll") ||
+			IsModuleLoadedCompat(L"EquipmentDurabilitySystem-NG.dll");
+		return cached;
+	}
+
+	bool ShouldUseWeaponDispatchConfirmation()
+	{
+		// Regression isolation: the old working FavWheel baseline does not use this
+		// pending-confirmation state machine. Temporarily keep it disabled until the
+		// slot-selection CTD family is proven unrelated.
+		return false;
+	}
+
+	struct WeaponHandSnapshot
+	{
+		RE::FormID leftFormID = 0;
+		RE::FormID rightFormID = 0;
+		bool drawn = false;
+	};
+
+	struct WeaponDispatchConfirmationState
+	{
+		enum class Phase
+		{
+			WaitingForFirstChange,
+			WaitingForStableSnapshot
+		};
+
+		bool active = false;
+		int entryIdx = -1;
+		RE::FormID formID = 0;
+		Wheeler::TargetHand hand = Wheeler::TargetHand::Right;
+		WeaponHandSnapshot baseline{};
+		WeaponHandSnapshot lastObserved{};
+		Phase phase = Phase::WaitingForFirstChange;
+		double armedAt = 0.0;
+		double expiresAt = 0.0;
+		double stableSince = 0.0;
+	};
+
+	WeaponDispatchConfirmationState g_weaponDispatchConfirmation{};
+
+	WeaponHandSnapshot CaptureWeaponHandSnapshot(RE::PlayerCharacter* player)
+	{
+		WeaponHandSnapshot snapshot{};
+		if (!player) {
+			return snapshot;
+		}
+
+		if (auto* left = player->GetEquippedObject(true)) {
+			snapshot.leftFormID = left->GetFormID();
+		}
+		if (auto* right = player->GetEquippedObject(false)) {
+			snapshot.rightFormID = right->GetFormID();
+		}
+		if (auto* actorState = player->AsActorState()) {
+			snapshot.drawn = actorState->IsWeaponDrawn();
+		}
+		return snapshot;
+	}
+
+	bool HasWeaponHandStateChanged(const WeaponHandSnapshot& baseline, const WeaponHandSnapshot& current)
+	{
+		return baseline.leftFormID != current.leftFormID ||
+		       baseline.rightFormID != current.rightFormID ||
+		       baseline.drawn != current.drawn;
+	}
+
+	bool IsWeaponDispatchConfirmationCandidate(const std::shared_ptr<WheelItem>& item, RE::FormID formID)
+	{
+		return item && formID != 0 && std::dynamic_pointer_cast<WheelItemWeapon>(item) != nullptr;
+	}
+
+	void ClearWeaponDispatchConfirmation()
+	{
+		g_weaponDispatchConfirmation = {};
+	}
+
+	void UpdateWeaponDispatchConfirmation()
+	{
+		ClearWeaponDispatchConfirmation();
+	}
+
+	std::optional<WeaponHandSnapshot> CaptureWeaponDispatchBaseline(const std::shared_ptr<WheelItem>& item, RE::FormID formID)
+	{
+		if (!ShouldUseWeaponDispatchConfirmation() || !IsWeaponDispatchConfirmationCandidate(item, formID)) {
+			return std::nullopt;
+		}
+
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			return std::nullopt;
+		}
+
+		return CaptureWeaponHandSnapshot(player);
+	}
+
+	bool ShouldBlockWeaponDispatchConfirmation(
+		const std::shared_ptr<WheelItem>& item,
+		RE::FormID formID,
+		int entryIdx,
+		Wheeler::TargetHand hand)
+	{
+		(void)item;
+		(void)formID;
+		(void)entryIdx;
+		(void)hand;
+		return false;
+	}
+
+	void ArmWeaponDispatchConfirmation(
+		const std::shared_ptr<WheelItem>& item,
+		RE::FormID formID,
+		int entryIdx,
+		Wheeler::TargetHand hand,
+		const std::optional<WeaponHandSnapshot>& baseline)
+	{
+		(void)item;
+		(void)formID;
+		(void)entryIdx;
+		(void)hand;
+		(void)baseline;
+		ClearWeaponDispatchConfirmation();
+	}
+
+	const char* GetCastingSourceName(RE::MagicSystem::CastingSource source)
+	{
+		switch (source) {
+		case RE::MagicSystem::CastingSource::kLeftHand:
+			return "left";
+		case RE::MagicSystem::CastingSource::kRightHand:
+			return "right";
+		case RE::MagicSystem::CastingSource::kOther:
+			return "other";
+		case RE::MagicSystem::CastingSource::kInstant:
+			return "instant";
+		default:
+			return "unknown";
+		}
+	}
+
+	const char* GetMagicCasterStateName(RE::MagicCaster::State state)
+	{
+		switch (state) {
+		case RE::MagicCaster::State::kNone:
+			return "None";
+		case RE::MagicCaster::State::kUnk01:
+			return "Unk01";
+		case RE::MagicCaster::State::kUnk02:
+			return "Unk02";
+		case RE::MagicCaster::State::kReady:
+			return "Ready";
+		case RE::MagicCaster::State::kUnk04:
+			return "Unk04";
+		case RE::MagicCaster::State::kCharging:
+			return "Charging";
+		case RE::MagicCaster::State::kCasting:
+			return "Casting";
+		case RE::MagicCaster::State::kUnk07:
+			return "Unk07";
+		case RE::MagicCaster::State::kUnk08:
+			return "Unk08";
+		case RE::MagicCaster::State::kUnk09:
+			return "Unk09";
+		default:
+			return "Unknown";
+		}
+	}
+
+	constexpr bool IsChargeLikeCasterState(RE::MagicCaster::State state)
+	{
+		// Keep this broad: unknown active states are spell-specific and can still represent an in-progress charge window.
+		switch (state) {
+		case RE::MagicCaster::State::kNone:
+		case RE::MagicCaster::State::kReady:
+			return false;
+		default:
+			return true;
+		}
+	}
+
+	struct SpellCasterSnapshot
+	{
+		RE::MagicSystem::CastingSource source = RE::MagicSystem::CastingSource::kRightHand;
+		bool hasCaster = false;
+		RE::FormID currentSpellFormID = 0;
+		RE::MagicCaster::State state = RE::MagicCaster::State::kNone;
+		float castingTimer = 0.0f;
+	};
+
+	std::array<RE::MagicSystem::CastingSource, 4> BuildSpellCasterProbeOrder(RE::MagicSystem::CastingSource preferred)
+	{
+		std::array<RE::MagicSystem::CastingSource, 4> ordered{
+			preferred,
+			preferred == RE::MagicSystem::CastingSource::kLeftHand ?
+				RE::MagicSystem::CastingSource::kRightHand :
+				RE::MagicSystem::CastingSource::kLeftHand,
+			RE::MagicSystem::CastingSource::kInstant,
+			RE::MagicSystem::CastingSource::kOther
+		};
+		std::array<RE::MagicSystem::CastingSource, 4> unique{};
+		std::size_t uniqueCount = 0;
+		for (auto source : ordered) {
+			bool exists = false;
+			for (std::size_t i = 0; i < uniqueCount; ++i) {
+				if (unique[i] == source) {
+					exists = true;
+					break;
+				}
+			}
+			if (!exists && uniqueCount < unique.size()) {
+				unique[uniqueCount++] = source;
+			}
+		}
+		for (std::size_t i = uniqueCount; i < unique.size(); ++i) {
+			unique[i] = preferred;
+		}
+		return unique;
+	}
+
+	bool CaptureSpellCasterSnapshots(
+		RE::PlayerCharacter* pc,
+		RE::FormID spellFormID,
+		RE::MagicSystem::CastingSource preferredSource,
+		SpellCasterSnapshot& matchedSnapshot,
+		std::array<SpellCasterSnapshot, 4>* outSnapshots)
+	{
+		const auto sources = BuildSpellCasterProbeOrder(preferredSource);
+		bool matched = false;
+		bool hasFirstMatched = false;
+		SpellCasterSnapshot firstMatched{};
+		for (std::size_t i = 0; i < sources.size(); ++i) {
+			SpellCasterSnapshot snapshot{};
+			snapshot.source = sources[i];
+			if (pc) {
+				if (RE::MagicCaster* caster = pc->GetMagicCaster(snapshot.source)) {
+					snapshot.hasCaster = true;
+					snapshot.state = caster->state.get();
+					snapshot.castingTimer = caster->castingTimer;
+					if (caster->currentSpell) {
+						snapshot.currentSpellFormID = caster->currentSpell->GetFormID();
+					}
+				}
+			}
+
+			if (outSnapshots) {
+				(*outSnapshots)[i] = snapshot;
+			}
+
+			if (!matched &&
+				spellFormID != 0 &&
+				snapshot.hasCaster &&
+				snapshot.currentSpellFormID == spellFormID) {
+				if (!hasFirstMatched) {
+					firstMatched = snapshot;
+					hasFirstMatched = true;
+				}
+				const bool chargeActive =
+					IsChargeLikeCasterState(snapshot.state) ||
+					snapshot.castingTimer > 0.01f;
+				if (chargeActive) {
+					matchedSnapshot = snapshot;
+					matched = true;
+				}
+			}
+		}
+
+		if (!matched && hasFirstMatched) {
+			matchedSnapshot = firstMatched;
+			matched = true;
+		}
+		return matched;
+	}
+
+	constexpr bool IsSnapshotChargeActive(const SpellCasterSnapshot& snapshot)
+	{
+		return snapshot.hasCaster &&
+		       (IsChargeLikeCasterState(snapshot.state) || snapshot.castingTimer > 0.01f);
+	}
+
+	const SpellCasterSnapshot* FindSnapshotBySource(
+		const std::array<SpellCasterSnapshot, 4>& snapshots,
+		RE::MagicSystem::CastingSource source)
+	{
+		for (const auto& snapshot : snapshots) {
+			if (snapshot.source == source) {
+				return &snapshot;
+			}
+		}
+		return nullptr;
+	}
+
+	bool TryGetActiveSnapshotForHeldSources(
+		const std::array<SpellCasterSnapshot, 4>& snapshots,
+		bool useLeftPrimary,
+		bool hasSecondAttack,
+		bool useLeftSecond,
+		SpellCasterSnapshot& outSnapshot)
+	{
+		const auto primarySource = useLeftPrimary ?
+			RE::MagicSystem::CastingSource::kLeftHand :
+			RE::MagicSystem::CastingSource::kRightHand;
+		const auto* primarySnapshot = FindSnapshotBySource(snapshots, primarySource);
+		if (primarySnapshot && IsSnapshotChargeActive(*primarySnapshot)) {
+			outSnapshot = *primarySnapshot;
+			return true;
+		}
+
+		if (hasSecondAttack) {
+			const auto secondarySource = useLeftSecond ?
+				RE::MagicSystem::CastingSource::kLeftHand :
+				RE::MagicSystem::CastingSource::kRightHand;
+			if (secondarySource != primarySource) {
+				const auto* secondarySnapshot = FindSnapshotBySource(snapshots, secondarySource);
+				if (secondarySnapshot && IsSnapshotChargeActive(*secondarySnapshot)) {
+					outSnapshot = *secondarySnapshot;
+					return true;
+				}
+			}
+		}
+
+		return false;
 	}
 
 	enum class SmartAssignCategory : std::uint32_t
@@ -767,6 +2887,10 @@ namespace
 	bool ShouldNotifyHandMemory(const std::shared_ptr<WheelItem>& item, ReleaseAction action)
 	{
 		if (action == ReleaseAction::CastSpell) {
+			// DirectCast is transient by design; do not let cast actions mutate hand-memory state.
+			if (Config::WheelBehavior::InstantSpellUseDirectCast) {
+				return false;
+			}
 			return true;
 		}
 		if (action == ReleaseAction::CastShout) {
@@ -807,6 +2931,131 @@ namespace
 		           RE::MagicSystem::CastingSource::kRightHand;
 	}
 
+	enum class SpellHandRule
+	{
+		Any,
+		LeftOnly,
+		RightOnly,
+		BothOnly
+	};
+
+	const char* GetSpellHandRuleName(SpellHandRule rule)
+	{
+		switch (rule) {
+		case SpellHandRule::LeftOnly:
+			return "left_only";
+		case SpellHandRule::RightOnly:
+			return "right_only";
+		case SpellHandRule::BothOnly:
+			return "both_only";
+		case SpellHandRule::Any:
+		default:
+			return "any";
+		}
+	}
+
+	bool EquipSlotMatchesOrInherits(
+		const RE::BGSEquipSlot* slot,
+		const RE::BGSEquipSlot* target,
+		std::uint8_t depth = 0)
+	{
+		if (!slot || !target) {
+			return false;
+		}
+		if (slot == target) {
+			return true;
+		}
+		if (depth >= 8) {
+			return false;
+		}
+		for (auto* parent : slot->parentSlots) {
+			if (!parent) {
+				continue;
+			}
+			if (EquipSlotMatchesOrInherits(parent, target, static_cast<std::uint8_t>(depth + 1))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	SpellHandRule ResolveSpellHandRule(const RE::SpellItem* spell)
+	{
+		if (!spell) {
+			return SpellHandRule::Any;
+		}
+		if (spell->IsTwoHanded()) {
+			return SpellHandRule::BothOnly;
+		}
+
+		const RE::BGSEquipSlot* spellSlot = spell->GetEquipSlot();
+		if (!spellSlot) {
+			return SpellHandRule::Any;
+		}
+
+		const RE::BGSEquipSlot* leftSlot = Utils::Slot::GetLeftHandSlot();
+		const RE::BGSEquipSlot* rightSlot = Utils::Slot::GetRightHandSlot();
+		const bool mapsLeft = EquipSlotMatchesOrInherits(spellSlot, leftSlot);
+		const bool mapsRight = EquipSlotMatchesOrInherits(spellSlot, rightSlot);
+		const bool requiresAllParents = spellSlot->flags.any(RE::BGSEquipSlot::Flag::kUseAllParents);
+
+		if (mapsLeft && mapsRight) {
+			return requiresAllParents ? SpellHandRule::BothOnly : SpellHandRule::Any;
+		}
+		if (mapsLeft) {
+			return SpellHandRule::LeftOnly;
+		}
+		if (mapsRight) {
+			return SpellHandRule::RightOnly;
+		}
+		return SpellHandRule::Any;
+	}
+
+	Wheeler::TargetHand ResolveDirectCastHandForSpell(
+		const RE::SpellItem* spell,
+		Wheeler::TargetHand requestedHand,
+		const char* sourceTag,
+		int entryIdx,
+		bool a_logDecision = true)
+	{
+		if (!spell) {
+			return requestedHand;
+		}
+
+		const SpellHandRule rule = ResolveSpellHandRule(spell);
+		Wheeler::TargetHand resolvedHand = requestedHand;
+		switch (rule) {
+		case SpellHandRule::LeftOnly:
+			resolvedHand = Wheeler::TargetHand::Left;
+			break;
+		case SpellHandRule::RightOnly:
+			resolvedHand = Wheeler::TargetHand::Right;
+			break;
+		case SpellHandRule::BothOnly:
+			resolvedHand = Wheeler::TargetHand::Both;
+			break;
+		case SpellHandRule::Any:
+		default:
+			break;
+		}
+
+		if (a_logDecision && resolvedHand != requestedHand) {
+			const RE::BGSEquipSlot* slot = spell->GetEquipSlot();
+			logger::info(
+				"SpellHandPolicy[{}]: hand {} -> {} rule={} entry={} spell='{}' formId={:08X} equipSlot={:08X}",
+				sourceTag ? sourceTag : "unknown",
+				GetTargetHandName(requestedHand),
+				GetTargetHandName(resolvedHand),
+				GetSpellHandRuleName(rule),
+				entryIdx,
+				spell->GetName() ? spell->GetName() : "",
+				spell->GetFormID(),
+				slot ? slot->GetFormID() : 0);
+		}
+
+		return resolvedHand;
+	}
+
 	bool IsPowerSpellType(const RE::SpellItem* spell)
 	{
 		return Wheeler::IsPowerSpellType(spell);
@@ -816,6 +3065,8 @@ namespace
 	{
 		return Wheeler::IsInstantEnabledForSpell(spell, isInTransform);
 	}
+
+	bool IsBoundWeaponSpell(RE::SpellItem* spell);
 
 	bool IsBoundWeaponSpell(RE::SpellItem* spell)
 	{
@@ -840,8 +3091,10 @@ namespace
 		if (!(Config::WheelBehavior::InstantSpellDebugLog || Config::WheelBehavior::InstantTransformationsDebugLog)) {
 			return;
 		}
+		const bool lichDirectCastSuppressed =
+			TransformWheelManager::ShouldSuppressLichDirectCast(const_cast<RE::SpellItem*>(spell));
 		logger::info(
-			"InstantGate[{}]: spell='{}' formId={:08X} spellType={} isPower={} isInTransform={} InstantSpell={} InstantPowers={} InstantTransformations={} instantEnabled={}",
+			"InstantGate[{}]: spell='{}' formId={:08X} spellType={} isPower={} isInTransform={} InstantSpell={} InstantPowers={} InstantTransformations={} lichDirectCastSuppressed={} instantEnabled={}",
 			source ? source : "unknown",
 			spell ? spell->GetName() : "null",
 			spell ? spell->GetFormID() : 0,
@@ -851,6 +3104,7 @@ namespace
 			Config::WheelBehavior::InstantSpell,
 			Config::WheelBehavior::InstantPowers,
 			Config::WheelBehavior::InstantTransformations,
+			lichDirectCastSuppressed,
 			instantEnabled);
 	}
 
@@ -870,11 +3124,21 @@ namespace
 		if (!pc || formID == 0) {
 			return false;
 		}
-		const bool leftHand = (hand == Wheeler::TargetHand::Left);
-		if (auto* equipped = pc->GetEquippedObject(leftHand)) {
-			return equipped->GetFormID() == formID;
-		}
-		return false;
+		const bool requireLeft = UsesLeftAttack(hand);
+		const bool requireRight = UsesRightAttack(hand);
+		const bool leftReady = !requireLeft || [&]() {
+			if (auto* equipped = pc->GetEquippedObject(true)) {
+				return equipped->GetFormID() == formID;
+			}
+			return false;
+		}();
+		const bool rightReady = !requireRight || [&]() {
+			if (auto* equipped = pc->GetEquippedObject(false)) {
+				return equipped->GetFormID() == formID;
+			}
+			return false;
+		}();
+		return leftReady && rightReady;
 	}
 
 	bool ResolveShoutPowerBinding(RE::INPUT_DEVICE& outDevice, std::uint32_t& outIdCode)
@@ -899,6 +3163,151 @@ namespace
 		if (gamepadId != 0xFF && gamepadId != 0) {
 			outDevice = RE::INPUT_DEVICE::kGamepad;
 			outIdCode = gamepadId;
+			return true;
+		}
+
+		return false;
+	}
+
+	bool IsValidMappedKeyForDevice(RE::INPUT_DEVICE device, std::uint32_t idCode)
+	{
+		if (idCode == 0xFF) {
+			return false;
+		}
+		if (device == RE::INPUT_DEVICE::kMouse) {
+			// Mouse button 0 (LMB) is a valid control-map binding in Skyrim.
+			return true;
+		}
+		return idCode != 0;
+	}
+
+	bool ResolveUserEventBinding(const RE::BSFixedString& userEvent, RE::INPUT_DEVICE& outDevice, std::uint32_t& outIdCode)
+	{
+		outDevice = RE::INPUT_DEVICE::kKeyboard;
+		outIdCode = 0;
+
+		auto* controlMap = RE::ControlMap::GetSingleton();
+		if (!controlMap || userEvent.empty()) {
+			return false;
+		}
+
+		const bool preferGamepad = Wheeler::IsLastInputGamepad();
+		const std::array<RE::INPUT_DEVICE, 3> preferredOrder = preferGamepad ?
+			std::array<RE::INPUT_DEVICE, 3>{ RE::INPUT_DEVICE::kGamepad, RE::INPUT_DEVICE::kMouse, RE::INPUT_DEVICE::kKeyboard } :
+			std::array<RE::INPUT_DEVICE, 3>{ RE::INPUT_DEVICE::kMouse, RE::INPUT_DEVICE::kKeyboard, RE::INPUT_DEVICE::kGamepad };
+
+		for (const auto device : preferredOrder) {
+			const std::uint32_t mappedId = controlMap->GetMappedKey(userEvent, device);
+			if (IsValidMappedKeyForDevice(device, mappedId)) {
+				outDevice = device;
+				outIdCode = mappedId;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	struct AttackBindingCandidate
+	{
+		bool useLeftAttack = false;
+		RE::INPUT_DEVICE device = RE::INPUT_DEVICE::kKeyboard;
+		std::uint32_t idCode = 0;
+	};
+
+	bool ResolveFallbackAttackBinding(
+		bool currentUseLeftAttack,
+		RE::INPUT_DEVICE currentDevice,
+		std::uint32_t currentIdCode,
+		bool allowOppositeEvent,
+		bool allowCrossDevice,
+		AttackBindingCandidate& outCandidate)
+	{
+		auto* controlMap = RE::ControlMap::GetSingleton();
+		auto* userEvents = RE::UserEvents::GetSingleton();
+		if (!controlMap || !userEvents) {
+			return false;
+		}
+
+		std::array<RE::INPUT_DEVICE, 3> preferredOrder{ currentDevice, RE::INPUT_DEVICE::kKeyboard, RE::INPUT_DEVICE::kMouse };
+		std::size_t orderCount = 1;
+		if (allowCrossDevice) {
+			const bool preferGamepad = Wheeler::IsLastInputGamepad();
+			if (preferGamepad) {
+				const std::array<RE::INPUT_DEVICE, 3> allDevices{
+					RE::INPUT_DEVICE::kGamepad,
+					RE::INPUT_DEVICE::kKeyboard,
+					RE::INPUT_DEVICE::kMouse
+				};
+				for (auto device : allDevices) {
+					if (device == currentDevice) {
+						continue;
+					}
+					if (orderCount < preferredOrder.size()) {
+						preferredOrder[orderCount++] = device;
+					}
+				}
+			} else {
+				const std::array<RE::INPUT_DEVICE, 3> allDevices{
+					RE::INPUT_DEVICE::kKeyboard,
+					RE::INPUT_DEVICE::kMouse,
+					RE::INPUT_DEVICE::kGamepad
+				};
+				for (auto device : allDevices) {
+					if (device == currentDevice) {
+						continue;
+					}
+					if (orderCount < preferredOrder.size()) {
+						preferredOrder[orderCount++] = device;
+					}
+				}
+			}
+		}
+
+		std::array<AttackBindingCandidate, 6> candidates{};
+		std::size_t candidateCount = 0;
+		auto appendCandidates = [&](bool useLeftAttack) {
+			const auto& eventName = useLeftAttack ? userEvents->leftAttack : userEvents->rightAttack;
+			if (eventName.empty()) {
+				return;
+			}
+			for (std::size_t idx = 0; idx < orderCount; ++idx) {
+				const auto device = preferredOrder[idx];
+				const std::uint32_t mappedId = controlMap->GetMappedKey(eventName, device);
+				if (!IsValidMappedKeyForDevice(device, mappedId)) {
+					continue;
+				}
+				bool exists = false;
+				for (std::size_t i = 0; i < candidateCount; ++i) {
+					if (candidates[i].useLeftAttack == useLeftAttack &&
+						candidates[i].device == device &&
+						candidates[i].idCode == mappedId) {
+						exists = true;
+						break;
+					}
+				}
+				if (exists || candidateCount >= candidates.size()) {
+					continue;
+				}
+				candidates[candidateCount++] = AttackBindingCandidate{ useLeftAttack, device, mappedId };
+			}
+		};
+
+		appendCandidates(currentUseLeftAttack);
+		if (allowOppositeEvent) {
+			appendCandidates(!currentUseLeftAttack);
+		}
+
+		for (std::size_t i = 0; i < candidateCount; ++i) {
+			const auto& candidate = candidates[i];
+			const bool sameAsCurrent =
+				candidate.useLeftAttack == currentUseLeftAttack &&
+				candidate.device == currentDevice &&
+				candidate.idCode == currentIdCode;
+			if (sameAsCurrent) {
+				continue;
+			}
+			outCandidate = candidate;
 			return true;
 		}
 
@@ -957,6 +3366,83 @@ namespace
 			expectedPowerFormID, static_cast<int>(device), idCode, shoutEvent.c_str());
 		return true;
 	}
+
+	RE::FormID GetSelectedVoiceFormID(RE::PlayerCharacter* pc)
+	{
+		if (!pc) {
+			return 0;
+		}
+
+		const auto* selectedPower = pc->GetActorRuntimeData().selectedPower;
+		return selectedPower ? selectedPower->GetFormID() : 0;
+	}
+
+	bool TrySetVoiceSelection(RE::PlayerCharacter* pc, RE::FormID targetFormID, const char* sourceLabel)
+	{
+		if (!pc) {
+			logger::warn("{}: failed to set voice selection (no player) target={:08X}",
+				sourceLabel ? sourceLabel : "VoiceSelection",
+				targetFormID);
+			return false;
+		}
+
+		const RE::FormID currentFormID = GetSelectedVoiceFormID(pc);
+		if (currentFormID == targetFormID) {
+			return true;
+		}
+
+		if (targetFormID == 0) {
+			pc->GetActorRuntimeData().selectedPower = nullptr;
+			return GetSelectedVoiceFormID(pc) == 0;
+		}
+
+		RE::ActorEquipManager* aeMan = RE::ActorEquipManager::GetSingleton();
+		if (!aeMan) {
+			logger::warn("{}: failed to set voice selection (no ActorEquipManager) target={:08X}",
+				sourceLabel ? sourceLabel : "VoiceSelection",
+				targetFormID);
+			return false;
+		}
+
+		if (auto* shout = RE::TESForm::LookupByID<RE::TESShout>(targetFormID)) {
+			aeMan->EquipShout(pc, shout);
+			return GetSelectedVoiceFormID(pc) == targetFormID;
+		}
+
+		if (auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(targetFormID);
+			spell && Wheeler::IsPowerSpellType(spell)) {
+			aeMan->EquipSpell(pc, spell, Utils::Slot::GetVoiceSlot());
+			return GetSelectedVoiceFormID(pc) == targetFormID;
+		}
+
+		logger::warn("{}: failed to set voice selection (invalid voice form) target={:08X}",
+			sourceLabel ? sourceLabel : "VoiceSelection",
+			targetFormID);
+		return false;
+	}
+
+	bool TryRestoreVoiceSelection(RE::PlayerCharacter* pc, RE::FormID restoreFormID, RE::FormID expectedCurrentFormID, const char* sourceLabel)
+	{
+		if (!pc) {
+			logger::warn("{}: failed to restore voice selection (no player) restore={:08X} expectedCurrent={:08X}",
+				sourceLabel ? sourceLabel : "VoiceRestore",
+				restoreFormID,
+				expectedCurrentFormID);
+			return false;
+		}
+
+		const RE::FormID currentFormID = GetSelectedVoiceFormID(pc);
+		if (currentFormID != expectedCurrentFormID) {
+			logger::info("{}: skipped voice restore because selection changed current={:08X} expectedCurrent={:08X} restore={:08X}",
+				sourceLabel ? sourceLabel : "VoiceRestore",
+				currentFormID,
+				expectedCurrentFormID,
+				restoreFormID);
+			return false;
+		}
+
+		return TrySetVoiceSelection(pc, restoreFormID, sourceLabel);
+	}
 }
 
 bool Wheeler::IsPowerSpellType(const RE::SpellItem* spell)
@@ -972,6 +3458,9 @@ bool Wheeler::IsPowerSpellType(const RE::SpellItem* spell)
 
 bool Wheeler::IsInstantEnabledForSpell(const RE::SpellItem* spell, bool isInTransform)
 {
+	if (TransformWheelManager::ShouldSuppressLichDirectCast(const_cast<RE::SpellItem*>(spell))) {
+		return false;
+	}
 	if (isInTransform) {
 		return Config::WheelBehavior::InstantTransformations;
 	}
@@ -979,6 +3468,67 @@ bool Wheeler::IsInstantEnabledForSpell(const RE::SpellItem* spell, bool isInTran
 		return Config::WheelBehavior::InstantPowers;
 	}
 	return Config::WheelBehavior::InstantSpell;
+}
+
+bool Wheeler::IsRTUAutoInstantSpellEnabled(const RE::SpellItem* spell, bool isInTransform)
+{
+	if (!Config::WheelBehavior::ReleaseToUse ||
+		!Config::WheelBehavior::RTUSpell ||
+		!Config::WheelBehavior::RTUAutoInstantSpell) {
+		return false;
+	}
+
+	return IsInstantEnabledForSpell(spell, isInTransform);
+}
+
+bool Wheeler::IsRTUAutoInstantShoutEnabled()
+{
+	return Config::WheelBehavior::ReleaseToUse &&
+	       Config::WheelBehavior::RTUShout &&
+	       Config::WheelBehavior::RTUAutoInstantShout &&
+	       Config::WheelBehavior::InstantShout;
+}
+
+bool Wheeler::IsDirectCastPipelineActiveForHandMemory()
+{
+	if (!Config::WheelBehavior::InstantSpellUseDirectCast) {
+		return false;
+	}
+
+	const bool waitingOnPersistentHandItem =
+		_spellPostCastRestoreTrackedLeftOccupantFormID != 0 ||
+		_spellPostCastRestoreTrackedRightOccupantFormID != 0;
+
+	return _pendingSpellActivation.has_value() ||
+	       _spellHoldActive ||
+	       (_spellPostCastRestorePending && !waitingOnPersistentHandItem);
+}
+
+bool Wheeler::TryGetTrackedPersistentRestoreTargetForHandMemory(
+	bool a_isLeftHand,
+	RE::FormID a_currentFormID,
+	RE::FormID& a_outRestoreFormID)
+{
+	a_outRestoreFormID = 0;
+	if (!_spellPostCastRestorePending) {
+		return false;
+	}
+
+	const bool restoreHand = a_isLeftHand ? _spellPostCastRestoreLeftHand : _spellPostCastRestoreRightHand;
+	const RE::FormID trackedOccupantFormID = a_isLeftHand ?
+		_spellPostCastRestoreTrackedLeftOccupantFormID :
+		_spellPostCastRestoreTrackedRightOccupantFormID;
+	if (!restoreHand || trackedOccupantFormID == 0) {
+		return false;
+	}
+	if (a_currentFormID != 0 && trackedOccupantFormID != a_currentFormID) {
+		return false;
+	}
+
+	a_outRestoreFormID = a_isLeftHand ?
+		_spellPostCastRestoreLeftFormID :
+		_spellPostCastRestoreRightFormID;
+	return true;
 }
 
 void Wheeler::PlaySoundByEditorID(const char* a_editorID, float a_volume)
@@ -1165,10 +3715,6 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	if (_editMode) {
 		return false;
 	}
-	if (_activeWheelIdx < 0 || _activeWheelIdx >= _wheels.size()) {
-		return false;
-	}
-
 	// Anti-slip cancel check: block activation if cursor is in deadzone or lockout
 	if (Config::WheelBehavior::RTUAntiSlipEnabled) {
 		const float cursorLen = std::sqrt(_cursorPos.x * _cursorPos.x + _cursorPos.y * _cursorPos.y);
@@ -1189,24 +3735,36 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	}
 
 	// Get hovered item early to check if it's a shout (for delay bypass)
-	std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-	const int hoveredEntryIndex = activeWheel ? activeWheel->GetHoveredEntryIndex() : -1;
-	std::shared_ptr<WheelItem> hoveredItem = activeWheel ? activeWheel->GetHoveredSelectedItem() : nullptr;
-	if (!hoveredItem) {
-		return false;
+	int hoveredEntryIndex = -1;
+	std::shared_ptr<WheelItem> hoveredItem;
+	{
+		std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+		if (!HasValidActiveWheel_NoLock()) {
+			return false;
+		}
+		Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+		hoveredEntryIndex = activeWheel->GetHoveredEntryIndex();
+		hoveredItem = activeWheel->GetHoveredSelectedItem();
+		if (!hoveredItem) {
+			return false;
+		}
+		if (hoveredEntryIndex >= 0) {
+			if (WheelEntry* entry = activeWheel->GetEntry(hoveredEntryIndex); entry && entry->IsMissingInInventory()) {
+				return false;
+			}
+		}
 	}
 	std::shared_ptr<WheelItemSpell> spellItem = std::dynamic_pointer_cast<WheelItemSpell>(hoveredItem);
 	std::shared_ptr<WheelItemShout> shoutItem = std::dynamic_pointer_cast<WheelItemShout>(hoveredItem);
-	if (hoveredEntryIndex >= 0 && activeWheel) {
-		if (WheelEntry* entry = activeWheel->GetEntry(hoveredEntryIndex); entry && entry->IsMissingInInventory()) {
-			return false;
-		}
+	RE::SpellItem* guardedSpell = spellItem ? spellItem->GetSpell() : nullptr;
+	const bool isInTransform = !TransformWheelManager::IsPlayerHuman();
+	if (guardedSpell && IsSpellBlockedByTransformGuard(guardedSpell, "RTU")) {
+		return false;
 	}
 
 	// Check if this is a shout that should bypass the global RTU delay
 	const bool isShoutWithBypass = shoutItem && 
-		Config::WheelBehavior::InstantShout && 
-		Config::WheelBehavior::RTUShout && 
+		IsRTUAutoInstantShoutEnabled() &&
 		Config::WheelBehavior::ShoutIgnoreRTUDelay;
 
 	// Apply hover delay check (bypass for shouts with ShoutIgnoreRTUDelay)
@@ -1218,7 +3776,9 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	}
 
 	// Item type checks
-	if (std::dynamic_pointer_cast<WheelItemAlchemy>(hoveredItem) && !Config::WheelBehavior::RTUAlchemy) {
+	if ((std::dynamic_pointer_cast<WheelItemAlchemy>(hoveredItem) ||
+		 std::dynamic_pointer_cast<WheelItemIngredient>(hoveredItem)) &&
+		!Config::WheelBehavior::RTUAlchemy) {
 		return false;
 	}
 	if (shoutItem && !Config::WheelBehavior::RTUShout) {
@@ -1238,11 +3798,11 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	// Compute per-category instantEnabled through centralized gate helper.
 	if (spellItem && Config::WheelBehavior::RTUSpell) {
 		RE::SpellItem* spell = spellItem->GetSpell();
-		const bool isInTransform = !TransformWheelManager::IsPlayerHuman();
 		const bool instantEnabled = IsInstantEnabledForSpell(spell, isInTransform);
+		const bool rtuAutoInstantSpellEnabled = IsRTUAutoInstantSpellEnabled(spell, isInTransform);
 		LogInstantGateDecision("RTU", spell, isInTransform, instantEnabled);
 
-		if (instantEnabled) {
+		if (rtuAutoInstantSpellEnabled) {
 			const float thresholdSec = Config::WheelBehavior::InstantSpellHoldThresholdMs / 1000.0f;
 			const bool reachedThreshold = _hoveredEntryTime >= thresholdSec;
 			const bool isConcentration = IsConcentrationSpellType(spell);
@@ -1270,18 +3830,31 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 					LOG_INFO(Activation_InstantSpell, "RTU InstantSpell: NOT casting (threshold not met, cancelled, suppressed, or concentration disallowed), fallback to equip");
 				}
 			}
+		} else if (instantEnabled &&
+			(Config::WheelBehavior::InstantSpellDebugLog || Config::WheelBehavior::InstantTransformationsDebugLog)) {
+			LOG_INFO(Activation_InstantSpell,
+				"RTU InstantSpell: auto cast disabled for RTU close, fallback to equip/manual hold");
 		}
 	}
 
 	if (resolvedAction != ReleaseAction::CastSpell &&
-		shoutItem && Config::WheelBehavior::InstantShout && Config::WheelBehavior::RTUShout) {
+		shoutItem && IsRTUAutoInstantShoutEnabled()) {
 		resolvedAction = ReleaseAction::CastShout;
 	}
 
 	logger::info("ReleaseResolve[RTU]: action={} entry={} formId={:08X}",
 		GetReleaseActionName(resolvedAction), hoveredEntryIndex, formId);
 
-	const TargetHand resolvedHand = ResolveTargetHandRTU(hoveredEntryIndex, hoveredItem, resolvedAction);
+	TargetHand resolvedHand = ResolveTargetHandRTU(hoveredEntryIndex, hoveredItem, resolvedAction);
+	if (resolvedAction == ReleaseAction::CastSpell &&
+		spellItem &&
+		Config::WheelBehavior::InstantSpellUseDirectCast) {
+		resolvedHand = ResolveDirectCastHandForSpell(
+			spellItem->GetSpell(),
+			resolvedHand,
+			"RTU",
+			hoveredEntryIndex);
+	}
 	logger::info("ReleaseResolve[RTU]: hand={} entry={} formId={:08X}",
 		GetTargetHandName(resolvedHand), hoveredEntryIndex, formId);
 
@@ -1295,6 +3868,25 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 				_rtuConsumedByInstant = true;
 			} else {
 				logger::info("ReleaseResolve[RTU]: power queue failed, fallback to equip entry={} formId={:08X}",
+					hoveredEntryIndex, formId);
+				resolvedAction = ReleaseAction::Equip;
+			}
+		} else if (!spell) {
+			logger::info("ReleaseResolve[RTU]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
+				hoveredEntryIndex, formId);
+			resolvedAction = ReleaseAction::Equip;
+		} else if (Config::WheelBehavior::InstantSpellUseDirectCast) {
+			const float concentrationHoldSeconds =
+				spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ?
+				Config::WheelBehavior::InstantSpellConcentrationMaxSeconds :
+				0.0f;
+			activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+			if (activated) {
+				LOG_INFO(Activation_InstantSpell, "RTU: DirectCast queued entry={} hand={} holdSec={:.2f}",
+					hoveredEntryIndex, GetTargetHandName(resolvedHand), concentrationHoldSeconds);
+				_rtuConsumedByInstant = true;
+			} else {
+				logger::info("ReleaseResolve[RTU]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
 					hoveredEntryIndex, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
@@ -1314,7 +3906,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	}
 
 	if (!activated && resolvedAction == ReleaseAction::CastShout &&
-		shoutItem && Config::WheelBehavior::InstantShout && Config::WheelBehavior::RTUShout) {
+		shoutItem && IsRTUAutoInstantShoutEnabled()) {
 		activated = shoutItem->CastImmediate(_hoveredEntryTime);
 		if (activated) {
 			LOG_INFO(Activation_InstantShout, "RTU: InstantShout cast immediate with hoverTime={:.2f}s", _hoveredEntryTime);
@@ -1325,7 +3917,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 		}
 	}
 
-	if (!activated && activeWheel) {
+	if (!activated) {
 		// Use centralized hand resolution (decoupled from RTU)
 		const bool useLeft = (resolvedHand == TargetHand::Left);
 
@@ -1347,10 +3939,28 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 			GetTargetHandName(resolvedHand),
 			formId);
 
-		if (useLeft) {
-			activeWheel->ActivateHoveredEntrySecondary(false);
-		} else {
-			activeWheel->ActivateHoveredEntryPrimary(false);
+		if (!hoveredItem || (hoveredItem->RequiresRuntimeFormValidation() && formId == 0)) {
+			logger::info(
+				"WheelDispatch: skipped weapon activation entry={} hand={} formId={:08X} reason=invalid_form",
+				hoveredEntryIndex,
+				GetTargetHandName(resolvedHand),
+				formId);
+			return false;
+		}
+		{
+			std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+			if (!HasValidActiveWheel_NoLock()) {
+				return false;
+			}
+			Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+			if (activeWheel->GetHoveredEntryIndex() != hoveredEntryIndex) {
+				return false;
+			}
+			if (useLeft) {
+				activeWheel->ActivateHoveredEntrySecondary(false);
+			} else {
+				activeWheel->ActivateHoveredEntryPrimary(false);
+			}
 		}
 		activated = true;
 		// Record what was applied (prevents snap-back on close)
@@ -1367,7 +3977,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	}
 	if (activated) {
 		if (ShouldNotifyHandMemory(hoveredItem, resolvedAction)) {
-			HandMemory::NotifyWheelEquipOrCast();
+			HandMemory::NotifyWheelEquipOrCast(hoveredItem, resolvedAction);
 		}
 		_activateOnCloseFired = true;
 		// Suppress generic activate sound for shouts when stage sounds are active
@@ -1511,16 +4121,84 @@ void Wheeler::QueueSGTInstrumentSpell(RE::FormID a_spellFormID)
 		a_spellFormID, static_cast<int>(_state));
 }
 
-void Wheeler::QueueShoutActivation(RE::FormID a_shoutFormID, float a_hoverTime)
+void Wheeler::QueueShoutPostCastRestore(RE::FormID a_shoutFormID)
+{
+	ClearShoutPostCastRestore();
+
+	RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
+	const RE::FormID selectedVoiceFormID = GetSelectedVoiceFormID(pc);
+	if (!pc || selectedVoiceFormID == a_shoutFormID) {
+		return;
+	}
+
+	_shoutPostCastRestorePending = true;
+	_shoutPostCastRestoreFormID = selectedVoiceFormID;
+	_shoutPostCastRestoreExpectedFormID = a_shoutFormID;
+	logger::info("Shout: queued voice restore previous={:08X} requested={:08X}",
+		selectedVoiceFormID,
+		a_shoutFormID);
+}
+
+void Wheeler::TryRestoreQueuedShoutSelection(const char* a_reason)
+{
+	if (!_shoutPostCastRestorePending) {
+		_shoutPostCastRestoreDelayActive = false;
+		_shoutPostCastRestoreDelayElapsedSec = 0.0f;
+		return;
+	}
+
+	RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
+	const RE::FormID restoreFormID = _shoutPostCastRestoreFormID;
+	const RE::FormID expectedFormID = _shoutPostCastRestoreExpectedFormID;
+	const bool restored = TryRestoreVoiceSelection(pc, restoreFormID, expectedFormID, "ShoutRestore");
+	logger::info("Shout: restore attempted reason={} restored={} previous={:08X} requested={:08X}",
+		a_reason ? a_reason : "",
+		restored ? 1 : 0,
+		restoreFormID,
+		expectedFormID);
+	ClearShoutPostCastRestore();
+}
+
+void Wheeler::ArmDelayedShoutPostCastRestore(const char* a_reason)
+{
+	if (!_shoutPostCastRestorePending) {
+		return;
+	}
+
+	_shoutPostCastRestoreDelayActive = true;
+	_shoutPostCastRestoreDelayElapsedSec = 0.0f;
+	logger::info("Shout: delayed voice restore armed reason={} delaySec={:.2f} previous={:08X} requested={:08X}",
+		a_reason ? a_reason : "",
+		kShoutVoiceSelectionRestoreDelaySec,
+		_shoutPostCastRestoreFormID,
+		_shoutPostCastRestoreExpectedFormID);
+}
+
+void Wheeler::ClearShoutPostCastRestore()
+{
+	_shoutPostCastRestorePending = false;
+	_shoutPostCastRestoreFormID = 0;
+	_shoutPostCastRestoreExpectedFormID = 0;
+	_shoutPostCastRestoreDelayActive = false;
+	_shoutPostCastRestoreDelayElapsedSec = 0.0f;
+}
+
+bool Wheeler::QueueShoutActivation(RE::FormID a_shoutFormID, float a_hoverTime)
 {
 	if (a_shoutFormID == 0) {
-		return;
+		return false;
+	}
+	if (auto* shout = RE::TESForm::LookupByID<RE::TESShout>(a_shoutFormID);
+		IsShoutBlockedByTransformGuard(shout, "QueueShout")) {
+		return false;
 	}
 	if (_pendingShoutFormID.has_value()) {
 		LOG_WARN(Activation_InstantShout, "Shout: activation request skipped (already pending): pending={:08X}, new={:08X}", 
 			*_pendingShoutFormID, a_shoutFormID);
-		return;
+		return false;
 	}
+
+	QueueShoutPostCastRestore(a_shoutFormID);
 	_pendingShoutFormID = a_shoutFormID;
 	_pendingShoutHoverTime = a_hoverTime;
 
@@ -1531,11 +4209,195 @@ void Wheeler::QueueShoutActivation(RE::FormID a_shoutFormID, float a_hoverTime)
 		a_shoutFormID, a_hoverTime, static_cast<int>(_state));
 	LOG_INFO(Activation_InstantShout, "Shout: queued activation after wheel closes (formID={:08X}, hoverTime={:.2f}s, state={})", 
 		a_shoutFormID, a_hoverTime, static_cast<int>(_state));
+	return true;
+}
+
+bool Wheeler::QueueSpellActivation(RE::FormID a_spellFormID, TargetHand a_hand, float a_concentrationHoldSeconds)
+{
+	constexpr std::uint8_t kSpellReadyRetryFrameBudget = 240;
+	constexpr std::uint8_t kInitialDispatchSettleFrameBudget = 8;
+	auto updatePreCastFlags = [](PendingSpellActivation& entry) {
+		entry.preCastHadTwoHandedWeapon = false;
+		if (!entry.preCastHandsCaptured) {
+			return;
+		}
+		entry.preCastHadTwoHandedWeapon =
+			IsTwoHandedFormID(entry.preCastLeftFormID) ||
+			IsTwoHandedFormID(entry.preCastRightFormID);
+	};
+
+	if (a_spellFormID == 0) {
+		return false;
+	}
+	if (auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(a_spellFormID);
+		IsSpellBlockedByTransformGuard(spell, "QueueSpell")) {
+		return false;
+	}
+	if (auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(a_spellFormID);
+		TransformWheelManager::ShouldSuppressLichDirectCast(spell, "QueueSpell")) {
+		return false;
+	}
+	auto* carryPc = RE::PlayerCharacter::GetSingleton();
+	const bool canInspectCarryHands = carryPc && carryPc->Is3DLoaded();
+	auto getCurrentCarryFormID = [&](bool isLeft) -> RE::FormID {
+		if (!canInspectCarryHands) {
+			return 0;
+		}
+		if (auto* currentForm = carryPc->GetEquippedObject(isLeft)) {
+			return currentForm->GetFormID();
+		}
+		return 0;
+	};
+	const RE::FormID currentCarryLeftFormID = getCurrentCarryFormID(true);
+	const RE::FormID currentCarryRightFormID = getCurrentCarryFormID(false);
+	auto shouldCarryPendingRestoreHand = [&](bool isLeft) {
+		if (!_spellPostCastRestorePending) {
+			return false;
+		}
+		const bool restoreHand = isLeft ? _spellPostCastRestoreLeftHand : _spellPostCastRestoreRightHand;
+		if (!restoreHand) {
+			return false;
+		}
+		const RE::FormID trackedOccupantFormID = isLeft ?
+			_spellPostCastRestoreTrackedLeftOccupantFormID :
+			_spellPostCastRestoreTrackedRightOccupantFormID;
+		if (trackedOccupantFormID == 0) {
+			return true;
+		}
+		if (!canInspectCarryHands) {
+			return false;
+		}
+		const RE::FormID currentFormID = isLeft ? currentCarryLeftFormID : currentCarryRightFormID;
+		return currentFormID == trackedOccupantFormID || currentFormID == 0;
+	};
+	const bool carriedRestoreLeft = shouldCarryPendingRestoreHand(true);
+	const bool carriedRestoreRight = shouldCarryPendingRestoreHand(false);
+	const RE::FormID carriedRestoreLeftFormID = carriedRestoreLeft ? _spellPostCastRestoreLeftFormID : 0;
+	const RE::FormID carriedRestoreRightFormID = carriedRestoreRight ? _spellPostCastRestoreRightFormID : 0;
+	if (_spellPostCastRestorePending) {
+		if (!carriedRestoreLeft && !carriedRestoreRight) {
+			logger::info("[SpellPipe] discard pending post-cast restore for new cast request formID={:08X} trackedLeft={:08X} trackedRight={:08X}",
+				a_spellFormID,
+				_spellPostCastRestoreTrackedLeftOccupantFormID,
+				_spellPostCastRestoreTrackedRightOccupantFormID);
+		} else {
+			logger::info("[SpellPipe] carry pending post-cast restore into new cast request formID={:08X} left={:08X} right={:08X} trackedLeft={:08X} trackedRight={:08X}",
+				a_spellFormID,
+				carriedRestoreLeftFormID,
+				carriedRestoreRightFormID,
+				_spellPostCastRestoreTrackedLeftOccupantFormID,
+				_spellPostCastRestoreTrackedRightOccupantFormID);
+		}
+		ClearPostCastRestore();
+	}
+	if (_pendingSpellActivation.has_value()) {
+		auto& pending = *_pendingSpellActivation;
+		if (pending.formID == a_spellFormID) {
+			pending.concentrationHoldSeconds = (std::max)(pending.concentrationHoldSeconds, (std::max)(0.0f, a_concentrationHoldSeconds));
+			if (!pending.preCastHandsCaptured) {
+				if (auto* pc = RE::PlayerCharacter::GetSingleton(); pc && pc->Is3DLoaded()) {
+					pending.preCastHandsCaptured = true;
+					if (auto* leftForm = pc->GetEquippedObject(true)) {
+						pending.preCastLeftFormID = leftForm->GetFormID();
+					}
+					if (auto* rightForm = pc->GetEquippedObject(false)) {
+						pending.preCastRightFormID = rightForm->GetFormID();
+					}
+					updatePreCastFlags(pending);
+				}
+			}
+			if (carriedRestoreLeft || carriedRestoreRight) {
+				if (carriedRestoreLeft) {
+					pending.restoreOverrideLeftHand = true;
+					pending.restoreOverrideLeftFormID = NormalizeRestorableHandFormID(carryPc, carriedRestoreLeftFormID);
+				}
+				if (carriedRestoreRight) {
+					pending.restoreOverrideRightHand = true;
+					pending.restoreOverrideRightFormID = NormalizeRestorableHandFormID(carryPc, carriedRestoreRightFormID);
+				}
+				logger::info("[SpellPipe] pending cast seeded from carried restore override formID={:08X} left={:08X} right={:08X}",
+					a_spellFormID,
+					pending.restoreOverrideLeftHand ? pending.restoreOverrideLeftFormID : 0,
+					pending.restoreOverrideRightHand ? pending.restoreOverrideRightFormID : 0);
+			}
+			updatePreCastFlags(pending);
+
+			if (pending.hand != TargetHand::Both && a_hand != TargetHand::Both && pending.hand != a_hand) {
+				pending.hand = TargetHand::Both;
+				pending.requiredEquipBeforeCast = true;
+				pending.postEquipWarmupFramesRemaining = 0;
+				pending.readyRetryFramesRemaining = (std::max)(pending.readyRetryFramesRemaining, kSpellReadyRetryFrameBudget);
+				logger::info("[SpellPipe] activation request merged to BOTH formID={:08X} requestedExisting={} requestedNew={} holdSec={:.2f}",
+					a_spellFormID,
+					GetTargetHandName(pending.requestedHand),
+					GetTargetHandName(a_hand),
+					pending.concentrationHoldSeconds);
+			} else {
+				logger::info("[SpellPipe] activation request coalesced formID={:08X} pendingHand={} requestedExisting={} requestedNew={} holdSec={:.2f}",
+					a_spellFormID,
+					GetTargetHandName(pending.hand),
+					GetTargetHandName(pending.requestedHand),
+					GetTargetHandName(a_hand),
+					pending.concentrationHoldSeconds);
+			}
+			return true;
+		}
+
+		logger::warn("[SpellPipe] activation request skipped (already pending): pending={:08X}, new={:08X}",
+			_pendingSpellActivation->formID, a_spellFormID);
+		return false;
+	}
+
+	PendingSpellActivation pending{};
+	pending.formID = a_spellFormID;
+	pending.hand = a_hand;
+	pending.requestedHand = a_hand;
+	pending.concentrationHoldSeconds = (std::max)(0.0f, a_concentrationHoldSeconds);
+	pending.readyRetryFramesRemaining = kSpellReadyRetryFrameBudget;
+	// Use full settle by default for direct-cast reliability (close->equip->attack ordering).
+	pending.postEquipWarmupFramesRemaining = kInitialDispatchSettleFrameBudget;
+	if (auto* pc = RE::PlayerCharacter::GetSingleton(); pc && pc->Is3DLoaded()) {
+		pending.preCastHandsCaptured = true;
+		if (auto* leftForm = pc->GetEquippedObject(true)) {
+			pending.preCastLeftFormID = leftForm->GetFormID();
+		}
+		if (auto* rightForm = pc->GetEquippedObject(false)) {
+			pending.preCastRightFormID = rightForm->GetFormID();
+		}
+		updatePreCastFlags(pending);
+	}
+	if (carriedRestoreLeft || carriedRestoreRight) {
+		if (carriedRestoreLeft) {
+			pending.restoreOverrideLeftHand = true;
+			pending.restoreOverrideLeftFormID = NormalizeRestorableHandFormID(carryPc, carriedRestoreLeftFormID);
+		}
+		if (carriedRestoreRight) {
+			pending.restoreOverrideRightHand = true;
+			pending.restoreOverrideRightFormID = NormalizeRestorableHandFormID(carryPc, carriedRestoreRightFormID);
+		}
+		logger::info("[SpellPipe] new cast seeded from carried restore override formID={:08X} left={:08X} right={:08X}",
+			a_spellFormID,
+			pending.restoreOverrideLeftHand ? pending.restoreOverrideLeftFormID : 0,
+			pending.restoreOverrideRightHand ? pending.restoreOverrideRightFormID : 0);
+	}
+	updatePreCastFlags(pending);
+	_pendingSpellActivation = pending;
+
+	// Ensure the wheel closes before we invoke the vanilla attack pipeline.
+	_activateOnCloseFired = true;
+	_forceCloseRequested = true;
+	logger::info("[SpellPipe] QueueSpellActivation formID={:08X} hand={} requested={} holdSec={:.2f} preCast2H={} state={}",
+		a_spellFormID, GetTargetHandName(a_hand), GetTargetHandName(pending.requestedHand), pending.concentrationHoldSeconds, pending.preCastHadTwoHandedWeapon ? 1 : 0, static_cast<int>(_state));
+	return true;
 }
 
 bool Wheeler::QueuePowerActivation(RE::FormID a_powerFormID)
 {
 	if (a_powerFormID == 0) {
+		return false;
+	}
+	if (auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(a_powerFormID);
+		IsSpellBlockedByTransformGuard(spell, "QueuePower")) {
 		return false;
 	}
 	if (_pendingPowerFormID.has_value()) {
@@ -1544,7 +4406,16 @@ bool Wheeler::QueuePowerActivation(RE::FormID a_powerFormID)
 		return false;
 	}
 
+	RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
+	const RE::FormID selectedVoiceFormID = GetSelectedVoiceFormID(pc);
 	_pendingPowerFormID = a_powerFormID;
+	_pendingPowerRestorePending = pc && selectedVoiceFormID != a_powerFormID;
+	_pendingPowerRestoreFormID = _pendingPowerRestorePending ? selectedVoiceFormID : 0;
+	if (_pendingPowerRestorePending) {
+		logger::info("[PowerPipe] queued voice restore previous={:08X} requested={:08X}",
+			_pendingPowerRestoreFormID,
+			a_powerFormID);
+	}
 
 	// Ensure the wheel closes before we invoke the vanilla shout/power pipeline.
 	_activateOnCloseFired = true;
@@ -1552,6 +4423,230 @@ bool Wheeler::QueuePowerActivation(RE::FormID a_powerFormID)
 	logger::info("[PowerPipe] QueuePowerActivation formID={:08X} state={}",
 		a_powerFormID, static_cast<int>(_state));
 	return true;
+}
+
+bool Wheeler::QueueExternalHotkeyDispatch(
+	std::uint32_t a_scanCode,
+	std::uint32_t a_modifier,
+	std::string_view a_displayName,
+	std::uint32_t a_sourceSlotIndex,
+	std::string_view a_sourceTag)
+{
+	if (a_scanCode == 0) {
+		logger::warn("ActionHotkeysBridge: dispatch blocked reason=InvalidScanCode slot={} tag={}", a_sourceSlotIndex, a_sourceTag);
+		return false;
+	}
+	if (_editMode) {
+		logger::info("ActionHotkeysBridge: dispatch blocked reason=EditMode slot={} tag={}", a_sourceSlotIndex, a_sourceTag);
+		return false;
+	}
+	if (Controls::IsRebindActive()) {
+		logger::info("ActionHotkeysBridge: dispatch blocked reason=RebindCapture slot={} tag={}", a_sourceSlotIndex, a_sourceTag);
+		return false;
+	}
+	if (_pendingExternalHotkeyDispatch.has_value()) {
+		const auto& pending = *_pendingExternalHotkeyDispatch;
+		logger::info(
+			"ActionHotkeysBridge: dispatch blocked reason=AlreadyPending pendingScan=0x{:X} pendingMod=0x{:X} newScan=0x{:X} newMod=0x{:X}",
+			pending.scanCode,
+			pending.modifier,
+			a_scanCode,
+			a_modifier);
+		return false;
+	}
+
+	PendingExternalHotkeyDispatch pending{};
+	pending.scanCode = a_scanCode;
+	pending.modifier = a_modifier;
+	pending.displayName = std::string(a_displayName);
+	pending.sourceSlotIndex = a_sourceSlotIndex;
+	pending.sourceTag = std::string(a_sourceTag);
+	pending.queuedAt = ImGui::GetTime();
+	_pendingExternalHotkeyDispatch = std::move(pending);
+
+	_activateOnCloseFired = true;
+	_forceCloseRequested = true;
+	if (Config::ActionHotkeysBridge::DebugLog) {
+		logger::info(
+			"ActionHotkeysBridge: dispatch queued slot={} tag={} hotkey='{}'",
+			a_sourceSlotIndex,
+			a_sourceTag,
+			BuildExternalHotkeyLabel(a_scanCode, a_modifier));
+	}
+	return true;
+}
+
+void Wheeler::ArmSpellHoldRelease(
+	RE::INPUT_DEVICE a_device,
+	std::uint32_t a_idCode,
+	bool a_useLeftAttack,
+	float a_holdDuration,
+	bool a_waitForCasterStart,
+	RE::FormID a_spellFormID,
+	RE::MagicSystem::CastingSource a_castingSource,
+	bool a_chargeAwareRelease,
+	float a_chargeAwareMaxTotalSeconds,
+	bool a_releaseSecondAttack,
+	bool a_secondUseLeftAttack,
+	RE::INPUT_DEVICE a_secondDevice,
+	std::uint32_t a_secondIdCode,
+	bool a_restoreLeftHand,
+	RE::FormID a_restoreLeftFormID,
+	bool a_restoreRightHand,
+	RE::FormID a_restoreRightFormID,
+	bool a_enableStartAssistTap,
+	bool a_startAssistUseLeftAttack,
+	RE::INPUT_DEVICE a_startAssistDevice,
+	std::uint32_t a_startAssistIdCode,
+	bool a_releaseSecondOnCasterStart,
+	bool a_requirePrimaryCasterStart)
+{
+	const double now = ImGui::GetTime();
+	_spellHoldActive = true;
+	_spellHoldStartTime = now;
+	_spellHoldWaitStartTime = now;
+	_spellHoldDuration = (std::max)(0.0f, a_holdDuration);
+	_spellHoldUseLeftAttack = a_useLeftAttack;
+	_spellHoldWaitForCasterStart = a_waitForCasterStart && a_spellFormID != 0;
+	_spellHoldSpellFormID = a_spellFormID;
+	_spellHoldCastingSource = a_castingSource;
+	_spellHoldChargeAwareRelease = a_chargeAwareRelease && a_spellFormID != 0;
+	_spellHoldChargeAwareMaxTotalSeconds = (std::max)(0.0f, a_chargeAwareMaxTotalSeconds);
+	_spellHoldChargeAwareLastLogTime = 0.0;
+	_spellHoldAlsoReleaseSecondAttack = a_releaseSecondAttack;
+	_spellHoldSecondUseLeftAttack = a_secondUseLeftAttack;
+	_spellHoldPrimaryCastingSource = a_useLeftAttack ?
+		RE::MagicSystem::CastingSource::kLeftHand :
+		RE::MagicSystem::CastingSource::kRightHand;
+	_spellHoldStartRetryCount = 0;
+	_spellHoldLastRetryPulseTime = now;
+	_spellHoldObservedCasterStart = false;
+	_spellHoldObservedChargeActivity = false;
+	_spellHoldUsedFallbackStart = false;
+	_spellHoldReleaseSecondOnCasterStart = a_releaseSecondOnCasterStart;
+	_spellHoldRequirePrimaryCasterStart = a_requirePrimaryCasterStart;
+	_spellHoldStartAssistTapEnabled = a_enableStartAssistTap;
+	_spellHoldStartAssistTapUseLeftAttack = a_startAssistUseLeftAttack;
+	_spellHoldStartAssistTapDevice = a_startAssistDevice;
+	_spellHoldStartAssistTapIdCode = a_startAssistIdCode;
+	_spellHoldStartAssistTapSent = false;
+	// Allow restore-to-empty (formID=0) for direct-cast temporary equips.
+	_spellHoldRestoreLeftHand = a_restoreLeftHand;
+	_spellHoldRestoreRightHand = a_restoreRightHand;
+	_spellHoldRestoreLeftFormID = _spellHoldRestoreLeftHand ? a_restoreLeftFormID : 0;
+	_spellHoldRestoreRightFormID = _spellHoldRestoreRightHand ? a_restoreRightFormID : 0;
+	_spellHoldRestoreHandsAfterRelease = _spellHoldRestoreLeftHand || _spellHoldRestoreRightHand;
+	_spellBindDeviceSecond = a_secondDevice;
+	_spellBindIdCodeSecond = a_secondIdCode;
+	_spellBindDevice = a_device;
+	_spellBindIdCode = a_idCode;
+}
+
+void Wheeler::ClearSpellHoldRelease()
+{
+	_spellHoldActive = false;
+	_spellHoldStartTime = 0.0;
+	_spellHoldWaitStartTime = 0.0;
+	_spellHoldDuration = 0.0f;
+	_spellHoldUseLeftAttack = false;
+	_spellHoldWaitForCasterStart = false;
+	_spellHoldSpellFormID = 0;
+	_spellHoldCastingSource = RE::MagicSystem::CastingSource::kRightHand;
+	_spellHoldChargeAwareRelease = false;
+	_spellHoldChargeAwareMaxTotalSeconds = 0.0f;
+	_spellHoldChargeAwareLastLogTime = 0.0;
+	_spellHoldAlsoReleaseSecondAttack = false;
+	_spellHoldSecondUseLeftAttack = false;
+	_spellHoldStartRetryCount = 0;
+	_spellHoldLastRetryPulseTime = 0.0;
+	_spellHoldObservedCasterStart = false;
+	_spellHoldObservedChargeActivity = false;
+	_spellHoldUsedFallbackStart = false;
+	_spellHoldReleaseSecondOnCasterStart = false;
+	_spellHoldRequirePrimaryCasterStart = false;
+	_spellHoldPrimaryCastingSource = RE::MagicSystem::CastingSource::kRightHand;
+	_spellHoldStartAssistTapEnabled = false;
+	_spellHoldStartAssistTapUseLeftAttack = false;
+	_spellHoldStartAssistTapDevice = RE::INPUT_DEVICE::kKeyboard;
+	_spellHoldStartAssistTapIdCode = 0;
+	_spellHoldStartAssistTapSent = false;
+	_spellHoldRestoreHandsAfterRelease = false;
+	_spellHoldRestoreLeftHand = false;
+	_spellHoldRestoreRightHand = false;
+	_spellHoldRestoreLeftFormID = 0;
+	_spellHoldRestoreRightFormID = 0;
+	_spellBindDeviceSecond = RE::INPUT_DEVICE::kKeyboard;
+	_spellBindIdCodeSecond = 0;
+	_spellBindDevice = RE::INPUT_DEVICE::kKeyboard;
+	_spellBindIdCode = 0;
+}
+
+void Wheeler::QueuePostCastRestore(
+	RE::FormID a_spellFormID,
+	RE::MagicSystem::CastingSource a_preferredSource,
+	bool a_trackPrimaryLeft,
+	bool a_trackSecondary,
+	bool a_trackSecondaryLeft,
+	bool a_restoreLeftHand,
+	RE::FormID a_restoreLeftFormID,
+	bool a_restoreRightHand,
+	RE::FormID a_restoreRightFormID,
+	float a_minDelaySeconds,
+	float a_maxWaitSeconds)
+{
+	// Keep explicit restore intent even when target form is 0 (means restore empty hand).
+	const bool restoreLeft = a_restoreLeftHand;
+	const bool restoreRight = a_restoreRightHand;
+	if (!restoreLeft && !restoreRight) {
+		return;
+	}
+
+	const double now = ImGui::GetTime();
+	const double minDelay = (std::max)(0.0f, static_cast<float>(a_minDelaySeconds));
+	const double maxWait = (std::max)(0.30f, static_cast<float>(a_maxWaitSeconds));
+
+	_spellPostCastRestorePending = true;
+	_spellPostCastRestoreLeftHand = restoreLeft;
+	_spellPostCastRestoreRightHand = restoreRight;
+	_spellPostCastRestoreLeftFormID = restoreLeft ? a_restoreLeftFormID : 0;
+	_spellPostCastRestoreRightFormID = restoreRight ? a_restoreRightFormID : 0;
+	_spellPostCastRestoreSpellFormID = a_spellFormID;
+	_spellPostCastRestorePreferredSource = a_preferredSource;
+	_spellPostCastRestoreTrackPrimaryLeft = a_trackPrimaryLeft;
+	_spellPostCastRestoreTrackSecondary = a_trackSecondary;
+	_spellPostCastRestoreTrackSecondaryLeft = a_trackSecondaryLeft;
+	_spellPostCastRestoreNoEarlierThan = now + minDelay;
+	_spellPostCastRestoreForceAt = _spellPostCastRestoreNoEarlierThan + maxWait;
+	_spellPostCastRestoreLastWaitLogTime = 0.0;
+	_spellPostCastRestoreTrackedLeftOccupantFormID = 0;
+	_spellPostCastRestoreTrackedRightOccupantFormID = 0;
+
+	logger::info("[SpellPipe] post-cast restore queued left={:08X} right={:08X} minDelay={:.2f}s maxWait={:.2f}s spell={:08X} source={}",
+		_spellPostCastRestoreLeftHand ? _spellPostCastRestoreLeftFormID : 0,
+		_spellPostCastRestoreRightHand ? _spellPostCastRestoreRightFormID : 0,
+		minDelay,
+		maxWait,
+		_spellPostCastRestoreSpellFormID,
+		GetCastingSourceName(_spellPostCastRestorePreferredSource));
+}
+
+void Wheeler::ClearPostCastRestore()
+{
+	_spellPostCastRestorePending = false;
+	_spellPostCastRestoreLeftHand = false;
+	_spellPostCastRestoreRightHand = false;
+	_spellPostCastRestoreLeftFormID = 0;
+	_spellPostCastRestoreRightFormID = 0;
+	_spellPostCastRestoreSpellFormID = 0;
+	_spellPostCastRestorePreferredSource = RE::MagicSystem::CastingSource::kRightHand;
+	_spellPostCastRestoreTrackPrimaryLeft = false;
+	_spellPostCastRestoreTrackSecondary = false;
+	_spellPostCastRestoreTrackSecondaryLeft = false;
+	_spellPostCastRestoreNoEarlierThan = 0.0;
+	_spellPostCastRestoreForceAt = 0.0;
+	_spellPostCastRestoreLastWaitLogTime = 0.0;
+	_spellPostCastRestoreTrackedLeftOccupantFormID = 0;
+	_spellPostCastRestoreTrackedRightOccupantFormID = 0;
 }
 
 void Wheeler::QueueDepletedConsumablesCleanup()
@@ -1573,19 +4668,19 @@ void Wheeler::QueueBookRead(RE::FormID a_bookFormID)
 		return;
 	}
 	_pendingBookReadFormID = a_bookFormID;
-	
+
 	// Ensure the wheel closes without re-triggering RTU activation
 	_activateOnCloseFired = true;
 	_forceCloseRequested = true;
-	
+
 	if (MainWheelDebug::IsEnabled()) {
 		MainWheelDebug::LogRateLimited(MainWheelDebug::Category::Input, "BookRead_Queue",
-			"BookRead: queued open after wheel closes (formID={:08X}, state={})", 
+			"BookRead: queued open after wheel closes (formID={:08X}, state={})",
 			a_bookFormID, static_cast<int>(_state));
 	}
 }
 
-void Wheeler::QueueConcentrationSpellStop(RE::FormID a_spellFormID, 
+void Wheeler::QueueConcentrationSpellStop(RE::FormID a_spellFormID,
 	RE::MagicSystem::CastingSource a_castingSource, float a_maxSeconds)
 {
 	if (a_spellFormID == 0 || a_maxSeconds <= 0.0f) {
@@ -1609,7 +4704,7 @@ void Wheeler::QueueInstantCastRefundCheck(RE::FormID a_spellFormID, float a_magi
 	if (a_spellFormID == 0) {
 		return;
 	}
-	
+
 	InstantCastRefundCheck check;
 	check.spellFormID = a_spellFormID;
 	check.magickaBefore = a_magickaBefore;
@@ -1617,23 +4712,251 @@ void Wheeler::QueueInstantCastRefundCheck(RE::FormID a_spellFormID, float a_magi
 	check.queuedTime = ImGui::GetTime();
 	check.attemptsRemaining = 3;
 	check.delayMs = 150.0f;
-	
+
 	_instantCastRefundCheck = check;
-	
+
 	if (Config::WheelBehavior::InstantSpellDebugLog) {
 		logger::info("InstantCast: queued summon refund check (spellFormID={:08X}, magickaBefore={:.1f}, effectsBefore={})",
 			a_spellFormID, a_magickaBefore, a_effectCountBefore);
 	}
 }
 
+void Wheeler::ProcessQueuedExternalHotkeys()
+{
+	if (!_pendingExternalHotkeyDispatch.has_value()) {
+		return;
+	}
+
+	const auto pending = *_pendingExternalHotkeyDispatch;
+	auto* ui = RE::UI::GetSingleton();
+	if (!ui) {
+		return;
+	}
+	if (ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
+		if (Config::ActionHotkeysBridge::DebugLog) {
+			logger::info("ActionHotkeysBridge: dispatch delayed reason=LoadingMenu slot={} tag={}", pending.sourceSlotIndex, pending.sourceTag);
+		}
+		return;
+	}
+	if (_editMode) {
+		logger::info("ActionHotkeysBridge: dispatch blocked reason=EditModeAfterClose slot={} tag={}", pending.sourceSlotIndex, pending.sourceTag);
+		_pendingExternalHotkeyDispatch.reset();
+		return;
+	}
+	if (Controls::IsRebindActive()) {
+		logger::info("ActionHotkeysBridge: dispatch blocked reason=RebindCaptureAfterClose slot={} tag={}", pending.sourceSlotIndex, pending.sourceTag);
+		_pendingExternalHotkeyDispatch.reset();
+		return;
+	}
+	if (Config::ActionHotkeysBridge::BlockConflictingWheelerHotkeys &&
+		IsMkbToggleChordConflict(pending.scanCode, pending.modifier)) {
+		logger::warn(
+			"ActionHotkeysBridge: dispatch blocked reason=ToggleConflict slot={} tag={} hotkey='{}'",
+			pending.sourceSlotIndex,
+			pending.sourceTag,
+			BuildExternalHotkeyLabel(pending.scanCode, pending.modifier));
+		_pendingExternalHotkeyDispatch.reset();
+		return;
+	}
+
+	const double now = ImGui::GetTime();
+	const double cooldownSeconds =
+		static_cast<double>(Config::ActionHotkeysBridge::DispatchCooldownMs) / 1000.0;
+	if (_lastExternalHotkeyDispatchScanCode == pending.scanCode &&
+		_lastExternalHotkeyDispatchModifier == pending.modifier &&
+		(now - _lastExternalHotkeyDispatchTime) < cooldownSeconds) {
+		logger::info(
+			"ActionHotkeysBridge: dispatch blocked reason=Cooldown slot={} tag={} hotkey='{}'",
+			pending.sourceSlotIndex,
+			pending.sourceTag,
+			BuildExternalHotkeyLabel(pending.scanCode, pending.modifier));
+		_pendingExternalHotkeyDispatch.reset();
+		return;
+	}
+
+	const auto baselineMenus = CaptureOpenMenuNames(ui);
+	if (!DispatchExternalHotkeyNow(pending.scanCode, pending.modifier)) {
+		logger::warn(
+			"ActionHotkeysBridge: dispatch failed slot={} tag={} hotkey='{}'",
+			pending.sourceSlotIndex,
+			pending.sourceTag,
+			BuildExternalHotkeyLabel(pending.scanCode, pending.modifier));
+		_pendingExternalHotkeyDispatch.reset();
+		return;
+	}
+
+	_lastExternalHotkeyDispatchTime = now;
+	_lastExternalHotkeyDispatchScanCode = pending.scanCode;
+	_lastExternalHotkeyDispatchModifier = pending.modifier;
+	_actionHotkeysBridgeCloseAssist.active = Config::ActionHotkeysBridge::CloseAssistEnabled;
+	_actionHotkeysBridgeCloseAssist.awaitingEscOutcome = false;
+	_actionHotkeysBridgeCloseAssist.escPhysicalWasDown = IsPhysicalEscDown();
+	_actionHotkeysBridgeCloseAssist.scanCode = pending.scanCode;
+	_actionHotkeysBridgeCloseAssist.modifier = pending.modifier;
+	_actionHotkeysBridgeCloseAssist.armedAt = now;
+	_actionHotkeysBridgeCloseAssist.expiresAt =
+		now + static_cast<double>(Config::ActionHotkeysBridge::CloseAssistTimeoutMs) / 1000.0;
+	_actionHotkeysBridgeCloseAssist.evaluateAt = 0.0;
+	_actionHotkeysBridgeCloseAssist.baselineMenus = baselineMenus;
+	_actionHotkeysBridgeCloseAssist.trackedMenusAtEsc.clear();
+	if (Config::ActionHotkeysBridge::DebugLog) {
+		logger::info(
+			"ActionHotkeysBridge: dispatch executed slot={} tag={} hotkey='{}'",
+			pending.sourceSlotIndex,
+			pending.sourceTag,
+			BuildExternalHotkeyLabel(pending.scanCode, pending.modifier));
+	}
+	_pendingExternalHotkeyDispatch.reset();
+}
+
+bool Wheeler::BeginActionHotkeysBridgeCloseAssist(bool a_triggeredByGamepad)
+{
+	auto& state = _actionHotkeysBridgeCloseAssist;
+	if (state.awaitingEscOutcome) {
+		return true;
+	}
+
+	const double now = ImGui::GetTime();
+	auto* ui = RE::UI::GetSingleton();
+	state.trackedMenusAtEsc = CaptureNewMenuNamesSinceBaseline(ui, state.baselineMenus);
+	if (!DispatchExternalHotkeyNow(0x01, 0)) {
+		logger::warn("ActionHotkeysBridge: close assist failed to dispatch ESC fallback");
+		ResetActionHotkeysBridgeCloseAssist();
+		return false;
+	}
+
+	state.awaitingEscOutcome = true;
+	state.evaluateAt = now + 0.35;
+	if (Config::ActionHotkeysBridge::DebugLog) {
+		logger::info(
+			"ActionHotkeysBridge: close assist armed trigger={} trackedMenus={}",
+			a_triggeredByGamepad ? "GamepadB" : "Esc",
+			state.trackedMenusAtEsc.size());
+	}
+	return true;
+}
+
+bool Wheeler::TryTriggerActionHotkeysBridgeCloseAssist(std::uint32_t a_input, bool a_isGamePad)
+{
+	if (!Config::ActionHotkeysBridge::CloseAssistEnabled || _state != WheelState::KClosed) {
+		return false;
+	}
+
+	auto& state = _actionHotkeysBridgeCloseAssist;
+	if (!state.active) {
+		return false;
+	}
+
+	const double now = ImGui::GetTime();
+	if (now > state.expiresAt) {
+		ResetActionHotkeysBridgeCloseAssist();
+		return false;
+	}
+
+	const bool escTrigger =
+		!a_isGamePad &&
+		Config::ActionHotkeysBridge::CloseAssistUseEsc &&
+		a_input == 0x01;
+	const bool gamepadBTrigger =
+		a_isGamePad &&
+		Config::ActionHotkeysBridge::CloseAssistUseGamepadB &&
+		a_input == 277;
+	if (!escTrigger && !gamepadBTrigger) {
+		return false;
+	}
+
+	return BeginActionHotkeysBridgeCloseAssist(gamepadBTrigger);
+}
+
+void Wheeler::UpdateActionHotkeysBridgeCloseAssist()
+{
+	auto& state = _actionHotkeysBridgeCloseAssist;
+	if (!state.active) {
+		return;
+	}
+
+	const double now = ImGui::GetTime();
+	if (now > state.expiresAt) {
+		if (Config::ActionHotkeysBridge::DebugLog) {
+			logger::info("ActionHotkeysBridge: close assist expired");
+		}
+		ResetActionHotkeysBridgeCloseAssist();
+		return;
+	}
+
+	if (Config::ActionHotkeysBridge::CloseAssistUseEsc && !state.awaitingEscOutcome) {
+		const bool escDown = IsPhysicalEscDown();
+		if (escDown && !state.escPhysicalWasDown) {
+			BeginActionHotkeysBridgeCloseAssist(false);
+		}
+		state.escPhysicalWasDown = escDown;
+	}
+
+	if (!state.awaitingEscOutcome || now < state.evaluateAt) {
+		return;
+	}
+
+	auto* ui = RE::UI::GetSingleton();
+	if (ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
+		return;
+	}
+
+	if (AnyTrackedMenuClosed(ui, state.trackedMenusAtEsc)) {
+		if (Config::ActionHotkeysBridge::DebugLog) {
+			logger::info("ActionHotkeysBridge: close assist resolved with ESC");
+		}
+		ResetActionHotkeysBridgeCloseAssist();
+		return;
+	}
+
+	if (!DispatchExternalHotkeyNow(state.scanCode, state.modifier)) {
+		logger::warn(
+			"ActionHotkeysBridge: close assist fallback toggle failed hotkey='{}'",
+			BuildExternalHotkeyLabel(state.scanCode, state.modifier));
+		ResetActionHotkeysBridgeCloseAssist();
+		return;
+	}
+
+	if (Config::ActionHotkeysBridge::DebugLog) {
+		logger::info(
+			"ActionHotkeysBridge: close assist fallback toggle dispatched hotkey='{}' trackedMenus={}",
+			BuildExternalHotkeyLabel(state.scanCode, state.modifier),
+			state.trackedMenusAtEsc.size());
+	}
+	ResetActionHotkeysBridgeCloseAssist();
+}
+
+void Wheeler::ResetActionHotkeysBridgeCloseAssist()
+{
+	_actionHotkeysBridgeCloseAssist = {};
+}
+
 void Wheeler::ProcessPendingActions()
 {
+	WheelItemWeapon::ProcessIWSCompatTransfer();
+
+	UpdateActionHotkeysBridgeCloseAssist();
+
+	const bool hasPendingPostCloseWork =
+		_pendingExternalHotkeyDispatch.has_value() ||
+		_pendingSpellActivation.has_value() ||
+		_spellHoldActive ||
+		_pendingPowerFormID.has_value() ||
+		_pendingShoutFormID.has_value() ||
+		_pendingPoisonApplyFormID.has_value() ||
+		_pendingMiscItemUse.has_value() ||
+		_pendingSGTInstrumentSpellFormID.has_value() ||
+		_pendingBookReadFormID.has_value() ||
+		_pendingDepletedConsumablesCleanup;
+	if (hasPendingPostCloseWork) {
+		_forceCloseRequested = true;
+	}
+
 	// If any activation asked to force-close the wheel, do it once we're in an opened state.
 	if (_forceCloseRequested) {
 		if (_state == WheelState::KOpened) {
-			_forceCloseRequested = false;
 			TryCloseWheeler();
-		} else if (_state == WheelState::KClosed) {
+		} else if (_state == WheelState::KClosed && !hasPendingPostCloseWork) {
 			_forceCloseRequested = false;
 		}
 	}
@@ -1727,6 +5050,31 @@ void Wheeler::ProcessPendingActions()
 	}
 
 	const bool wheelClosedAndPopupClear = (_state == WheelState::KClosed) && !ImGui::IsPopupOpen(_wheelWindowID);
+	if (wheelClosedAndPopupClear) {
+		ProcessQueuedExternalHotkeys();
+	}
+	if (wheelClosedAndPopupClear && _lootMenuRestorePending) {
+		auto* ui = RE::UI::GetSingleton();
+		auto* queue = RE::UIMessageQueue::GetSingleton();
+		if (ui) {
+			for (std::size_t i = 0; i < kLootOverrideMenus.size(); ++i) {
+				const std::string_view menuName = kLootOverrideMenus[i];
+				if (_lootMenusMovieHiddenForOverride[i]) {
+					const bool shown = SetMenuMovieVisibility(ui, menuName, true);
+					logger::info("MainWheel[OpenClose]: Restoring {} visibility after Wheeler close (ok={})",
+						menuName,
+						shown ? 1 : 0);
+				}
+				if (_lootMenusClosedForOverride[i] && queue && !ui->IsMenuOpen(menuName)) {
+					logger::info("MainWheel[OpenClose]: Restoring {} after Wheeler close", menuName);
+					queue->AddMessage(menuName, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+				}
+			}
+			_lootMenusMovieHiddenForOverride.fill(false);
+			_lootMenusClosedForOverride.fill(false);
+			_lootMenuRestorePending = false;
+		}
+	}
 
 	// Retry unlock compute while VM callback is pending instead of collapsing to equip-only.
 	if (s_shoutWaitUnlockActive && !_shoutHoldActive && wheelClosedAndPopupClear) {
@@ -1759,12 +5107,16 @@ void Wheeler::ProcessPendingActions()
 				computeState, unlockState.previousCount, unlockState.usedLastStable ? "true" : "false", failReason,
 				unlockState.learnedCountContig, unlockState.soulUnlockedCountContig, unlockState.spellOwnedCountContig, unlockState.engineCount);
 
+			int pendingUsableCount = unlockedWords;
+			if (pendingUsableCount <= 0 && unlockState.previousCount > 0) {
+				pendingUsableCount = unlockState.previousCount;
+			}
 			const bool pendingWithUsableCount =
 				(unlockState.computeState == ShoutUtils::UnlockComputeState::Pending) &&
-				(unlockedWords > 0);
+				(pendingUsableCount > 0);
 
 			if (unlockState.computeState != ShoutUtils::UnlockComputeState::Pending || pendingWithUsableCount) {
-				s_shoutForcedUnlockedWords = unlockedWords;
+				s_shoutForcedUnlockedWords = pendingUsableCount;
 				s_shoutForcedFromFallback = false;
 				_pendingShoutFormID = shoutFormID;
 				_pendingShoutHoverTime = hoverTime;
@@ -1774,7 +5126,7 @@ void Wheeler::ProcessPendingActions()
 				s_shoutWaitElapsedSec = 0.0f;
 				if (pendingWithUsableCount) {
 					SHOUTPIPE("WaitUnlockPendingStable formID={:08X} unlocked={} method={} reason={}",
-						shoutFormID, unlockedWords, detectionMethod, failReason);
+						shoutFormID, pendingUsableCount, detectionMethod, failReason);
 				}
 				setShoutPipeState(ShoutPipeState::Queued, shoutFormID,
 					pendingWithUsableCount ? "WaitUnlockPendingStable" : "WaitUnlockResolved");
@@ -1826,6 +5178,7 @@ void Wheeler::ProcessPendingActions()
 					logger::info("Shout: voice recovery time after = {} seconds", cooldownAfter);
 					SHOUTPIPE("VoiceRecoveryTime formID={:08X} seconds={:.3f}", _shoutHoldFormID, cooldownAfter);
 				}
+				ArmDelayedShoutPostCastRestore("AfterKeyUp");
 			}
 
 			_shoutHoldActive = false;
@@ -1833,6 +5186,774 @@ void Wheeler::ProcessPendingActions()
 			s_shoutHoldElapsedSec = 0.0f;
 			logger::info("Shout: hold sequence completed");
 			setShoutPipeState(ShoutPipeState::Idle, 0, "HoldCompleted");
+		}
+	}
+
+	if (_shoutPostCastRestoreDelayActive &&
+		_shoutPostCastRestorePending &&
+		!_pendingShoutFormID.has_value() &&
+		!s_shoutWaitUnlockActive &&
+		!_shoutHoldActive) {
+		_shoutPostCastRestoreDelayElapsedSec += shoutDt;
+		if (_shoutPostCastRestoreDelayElapsedSec >= kShoutVoiceSelectionRestoreDelaySec) {
+			TryRestoreQueuedShoutSelection("DelayedAfterKeyUp");
+		}
+	}
+
+	// Process direct spell hold timer (concentration direct-cast): send delayed attack UP.
+	if (_spellHoldActive) {
+		const double now = ImGui::GetTime();
+		double spellHoldCasterStartWaitMaxSec = std::clamp(
+			(std::max)(
+				_spellHoldChargeAwareRelease ? static_cast<double>(_spellHoldChargeAwareMaxTotalSeconds) : 0.0,
+				(std::max)(2.20, static_cast<double>(_spellHoldDuration) + 1.90)),
+			2.20,
+			4.50);
+		if (_spellHoldChargeAwareRelease) {
+			// Mod-added ritual/extended startup spells often advertise little or no chargeTime.
+			// Give charge-aware direct-cast more room before we abandon observed caster start.
+			spellHoldCasterStartWaitMaxSec = std::clamp(
+				(std::max)(
+					(std::max)(6.00, static_cast<double>(_spellHoldDuration) + 2.40),
+					static_cast<double>(_spellHoldChargeAwareMaxTotalSeconds)),
+				3.00,
+				9.50);
+		}
+		constexpr double kSpellHoldRetryPulseIntervalSec = 0.22;
+		const auto spellHoldStartRetryMaxCount = static_cast<std::uint8_t>(std::clamp(
+			static_cast<int>(std::floor(spellHoldCasterStartWaitMaxSec / kSpellHoldRetryPulseIntervalSec)) - 1,
+			4,
+			14));
+
+		if (_spellHoldWaitForCasterStart) {
+			bool casterStartedCharge = false;
+			SpellCasterSnapshot matchedSnapshot{};
+			std::array<SpellCasterSnapshot, 4> casterSnapshots{};
+			auto* pc = RE::PlayerCharacter::GetSingleton();
+			const bool hasMatchedCaster = CaptureSpellCasterSnapshots(
+				pc,
+				_spellHoldSpellFormID,
+				_spellHoldCastingSource,
+				matchedSnapshot,
+				&casterSnapshots);
+			if (hasMatchedCaster) {
+				const bool timerActive = matchedSnapshot.castingTimer > 0.01f;
+				casterStartedCharge = IsChargeLikeCasterState(matchedSnapshot.state) || timerActive;
+				if (casterStartedCharge) {
+					_spellHoldCastingSource = matchedSnapshot.source;
+				}
+			}
+			if (!casterStartedCharge) {
+				SpellCasterSnapshot sourceSnapshot{};
+				if (TryGetActiveSnapshotForHeldSources(
+					casterSnapshots,
+					_spellHoldUseLeftAttack,
+					_spellHoldAlsoReleaseSecondAttack,
+					_spellHoldSecondUseLeftAttack,
+					sourceSnapshot)) {
+					casterStartedCharge = true;
+					matchedSnapshot = sourceSnapshot;
+					_spellHoldCastingSource = sourceSnapshot.source;
+				}
+			}
+			if (_spellHoldRequirePrimaryCasterStart) {
+				const auto* primarySnapshot = FindSnapshotBySource(casterSnapshots, _spellHoldPrimaryCastingSource);
+				const bool primaryStartedCharge =
+					primarySnapshot &&
+					primarySnapshot->hasCaster &&
+					primarySnapshot->currentSpellFormID == _spellHoldSpellFormID &&
+					(IsChargeLikeCasterState(primarySnapshot->state) || primarySnapshot->castingTimer > 0.01f);
+
+				if (primaryStartedCharge) {
+					matchedSnapshot = *primarySnapshot;
+					casterStartedCharge = true;
+					_spellHoldCastingSource = _spellHoldPrimaryCastingSource;
+				} else if (casterStartedCharge) {
+					// Startup assist can spuriously start on the opposite hand. Drop assist and
+					// continue waiting until the requested hand owns caster start.
+					if (_spellHoldAlsoReleaseSecondAttack) {
+						auto* controls = RE::PlayerControls::GetSingleton();
+						auto* userEvents = RE::UserEvents::GetSingleton();
+						if (controls && controls->attackBlockHandler && userEvents) {
+							const auto& secondEvent = _spellHoldSecondUseLeftAttack ? userEvents->leftAttack : userEvents->rightAttack;
+							if (!secondEvent.empty()) {
+								auto* secondUp = RE::ButtonEvent::Create(
+									_spellBindDeviceSecond,
+									secondEvent,
+									_spellBindIdCodeSecond,
+									0.0f,
+									0.03f);
+								if (secondUp) {
+									controls->attackBlockHandler->ProcessButton(secondUp, &controls->data);
+									RE::free(secondUp);
+								}
+								logger::warn("[SpellPipe] startup assist dropped while waiting primary source requested={} observed={}",
+									GetCastingSourceName(_spellHoldPrimaryCastingSource),
+									GetCastingSourceName(matchedSnapshot.source));
+							}
+						}
+						_spellHoldAlsoReleaseSecondAttack = false;
+					}
+					casterStartedCharge = false;
+					_spellHoldCastingSource = _spellHoldPrimaryCastingSource;
+				}
+			}
+
+			if (casterStartedCharge) {
+				if (_spellHoldReleaseSecondOnCasterStart && _spellHoldAlsoReleaseSecondAttack) {
+					auto* controls = RE::PlayerControls::GetSingleton();
+					auto* userEvents = RE::UserEvents::GetSingleton();
+					if (controls && controls->attackBlockHandler && userEvents) {
+						const auto& secondEvent = _spellHoldSecondUseLeftAttack ? userEvents->leftAttack : userEvents->rightAttack;
+						if (!secondEvent.empty()) {
+							auto* secondUp = RE::ButtonEvent::Create(
+								_spellBindDeviceSecond,
+								secondEvent,
+								_spellBindIdCodeSecond,
+								0.0f,
+								0.04f);
+							if (secondUp) {
+								controls->attackBlockHandler->ProcessButton(secondUp, &controls->data);
+								RE::free(secondUp);
+							}
+							logger::info("[SpellPipe] startup assist released on caster start left={} device={} idCode={}",
+								_spellHoldSecondUseLeftAttack ? 1 : 0,
+								GetInputDeviceName(_spellBindDeviceSecond),
+								_spellBindIdCodeSecond);
+						}
+					}
+					_spellHoldAlsoReleaseSecondAttack = false;
+				}
+				if (_spellHoldStartAssistTapSent && _spellHoldAlsoReleaseSecondAttack) {
+					auto* controls = RE::PlayerControls::GetSingleton();
+					auto* userEvents = RE::UserEvents::GetSingleton();
+					if (controls && controls->attackBlockHandler && userEvents) {
+						const auto& assistEvent = _spellHoldSecondUseLeftAttack ? userEvents->leftAttack : userEvents->rightAttack;
+						if (!assistEvent.empty()) {
+							auto* assistUp = RE::ButtonEvent::Create(
+								_spellBindDeviceSecond,
+								assistEvent,
+								_spellBindIdCodeSecond,
+								0.0f,
+								0.03f);
+							if (assistUp) {
+								controls->attackBlockHandler->ProcessButton(assistUp, &controls->data);
+								RE::free(assistUp);
+							}
+							logger::info("[SpellPipe] hold start assist released on caster start left={} device={} idCode={}",
+								_spellHoldSecondUseLeftAttack ? 1 : 0,
+								GetInputDeviceName(_spellBindDeviceSecond),
+								_spellBindIdCodeSecond);
+						}
+					}
+					// Prevent extra second UP at final release since assist was already released.
+					_spellHoldAlsoReleaseSecondAttack = false;
+				}
+				_spellHoldObservedCasterStart = true;
+				_spellHoldStartTime = now;
+				_spellHoldWaitForCasterStart = false;
+				logger::info("[SpellPipe] hold timer started on caster state spell={:08X} source={} state={} timer={:.3f} holdSec={:.2f}",
+					_spellHoldSpellFormID,
+					GetCastingSourceName(_spellHoldCastingSource),
+					GetMagicCasterStateName(matchedSnapshot.state),
+					matchedSnapshot.castingTimer,
+					_spellHoldDuration);
+			} else {
+				const double waitedSec = now - _spellHoldWaitStartTime;
+				bool retriedStartPulse = false;
+				const double nextPulseAt =
+					static_cast<double>(_spellHoldStartRetryCount + 1) * kSpellHoldRetryPulseIntervalSec;
+				if (_spellHoldStartRetryCount < spellHoldStartRetryMaxCount &&
+					waitedSec >= nextPulseAt &&
+					now - _spellHoldLastRetryPulseTime >= (kSpellHoldRetryPulseIntervalSec * 0.80)) {
+					if (auto* retryPc = RE::PlayerCharacter::GetSingleton(); retryPc) {
+						// Reassert draw state while retrying synthetic cast start pulses.
+						retryPc->DrawWeaponMagicHands(true);
+					}
+					auto* controls = RE::PlayerControls::GetSingleton();
+					auto* userEvents = RE::UserEvents::GetSingleton();
+					if (controls && controls->attackBlockHandler && userEvents) {
+						auto sendAttackPulse = [&](bool useLeftAttack, RE::INPUT_DEVICE bindDevice, std::uint32_t bindIdCode, const char* tag, bool releaseAfterPulse) {
+							const auto& attackEvent = useLeftAttack ? userEvents->leftAttack : userEvents->rightAttack;
+							if (attackEvent.empty()) {
+								return false;
+							}
+
+							auto* upEvent = RE::ButtonEvent::Create(bindDevice, attackEvent, bindIdCode, 0.0f, 0.0f);
+							if (upEvent) {
+								controls->attackBlockHandler->ProcessButton(upEvent, &controls->data);
+								RE::free(upEvent);
+							}
+
+							auto* downEvent = RE::ButtonEvent::Create(bindDevice, attackEvent, bindIdCode, 1.0f, 0.0f);
+							if (!downEvent) {
+								logger::warn("[SpellPipe] hold start retry down alloc failed{}", tag ? tag : "");
+								return false;
+							}
+							controls->attackBlockHandler->ProcessButton(downEvent, &controls->data);
+							RE::free(downEvent);
+							if (releaseAfterPulse) {
+								auto* tapUpEvent = RE::ButtonEvent::Create(bindDevice, attackEvent, bindIdCode, 0.0f, 0.03f);
+								if (tapUpEvent) {
+									controls->attackBlockHandler->ProcessButton(tapUpEvent, &controls->data);
+									RE::free(tapUpEvent);
+								}
+							}
+							logger::info("[SpellPipe] hold start retry sent attack pulse{} (left={} device={} idCode={})",
+								tag ? tag : "",
+								useLeftAttack ? 1 : 0,
+								GetInputDeviceName(bindDevice),
+								bindIdCode);
+							return true;
+						};
+
+						bool retryUseLeftAttack = _spellHoldUseLeftAttack;
+						RE::INPUT_DEVICE retryDevice = _spellBindDevice;
+						std::uint32_t retryIdCode = _spellBindIdCode;
+						AttackBindingCandidate primaryFallback{};
+						const bool hasPrimaryFallback =
+							ResolveFallbackAttackBinding(
+								_spellHoldUseLeftAttack,
+								_spellBindDevice,
+								_spellBindIdCode,
+								false,
+								false,
+								primaryFallback);
+						if (hasPrimaryFallback) {
+							retryUseLeftAttack = primaryFallback.useLeftAttack;
+							retryDevice = primaryFallback.device;
+							retryIdCode = primaryFallback.idCode;
+						}
+
+						bool pulseOk = sendAttackPulse(retryUseLeftAttack, retryDevice, retryIdCode, "", false);
+						if (pulseOk) {
+							if (hasPrimaryFallback) {
+								logger::warn("[SpellPipe] hold start retry switched primary binding event={} device={} idCode={} (prevEvent={} prevDevice={} prevIdCode={})",
+									retryUseLeftAttack ? "leftAttack" : "rightAttack",
+									GetInputDeviceName(retryDevice),
+									retryIdCode,
+									_spellHoldUseLeftAttack ? "leftAttack" : "rightAttack",
+									GetInputDeviceName(_spellBindDevice),
+									_spellBindIdCode);
+							}
+							_spellHoldUseLeftAttack = retryUseLeftAttack;
+							_spellBindDevice = retryDevice;
+							_spellBindIdCode = retryIdCode;
+							_spellHoldCastingSource = _spellHoldUseLeftAttack ?
+								RE::MagicSystem::CastingSource::kLeftHand :
+								RE::MagicSystem::CastingSource::kRightHand;
+						}
+
+						if (pulseOk && _spellHoldAlsoReleaseSecondAttack && !_spellHoldReleaseSecondOnCasterStart) {
+							bool retryUseLeftAttackSecond = _spellHoldSecondUseLeftAttack;
+							RE::INPUT_DEVICE retryDeviceSecond = _spellBindDeviceSecond;
+							std::uint32_t retryIdCodeSecond = _spellBindIdCodeSecond;
+							AttackBindingCandidate secondFallback{};
+							const bool hasSecondFallback =
+								ResolveFallbackAttackBinding(
+									_spellHoldSecondUseLeftAttack,
+									_spellBindDeviceSecond,
+									_spellBindIdCodeSecond,
+									false,
+									false,
+									secondFallback);
+							if (hasSecondFallback) {
+								retryUseLeftAttackSecond = secondFallback.useLeftAttack;
+								retryDeviceSecond = secondFallback.device;
+								retryIdCodeSecond = secondFallback.idCode;
+							}
+
+							pulseOk = sendAttackPulse(retryUseLeftAttackSecond, retryDeviceSecond, retryIdCodeSecond, " (second)", false);
+							if (pulseOk) {
+								if (hasSecondFallback) {
+									logger::warn("[SpellPipe] hold start retry switched secondary binding event={} device={} idCode={} (prevEvent={} prevDevice={} prevIdCode={})",
+										retryUseLeftAttackSecond ? "leftAttack" : "rightAttack",
+										GetInputDeviceName(retryDeviceSecond),
+										retryIdCodeSecond,
+										_spellHoldSecondUseLeftAttack ? "leftAttack" : "rightAttack",
+										GetInputDeviceName(_spellBindDeviceSecond),
+										_spellBindIdCodeSecond);
+								}
+								_spellHoldSecondUseLeftAttack = retryUseLeftAttackSecond;
+								_spellBindDeviceSecond = retryDeviceSecond;
+								_spellBindIdCodeSecond = retryIdCodeSecond;
+							}
+						}
+						if (pulseOk &&
+							_spellHoldStartAssistTapEnabled &&
+							!_spellHoldStartAssistTapSent &&
+							waitedSec >= (kSpellHoldRetryPulseIntervalSec * 2.0)) {
+							const bool assistPulseOk = sendAttackPulse(
+								_spellHoldStartAssistTapUseLeftAttack,
+								_spellHoldStartAssistTapDevice,
+								_spellHoldStartAssistTapIdCode,
+								" (assist)",
+								false);
+							if (assistPulseOk) {
+								// Keep assist input held until caster start is observed.
+								_spellHoldAlsoReleaseSecondAttack = true;
+								_spellHoldSecondUseLeftAttack = _spellHoldStartAssistTapUseLeftAttack;
+								_spellBindDeviceSecond = _spellHoldStartAssistTapDevice;
+								_spellBindIdCodeSecond = _spellHoldStartAssistTapIdCode;
+							}
+							_spellHoldStartAssistTapSent = assistPulseOk;
+							logger::warn("[SpellPipe] hold start assist hold sent={} left={} device={} idCode={} waited={:.2f}s",
+								assistPulseOk ? 1 : 0,
+								_spellHoldStartAssistTapUseLeftAttack ? 1 : 0,
+								GetInputDeviceName(_spellHoldStartAssistTapDevice),
+								_spellHoldStartAssistTapIdCode,
+								waitedSec);
+						}
+
+						if (pulseOk) {
+							_spellHoldStartRetryCount = static_cast<std::uint8_t>(_spellHoldStartRetryCount + 1);
+							_spellHoldLastRetryPulseTime = now;
+							logger::warn("[SpellPipe] hold start wait timeout spell={:08X} waited={:.2f}s preferredSource={}, retrying attack pulse ({}/{})",
+								_spellHoldSpellFormID,
+								waitedSec,
+								GetCastingSourceName(_spellHoldCastingSource),
+								_spellHoldStartRetryCount,
+								spellHoldStartRetryMaxCount);
+							retriedStartPulse = true;
+						}
+					}
+				}
+
+				if (!retriedStartPulse && waitedSec >= spellHoldCasterStartWaitMaxSec) {
+					// If caster start cannot be observed after retry budget, restart countdown from timeout boundary.
+					_spellHoldWaitForCasterStart = false;
+					_spellHoldStartTime = now;
+					_spellHoldUsedFallbackStart = true;
+					logger::warn("[SpellPipe] hold start wait timeout spell={:08X} waited={:.2f}s preferredSource={}, using fallback timer",
+						_spellHoldSpellFormID, waitedSec, GetCastingSourceName(_spellHoldCastingSource));
+					for (const auto& snapshot : casterSnapshots) {
+						if (!snapshot.hasCaster) {
+							logger::warn("[SpellPipe] hold start timeout snapshot source={} hasCaster=0",
+								GetCastingSourceName(snapshot.source));
+							continue;
+						}
+						logger::warn("[SpellPipe] hold start timeout snapshot source={} currentSpell={:08X} state={} timer={:.3f}",
+							GetCastingSourceName(snapshot.source),
+							snapshot.currentSpellFormID,
+							GetMagicCasterStateName(snapshot.state),
+							snapshot.castingTimer);
+					}
+				}
+			}
+		}
+
+		if (_spellHoldChargeAwareRelease &&
+			_spellHoldSpellFormID != 0 &&
+			!_spellHoldWaitForCasterStart &&
+			now - _spellHoldStartTime >= static_cast<double>(_spellHoldDuration)) {
+			bool keepHoldingForCharge = false;
+			RE::MagicSystem::CastingSource observedSource = _spellHoldCastingSource;
+			RE::MagicCaster::State observedState = RE::MagicCaster::State::kNone;
+			float observedCastingTimer = 0.0f;
+			RE::FormID observedCurrentSpellFormID = 0;
+
+			SpellCasterSnapshot matchedSnapshot{};
+			std::array<SpellCasterSnapshot, 4> casterSnapshots{};
+			auto* pc = RE::PlayerCharacter::GetSingleton();
+			const bool hasMatchedCaster = CaptureSpellCasterSnapshots(
+				pc,
+				_spellHoldSpellFormID,
+				_spellHoldCastingSource,
+				matchedSnapshot,
+				&casterSnapshots);
+			if (hasMatchedCaster) {
+				_spellHoldCastingSource = matchedSnapshot.source;
+				observedSource = matchedSnapshot.source;
+				observedState = matchedSnapshot.state;
+				observedCastingTimer = matchedSnapshot.castingTimer;
+				observedCurrentSpellFormID = matchedSnapshot.currentSpellFormID;
+				const bool timerActive = observedCastingTimer > 0.01f;
+				keepHoldingForCharge = IsChargeLikeCasterState(observedState) || timerActive;
+			}
+			if (!keepHoldingForCharge) {
+				SpellCasterSnapshot sourceSnapshot{};
+				if (TryGetActiveSnapshotForHeldSources(
+					casterSnapshots,
+					_spellHoldUseLeftAttack,
+					_spellHoldAlsoReleaseSecondAttack,
+					_spellHoldSecondUseLeftAttack,
+					sourceSnapshot)) {
+					_spellHoldCastingSource = sourceSnapshot.source;
+					observedSource = sourceSnapshot.source;
+					observedState = sourceSnapshot.state;
+					observedCastingTimer = sourceSnapshot.castingTimer;
+					observedCurrentSpellFormID = sourceSnapshot.currentSpellFormID;
+					keepHoldingForCharge = true;
+				} else {
+					const auto* preferredSnapshot = FindSnapshotBySource(casterSnapshots, _spellHoldCastingSource);
+					if (preferredSnapshot && preferredSnapshot->hasCaster) {
+						observedSource = preferredSnapshot->source;
+						observedState = preferredSnapshot->state;
+						observedCastingTimer = preferredSnapshot->castingTimer;
+						observedCurrentSpellFormID = preferredSnapshot->currentSpellFormID;
+					}
+				}
+			}
+
+			const double heldTotal = now - _spellHoldWaitStartTime;
+			const double maxTotal = static_cast<double>((std::max)(_spellHoldDuration + 0.25f, _spellHoldChargeAwareMaxTotalSeconds));
+
+			if (keepHoldingForCharge && heldTotal < maxTotal) {
+				_spellHoldObservedChargeActivity = true;
+				if (_spellHoldChargeAwareLastLogTime <= 0.0 ||
+					now - _spellHoldChargeAwareLastLogTime >= 0.12) {
+					_spellHoldChargeAwareLastLogTime = now;
+					logger::info("[SpellPipe] charge-monitor hold spell={:08X} source={} currentSpell={:08X} state={} timer={:.3f} held={:.2f}/{:.2f}",
+						_spellHoldSpellFormID,
+						GetCastingSourceName(observedSource),
+						observedCurrentSpellFormID,
+						GetMagicCasterStateName(observedState),
+						observedCastingTimer,
+						heldTotal,
+						maxTotal);
+				}
+			} else if (keepHoldingForCharge && heldTotal >= maxTotal) {
+				logger::warn("[SpellPipe] charge-monitor max hold reached spell={:08X} source={} currentSpell={:08X} state={} timer={:.3f} held={:.2f}/{:.2f}",
+					_spellHoldSpellFormID,
+					GetCastingSourceName(observedSource),
+					observedCurrentSpellFormID,
+					GetMagicCasterStateName(observedState),
+					observedCastingTimer,
+					heldTotal,
+					maxTotal);
+			} else {
+				logger::info("[SpellPipe] charge-monitor release spell={:08X} source={} currentSpell={:08X} state={} timer={:.3f} held={:.2f}/{:.2f}",
+					_spellHoldSpellFormID,
+					GetCastingSourceName(observedSource),
+					observedCurrentSpellFormID,
+					GetMagicCasterStateName(observedState),
+					observedCastingTimer,
+					heldTotal,
+					maxTotal);
+			}
+
+			if (keepHoldingForCharge && heldTotal < maxTotal) {
+				return;
+			}
+		}
+
+		if (!_spellHoldWaitForCasterStart &&
+			now - _spellHoldStartTime >= static_cast<double>(_spellHoldDuration)) {
+			auto* controls = RE::PlayerControls::GetSingleton();
+			auto* userEvents = RE::UserEvents::GetSingleton();
+			auto sendAttackUp = [&](bool useLeftAttack, RE::INPUT_DEVICE bindDevice, std::uint32_t bindIdCode, const char* tag) {
+				const auto& attackEvent = (useLeftAttack && userEvents) ? userEvents->leftAttack :
+					(userEvents ? userEvents->rightAttack : RE::BSFixedString{});
+				if (controls && controls->attackBlockHandler && userEvents && !attackEvent.empty()) {
+					auto* upEvent = RE::ButtonEvent::Create(bindDevice, attackEvent, bindIdCode, 0.0f, _spellHoldDuration);
+					if (upEvent) {
+						controls->attackBlockHandler->ProcessButton(upEvent, &controls->data);
+						RE::free(upEvent);
+					}
+					logger::info("[SpellPipe] sent attack UP{} (left={}, holdSec={:.2f})",
+						tag ? tag : "", useLeftAttack ? 1 : 0, _spellHoldDuration);
+					return;
+				}
+				logger::warn("[SpellPipe] attack UP{} skipped: controls={} attackHandler={} userEvents={} eventEmpty={}",
+					tag ? tag : "",
+					controls ? 1 : 0,
+					(controls && controls->attackBlockHandler) ? 1 : 0,
+					userEvents ? 1 : 0,
+					attackEvent.empty() ? 1 : 0);
+			};
+
+			sendAttackUp(_spellHoldUseLeftAttack, _spellBindDevice, _spellBindIdCode, "");
+			if (_spellHoldAlsoReleaseSecondAttack) {
+				sendAttackUp(_spellHoldSecondUseLeftAttack, _spellBindDeviceSecond, _spellBindIdCodeSecond, " (second)");
+			}
+
+			if (_spellHoldRestoreHandsAfterRelease) {
+				const bool requireObservedStart = _spellHoldChargeAwareRelease;
+				const bool canRestoreSafely =
+					!requireObservedStart ||
+					(_spellHoldObservedCasterStart && !_spellHoldUsedFallbackStart);
+				if (canRestoreSafely) {
+					const float restoreDelaySec = _spellHoldChargeAwareRelease ? 0.90f : 0.25f;
+					const float restoreMaxWaitSec = _spellHoldChargeAwareRelease ? 2.80f : 1.20f;
+					float restoreDelayDynamicSec = restoreDelaySec;
+					float restoreMaxWaitDynamicSec = restoreMaxWaitSec;
+					const float observedHoldTotalSec = static_cast<float>(now - _spellHoldWaitStartTime);
+					// Long ritual-style spells can keep finalizing after caster-state looks ready.
+					// Extend restore not only for 2H casts, but also for long single-hand mod spells.
+					if (_spellHoldChargeAwareRelease) {
+						const float effectiveHoldSec = (std::max)(_spellHoldDuration, observedHoldTotalSec);
+						if (effectiveHoldSec >= 3.00f) {
+							const float delayScale = _spellHoldAlsoReleaseSecondAttack ? 0.60f : 0.50f;
+							const float delayMin = _spellHoldAlsoReleaseSecondAttack ? 1.40f : 1.20f;
+							const float delayMax = _spellHoldAlsoReleaseSecondAttack ? 2.40f : 2.80f;
+							const float waitPad = _spellHoldAlsoReleaseSecondAttack ? 3.20f : 3.40f;
+							const float waitMin = _spellHoldAlsoReleaseSecondAttack ? 4.50f : 4.60f;
+							const float waitMax = _spellHoldAlsoReleaseSecondAttack ? 8.00f : 9.50f;
+							restoreDelayDynamicSec = std::clamp(effectiveHoldSec * delayScale, delayMin, delayMax);
+							restoreMaxWaitDynamicSec = std::clamp(restoreDelayDynamicSec + waitPad, waitMin, waitMax);
+							logger::info("[SpellPipe] post-cast restore delay extended spell={:08X} holdSec={:.2f} observedHold={:.2f}s delay={:.2f}s maxWait={:.2f}s dual={}",
+							_spellHoldSpellFormID,
+							_spellHoldDuration,
+							effectiveHoldSec,
+							restoreDelayDynamicSec,
+							restoreMaxWaitDynamicSec,
+							_spellHoldAlsoReleaseSecondAttack ? 1 : 0);
+						}
+					}
+					QueuePostCastRestore(
+						_spellHoldSpellFormID,
+						_spellHoldCastingSource,
+						_spellHoldUseLeftAttack,
+						_spellHoldAlsoReleaseSecondAttack,
+						_spellHoldSecondUseLeftAttack,
+						_spellHoldRestoreLeftHand,
+						_spellHoldRestoreLeftFormID,
+						_spellHoldRestoreRightHand,
+						_spellHoldRestoreRightFormID,
+						restoreDelayDynamicSec,
+						restoreMaxWaitDynamicSec);
+				} else {
+					const float conservativeDelaySec = _spellHoldChargeAwareRelease ?
+						std::clamp((std::max)(1.20f, _spellHoldChargeAwareMaxTotalSeconds), 1.20f, 8.00f) :
+						0.40f;
+					const float conservativeMaxWaitSec = _spellHoldChargeAwareRelease ?
+						std::clamp(conservativeDelaySec + 2.20f, 2.80f, 10.00f) :
+						1.50f;
+					QueuePostCastRestore(
+						_spellHoldSpellFormID,
+						_spellHoldCastingSource,
+						_spellHoldUseLeftAttack,
+						_spellHoldAlsoReleaseSecondAttack,
+						_spellHoldSecondUseLeftAttack,
+						_spellHoldRestoreLeftHand,
+						_spellHoldRestoreLeftFormID,
+						_spellHoldRestoreRightHand,
+						_spellHoldRestoreRightFormID,
+						conservativeDelaySec,
+						conservativeMaxWaitSec);
+					logger::warn("[SpellPipe] post-cast restore fallback queued (caster start unobserved): spell={:08X} source={} chargeAware={} startObserved={} fallbackStart={} chargeObserved={} delay={:.2f}s maxWait={:.2f}s",
+						_spellHoldSpellFormID,
+						GetCastingSourceName(_spellHoldCastingSource),
+						_spellHoldChargeAwareRelease ? 1 : 0,
+						_spellHoldObservedCasterStart ? 1 : 0,
+						_spellHoldUsedFallbackStart ? 1 : 0,
+						_spellHoldObservedChargeActivity ? 1 : 0,
+						conservativeDelaySec,
+						conservativeMaxWaitSec);
+				}
+			}
+
+			ClearSpellHoldRelease();
+		}
+	}
+
+	// Process deferred post-cast restore only after a short delay and caster-idle observation.
+	if (_spellPostCastRestorePending) {
+		const double now = ImGui::GetTime();
+		if (now >= _spellPostCastRestoreNoEarlierThan) {
+			RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
+			if (!pc || !pc->Is3DLoaded()) {
+				logger::warn("[SpellPipe] post-cast restore skipped: player unavailable");
+				ClearPostCastRestore();
+			} else {
+				SpellCasterSnapshot matchedSnapshot{};
+				std::array<SpellCasterSnapshot, 4> casterSnapshots{};
+				CaptureSpellCasterSnapshots(
+					pc,
+					_spellPostCastRestoreSpellFormID,
+					_spellPostCastRestorePreferredSource,
+					matchedSnapshot,
+					&casterSnapshots);
+
+				bool casterStillActive = false;
+				RE::MagicSystem::CastingSource observedSource = _spellPostCastRestorePreferredSource;
+				RE::MagicCaster::State observedState = RE::MagicCaster::State::kNone;
+				float observedTimer = 0.0f;
+				RE::FormID observedSpell = 0;
+
+				if (_spellPostCastRestoreSpellFormID != 0 &&
+					matchedSnapshot.hasCaster &&
+					matchedSnapshot.currentSpellFormID == _spellPostCastRestoreSpellFormID) {
+					const bool active = IsChargeLikeCasterState(matchedSnapshot.state) || matchedSnapshot.castingTimer > 0.01f;
+					if (active) {
+						casterStillActive = true;
+						observedSource = matchedSnapshot.source;
+						observedState = matchedSnapshot.state;
+						observedTimer = matchedSnapshot.castingTimer;
+						observedSpell = matchedSnapshot.currentSpellFormID;
+					}
+				}
+
+				if (!casterStillActive) {
+					SpellCasterSnapshot trackedSnapshot{};
+					const bool hasTrackedActive = TryGetActiveSnapshotForHeldSources(
+						casterSnapshots,
+						_spellPostCastRestoreTrackPrimaryLeft,
+						_spellPostCastRestoreTrackSecondary,
+						_spellPostCastRestoreTrackSecondaryLeft,
+						trackedSnapshot);
+					if (hasTrackedActive) {
+						const bool sameSpellOrUnknown =
+							_spellPostCastRestoreSpellFormID == 0 ||
+							trackedSnapshot.currentSpellFormID == _spellPostCastRestoreSpellFormID;
+						if (sameSpellOrUnknown) {
+							casterStillActive = true;
+							observedSource = trackedSnapshot.source;
+							observedState = trackedSnapshot.state;
+							observedTimer = trackedSnapshot.castingTimer;
+							observedSpell = trackedSnapshot.currentSpellFormID;
+						}
+					}
+				}
+
+				if (casterStillActive && now < _spellPostCastRestoreForceAt) {
+					if (_spellPostCastRestoreLastWaitLogTime <= 0.0 ||
+						now - _spellPostCastRestoreLastWaitLogTime >= 0.15) {
+						_spellPostCastRestoreLastWaitLogTime = now;
+						logger::info("[SpellPipe] post-cast restore waiting spell={:08X} source={} state={} timer={:.3f} currentSpell={:08X} remaining={:.2f}s",
+							_spellPostCastRestoreSpellFormID,
+							GetCastingSourceName(observedSource),
+							GetMagicCasterStateName(observedState),
+							observedTimer,
+							observedSpell,
+							(std::max)(0.0, _spellPostCastRestoreForceAt - now));
+					}
+				} else {
+					enum class PostCastRestoreHandAction : std::uint8_t
+					{
+						RestoreNow,
+						Wait,
+						Cancel
+					};
+
+					auto resolvePersistentHandItem = [&](bool isLeft,
+													 bool& restoreHand,
+													 RE::FormID restoreFormID,
+													 RE::FormID& trackedOccupantFormID) {
+						if (!restoreHand) {
+							return PostCastRestoreHandAction::Cancel;
+						}
+
+						RE::TESForm* currentEquipped = pc->GetEquippedObject(isLeft);
+						const RE::FormID currentFormID = currentEquipped ? currentEquipped->GetFormID() : 0;
+						const char* handName = isLeft ? "LEFT" : "RIGHT";
+
+						if (trackedOccupantFormID != 0) {
+							if (currentFormID == trackedOccupantFormID) {
+								if (_spellPostCastRestoreLastWaitLogTime <= 0.0 ||
+									now - _spellPostCastRestoreLastWaitLogTime >= 0.15) {
+									_spellPostCastRestoreLastWaitLogTime = now;
+									logger::info("[SpellPipe] post-cast restore waiting {} persistentForm={:08X} spell={:08X}",
+										handName,
+										trackedOccupantFormID,
+										_spellPostCastRestoreSpellFormID);
+								}
+								return PostCastRestoreHandAction::Wait;
+							}
+							if (currentFormID == 0) {
+								logger::info("[SpellPipe] post-cast restore {} resumed after persistent item cleared formID={:08X}",
+									handName,
+									trackedOccupantFormID);
+								trackedOccupantFormID = 0;
+								return PostCastRestoreHandAction::RestoreNow;
+							}
+
+							logger::info("[SpellPipe] post-cast restore {} cancelled after persistent item changed tracked={:08X} current={:08X}",
+								handName,
+								trackedOccupantFormID,
+								currentFormID);
+							trackedOccupantFormID = 0;
+							restoreHand = false;
+							return PostCastRestoreHandAction::Cancel;
+						}
+
+						const bool unexpectedOccupied =
+							currentFormID != 0 &&
+							currentFormID != restoreFormID &&
+							currentFormID != _spellPostCastRestoreSpellFormID;
+						const bool looksPersistentHandItem =
+							currentEquipped &&
+							(currentEquipped->As<RE::TESObjectWEAP>() ||
+								currentEquipped->As<RE::TESObjectARMO>() ||
+								currentEquipped->As<RE::TESObjectLIGH>());
+						if (unexpectedOccupied && looksPersistentHandItem) {
+							trackedOccupantFormID = currentFormID;
+							logger::info("[SpellPipe] post-cast restore {} waiting on persistent hand item formID={:08X} restoreTarget={:08X} spell={:08X}",
+								handName,
+								trackedOccupantFormID,
+								restoreFormID,
+								_spellPostCastRestoreSpellFormID);
+							return PostCastRestoreHandAction::Wait;
+						}
+
+						return PostCastRestoreHandAction::RestoreNow;
+					};
+
+					if (_spellPostCastRestoreRightHand) {
+						const auto rightAction = resolvePersistentHandItem(
+							false,
+							_spellPostCastRestoreRightHand,
+							_spellPostCastRestoreRightFormID,
+							_spellPostCastRestoreTrackedRightOccupantFormID);
+						if (_spellPostCastRestoreRightHand && rightAction == PostCastRestoreHandAction::RestoreNow) {
+							if (_spellPostCastRestoreRightFormID == 0) {
+								if (pc->GetEquippedObject(false) != nullptr) {
+									Utils::Slot::CleanSlot(pc, Utils::Slot::GetRightHandSlot());
+									logger::info("[SpellPipe] post-cast restore RIGHT cleared to empty");
+								}
+							} else {
+								const bool alreadyEquipped = [&]() {
+									if (auto* rightEquipped = pc->GetEquippedObject(false)) {
+										return rightEquipped->GetFormID() == _spellPostCastRestoreRightFormID;
+									}
+									return false;
+								}();
+								if (!alreadyEquipped) {
+									const bool ok = EquipFormToHand(pc, _spellPostCastRestoreRightFormID, HandMemoryHand::Right);
+									logger::info("[SpellPipe] post-cast restore RIGHT formID={:08X} ok={}",
+										_spellPostCastRestoreRightFormID,
+										ok ? 1 : 0);
+								}
+							}
+							_spellPostCastRestoreRightHand = false;
+							_spellPostCastRestoreTrackedRightOccupantFormID = 0;
+						}
+					}
+					if (_spellPostCastRestoreLeftHand) {
+						const auto leftAction = resolvePersistentHandItem(
+							true,
+							_spellPostCastRestoreLeftHand,
+							_spellPostCastRestoreLeftFormID,
+							_spellPostCastRestoreTrackedLeftOccupantFormID);
+						if (_spellPostCastRestoreLeftHand && leftAction == PostCastRestoreHandAction::RestoreNow) {
+							if (_spellPostCastRestoreLeftFormID == 0) {
+								if (pc->GetEquippedObject(true) != nullptr) {
+									Utils::Slot::CleanSlot(pc, Utils::Slot::GetLeftHandSlot());
+									logger::info("[SpellPipe] post-cast restore LEFT cleared to empty");
+								}
+							} else {
+								const bool alreadyEquipped = [&]() {
+									if (auto* leftEquipped = pc->GetEquippedObject(true)) {
+										return leftEquipped->GetFormID() == _spellPostCastRestoreLeftFormID;
+									}
+									return false;
+								}();
+								if (!alreadyEquipped) {
+									const bool ok = EquipFormToHand(pc, _spellPostCastRestoreLeftFormID, HandMemoryHand::Left);
+									logger::info("[SpellPipe] post-cast restore LEFT formID={:08X} ok={}",
+										_spellPostCastRestoreLeftFormID,
+										ok ? 1 : 0);
+								}
+							}
+							_spellPostCastRestoreLeftHand = false;
+							_spellPostCastRestoreTrackedLeftOccupantFormID = 0;
+						}
+					}
+					if (!_spellPostCastRestoreLeftHand && !_spellPostCastRestoreRightHand) {
+						ClearPostCastRestore();
+					}
+				}
+			}
 		}
 	}
 
@@ -1849,6 +5970,10 @@ void Wheeler::ProcessPendingActions()
 	if (_pendingPowerFormID.has_value() && !_shoutHoldActive) {
 		const RE::FormID powerFormID = *_pendingPowerFormID;
 		_pendingPowerFormID.reset();
+		const bool restoreVoiceSelectionPending = _pendingPowerRestorePending;
+		const RE::FormID restoreVoiceFormID = _pendingPowerRestoreFormID;
+		_pendingPowerRestorePending = false;
+		_pendingPowerRestoreFormID = 0;
 
 		RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
 		if (!pc) {
@@ -1857,44 +5982,866 @@ void Wheeler::ProcessPendingActions()
 			RE::SpellItem* powerSpell = RE::TESForm::LookupByID<RE::SpellItem>(powerFormID);
 			if (!powerSpell) {
 				logger::warn("[PowerPipe] pending activation failed: LookupByID {:08X}", powerFormID);
+			} else if (IsSpellBlockedByTransformGuard(powerSpell, "PowerTask")) {
+				logger::warn("[PowerPipe] pending activation blocked by transform guard formID={:08X}", powerFormID);
 			} else if (!IsPowerSpellType(powerSpell)) {
 				logger::warn("[PowerPipe] pending activation skipped: form {:08X} is not power type (spellType={})",
 					powerFormID, static_cast<int>(powerSpell->GetSpellType()));
 			} else {
-				RE::ActorEquipManager* aeMan = RE::ActorEquipManager::GetSingleton();
-				if (!aeMan) {
-					logger::warn("[PowerPipe] pending activation failed: no ActorEquipManager");
-				} else {
-					RE::TESForm* selectedPower = pc->GetActorRuntimeData().selectedPower;
-					if (!selectedPower || selectedPower->GetFormID() != powerFormID) {
-						aeMan->EquipSpell(pc, powerSpell, Utils::Slot::GetVoiceSlot());
-						selectedPower = pc->GetActorRuntimeData().selectedPower;
-						logger::info("[PowerPipe] equipped power selectedPower={:08X} requested={:08X}",
-							selectedPower ? selectedPower->GetFormID() : 0, powerFormID);
-					} else {
-						logger::info("[PowerPipe] equip skipped power already selected formID={:08X}", powerFormID);
+				bool canScheduleActivation = true;
+				const RE::FormID selectedVoiceFormID = GetSelectedVoiceFormID(pc);
+				if (selectedVoiceFormID != powerFormID) {
+					const bool equipped = TrySetVoiceSelection(pc, powerFormID, "PowerTempSelect");
+					logger::info(
+						"[PowerPipe] temporary power select previous={:08X} requested={:08X} equipped={}",
+						selectedVoiceFormID,
+						powerFormID,
+						equipped ? 1 : 0);
+					if (!equipped) {
+						logger::warn("[PowerPipe] pending activation failed: temporary voice select failed requested={:08X}",
+							powerFormID);
+						canScheduleActivation = false;
 					}
+				}
 
-					// Run activate on next task tick so equip/close state is committed before firing.
-					SKSE::GetTaskInterface()->AddTask([powerFormID]() {
+				if (canScheduleActivation) {
+					// Run activate on next task tick so close state is committed before firing.
+					SKSE::GetTaskInterface()->AddTask([powerFormID, restoreVoiceSelectionPending, restoreVoiceFormID]() {
 						RE::PlayerCharacter* taskPc = RE::PlayerCharacter::GetSingleton();
 						if (!taskPc) {
 							logger::warn("[PowerPipe] activate task failed: no player");
 							return;
 						}
+
+						auto tryRestore = [&](const char* reason) {
+							if (!restoreVoiceSelectionPending) {
+								return;
+							}
+							const bool restored = TryRestoreVoiceSelection(taskPc, restoreVoiceFormID, powerFormID, "PowerRestore");
+							logger::info("[PowerPipe] restore attempted reason={} restored={} previous={:08X} requested={:08X}",
+								reason ? reason : "",
+								restored ? 1 : 0,
+								restoreVoiceFormID,
+								powerFormID);
+						};
+
 						RE::UI* ui = RE::UI::GetSingleton();
 						if (ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
 							logger::warn("[PowerPipe] activate task skipped: loading menu open");
+							tryRestore("LoadingMenu");
 							return;
 						}
 
-						if (!TryActivateEquippedShoutOrPowerVanilla(taskPc, powerFormID)) {
+						const bool activated = TryActivateEquippedShoutOrPowerVanilla(taskPc, powerFormID);
+						tryRestore(activated ? "AfterActivate" : "ActivateFailed");
+						if (!activated) {
 							logger::warn("[PowerPipe] activate task failed formID={:08X}", powerFormID);
 							return;
 						}
 
 						logger::info("[PowerPipe] activate task succeeded formID={:08X}", powerFormID);
 					});
+				}
+			}
+		}
+	}
+
+	// Process pending direct spell activation through vanilla attack input pipeline.
+	if (_pendingSpellActivation.has_value() && !_shoutHoldActive && !_spellHoldActive) {
+		constexpr float kDirectTapReleaseMinSec = 0.12f;
+		constexpr float kDirectTapChargeBufferSec = 0.08f;
+		constexpr float kDirectTapRitualChargeThresholdSec = 2.50f;
+		constexpr float kDirectTapRitualSafetyBufferSec = 0.60f;
+		constexpr float kDirectTapReleaseMaxSec = 4.50f;
+		constexpr float kDirectTapChargeAwareMinTotalSec = 6.00f;
+		constexpr float kDirectTapChargeAwareBasePaddingSec = 1.25f;
+		constexpr float kDirectTapChargeAwarePerChargeMultiplier = 4.00f;
+		constexpr float kDirectTapChargeAwareMaxTotalSec = 12.00f;
+		constexpr std::uint8_t kSpellReadyRetryFrameBudget = 240;
+		constexpr std::uint8_t kPostEquipSettleFrameBudget = 8;
+		auto& pending = *_pendingSpellActivation;
+
+		RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
+		if (!pc) {
+			logger::warn("[SpellPipe] pending activation failed: no player");
+			_pendingSpellActivation.reset();
+		} else {
+			RE::UI* ui = RE::UI::GetSingleton();
+			if (ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
+				logger::warn("[SpellPipe] pending activation delayed: loading menu open");
+			} else {
+					RE::SpellItem* spell = RE::TESForm::LookupByID<RE::SpellItem>(pending.formID);
+					if (!spell) {
+						logger::warn("[SpellPipe] pending activation failed: LookupByID {:08X}", pending.formID);
+						_pendingSpellActivation.reset();
+					} else if (IsSpellBlockedByTransformGuard(spell, "SpellTask")) {
+						logger::warn("[SpellPipe] pending activation blocked by transform guard formID={:08X}", pending.formID);
+						_pendingSpellActivation.reset();
+					} else if (IsPowerSpellType(spell)) {
+						logger::warn("[SpellPipe] pending activation skipped: form {:08X} is power type (spellType={})",
+							pending.formID, static_cast<int>(spell->GetSpellType()));
+					_pendingSpellActivation.reset();
+				} else {
+					RE::ActorEquipManager* aeMan = RE::ActorEquipManager::GetSingleton();
+					if (!aeMan) {
+						logger::warn("[SpellPipe] pending activation failed: no ActorEquipManager");
+						_pendingSpellActivation.reset();
+					} else {
+						const bool firstReadyAttempt = pending.readyRetryFramesRemaining >= kSpellReadyRetryFrameBudget;
+						if (firstReadyAttempt) {
+							logger::info("[SpellPipe] pending spell meta formID={:08X} name='{}' spellType={} castingType={} delivery={} chargeTime={:.2f} hand={} requested={} preCast2H={}",
+								pending.formID,
+								spell->GetName() ? spell->GetName() : "",
+								static_cast<int>(spell->GetSpellType()),
+								static_cast<int>(spell->GetCastingType()),
+								static_cast<int>(spell->GetDelivery()),
+								(std::max)(0.0f, spell->GetChargeTime()),
+								GetTargetHandName(pending.hand),
+								GetTargetHandName(pending.requestedHand),
+								pending.preCastHadTwoHandedWeapon ? 1 : 0);
+							if (auto* avOwner = pc->AsActorValueOwner(); avOwner) {
+								const float magickaNow = avOwner->GetActorValue(RE::ActorValue::kMagicka);
+								const float magickaCost = spell->CalculateMagickaCost(pc);
+								logger::info("[SpellPipe] pending spell resources formID={:08X} magickaNow={:.1f} magickaCost={:.1f}",
+									pending.formID,
+									magickaNow,
+									magickaCost);
+							}
+						}
+
+						RE::TESForm* equippedLeftNow = pc->GetEquippedObject(true);
+						RE::TESForm* equippedRightNow = pc->GetEquippedObject(false);
+						auto getPendingRestoreTargetFormID = [&](bool isLeft) -> RE::FormID {
+							const bool hasOverride = isLeft ?
+								pending.restoreOverrideLeftHand :
+								pending.restoreOverrideRightHand;
+							const RE::FormID overrideFormID = isLeft ?
+								pending.restoreOverrideLeftFormID :
+								pending.restoreOverrideRightFormID;
+							if (hasOverride) {
+								return NormalizeRestorableHandFormID(pc, overrideFormID);
+							}
+							const RE::FormID rawFormID = isLeft ?
+								pending.preCastLeftFormID :
+								pending.preCastRightFormID;
+							return NormalizeRestorableHandFormID(pc, rawFormID);
+						};
+
+						const bool useLeftHand = UsesLeftAttack(pending.hand);
+						const bool useRightHand = UsesRightAttack(pending.hand);
+						const bool useBothHands = useLeftHand && useRightHand;
+
+						// If both hands already hold the same spell and request is single-hand,
+						// temporarily clear the opposite hand so vanilla attack routing does not
+						// get stuck in a dual-equip/non-start state. We restore opposite hand post-cast.
+						if (!useBothHands && !pending.singleHandIsolationApplied) {
+							const RE::FormID equippedLeftID = equippedLeftNow ? equippedLeftNow->GetFormID() : 0;
+							const RE::FormID equippedRightID = equippedRightNow ? equippedRightNow->GetFormID() : 0;
+							const bool bothHandsSameRequestedSpell =
+								equippedLeftID == pending.formID &&
+								equippedRightID == pending.formID;
+							const bool preCastBothHandsSameRequestedSpell =
+								pending.preCastHandsCaptured &&
+									pending.preCastLeftFormID == pending.formID &&
+									pending.preCastRightFormID == pending.formID;
+							if (bothHandsSameRequestedSpell && preCastBothHandsSameRequestedSpell) {
+								const bool oppositeIsLeft = useRightHand;
+								RE::BGSEquipSlot* oppositeSlot = oppositeIsLeft ?
+									Utils::Slot::GetLeftHandSlot() :
+									Utils::Slot::GetRightHandSlot();
+								if (oppositeSlot) {
+									Utils::Slot::CleanSlot(pc, oppositeSlot);
+									pending.singleHandIsolationApplied = true;
+									pending.singleHandIsolationOppositeWasLeft = oppositeIsLeft;
+									pending.singleHandIsolationRestoreFormID = pending.formID;
+									pending.requiredEquipBeforeCast = true;
+									pending.postEquipWarmupFramesRemaining =
+										(std::max)(pending.postEquipWarmupFramesRemaining, kPostEquipSettleFrameBudget);
+									logger::info("[SpellPipe] single-hand isolation applied hand={} opposite={} spell={:08X}",
+										GetTargetHandName(pending.hand),
+										oppositeIsLeft ? "LEFT" : "RIGHT",
+										pending.formID);
+									// Refresh current equips after isolation before readiness checks.
+									equippedLeftNow = pc->GetEquippedObject(true);
+									equippedRightNow = pc->GetEquippedObject(false);
+								} else {
+									logger::warn("[SpellPipe] single-hand isolation skipped: opposite slot unavailable hand={} spell={:08X}",
+										GetTargetHandName(pending.hand),
+										pending.formID);
+								}
+							} else if (pending.preCastHadTwoHandedWeapon) {
+								const bool oppositeIsLeft = useRightHand;
+								const RE::FormID oppositeNowFormID = oppositeIsLeft ? equippedLeftID : equippedRightID;
+								RE::BGSEquipSlot* castSlot = useLeftHand ?
+									Utils::Slot::GetLeftHandSlot() :
+									Utils::Slot::GetRightHandSlot();
+								RE::BGSEquipSlot* oppositeSlot = oppositeIsLeft ?
+									Utils::Slot::GetLeftHandSlot() :
+									Utils::Slot::GetRightHandSlot();
+								if (!castSlot || !oppositeSlot) {
+									logger::warn("[SpellPipe] single-hand 2H-unwind skipped: slot unavailable hand={} castSlot={} oppositeSlot={} spell={:08X}",
+										GetTargetHandName(pending.hand),
+										castSlot ? 1 : 0,
+										oppositeSlot ? 1 : 0,
+										pending.formID);
+								} else {
+									const RE::FormID oppositeRestoreFormID = pending.preCastHandsCaptured ?
+										getPendingRestoreTargetFormID(oppositeIsLeft) :
+										NormalizeRestorableHandFormID(pc, oppositeNowFormID);
+
+									const bool currentlyIn2H =
+										IsTwoHandedForm(equippedLeftNow) ||
+										IsTwoHandedForm(equippedRightNow);
+									if (currentlyIn2H) {
+										Utils::Slot::CleanSlot(pc, Utils::Slot::GetLeftHandSlot());
+										Utils::Slot::CleanSlot(pc, Utils::Slot::GetRightHandSlot());
+										logger::info("[SpellPipe] single-hand 2H-unwind cleared both hands leftNow={:08X} rightNow={:08X}",
+											equippedLeftID,
+											equippedRightID);
+									}
+
+									// Mirror proven dual-equip single-hand isolation:
+									// 1) transiently equip both hands to requested spell (stabilize 2H->magic graph)
+									// 2) then clear opposite hand so single-hand intent stays true (R/L does not become both)
+									aeMan->EquipSpell(pc, spell, castSlot);
+									aeMan->EquipSpell(pc, spell, oppositeSlot);
+									equippedLeftNow = pc->GetEquippedObject(true);
+									equippedRightNow = pc->GetEquippedObject(false);
+									const RE::FormID leftAfterDualEquip = equippedLeftNow ? equippedLeftNow->GetFormID() : 0;
+									const RE::FormID rightAfterDualEquip = equippedRightNow ? equippedRightNow->GetFormID() : 0;
+									const bool transientDualReady =
+										leftAfterDualEquip == pending.formID &&
+										rightAfterDualEquip == pending.formID;
+									if (!transientDualReady) {
+										logger::warn("[SpellPipe] single-hand 2H-unwind transient dual-equip incomplete hand={} leftNow={:08X} rightNow={:08X} spell={:08X}",
+											GetTargetHandName(pending.hand),
+											leftAfterDualEquip,
+											rightAfterDualEquip,
+											pending.formID);
+									}
+
+									// Force a full sheathe->draw cycle to unwind residual 2H combat graph state.
+									pc->DrawWeaponMagicHands(false);
+									pc->DrawWeaponMagicHands(true);
+									logger::info("[SpellPipe] single-hand 2H-unwind forced sheathe->draw cycle hand={}",
+										GetTargetHandName(pending.hand));
+
+									// If opposite hand still has the requested spell, clear it before dispatch.
+									// This preserves immersive single-hand behavior while keeping pre-cast restore target.
+									const RE::FormID oppositeAfterDualEquip = oppositeIsLeft ? leftAfterDualEquip : rightAfterDualEquip;
+									if (oppositeAfterDualEquip == pending.formID) {
+										Utils::Slot::CleanSlot(pc, oppositeSlot);
+										const RE::FormID oppositeAfterClear = oppositeIsLeft ?
+											(pc->GetEquippedObject(true) ? pc->GetEquippedObject(true)->GetFormID() : 0) :
+											(pc->GetEquippedObject(false) ? pc->GetEquippedObject(false)->GetFormID() : 0);
+										logger::info("[SpellPipe] single-hand 2H-bootstrap opposite cleared hand={} opposite={} before={:08X} after={:08X}",
+											GetTargetHandName(pending.hand),
+											oppositeIsLeft ? "LEFT" : "RIGHT",
+											oppositeAfterDualEquip,
+											oppositeAfterClear);
+									}
+
+									pending.requiredEquipBeforeCast = true;
+									pending.postEquipWarmupFramesRemaining =
+										(std::max)(pending.postEquipWarmupFramesRemaining, static_cast<std::uint8_t>(kPostEquipSettleFrameBudget + 16u));
+									pending.singleHandIsolationApplied = true;
+									pending.singleHandIsolationOppositeWasLeft = oppositeIsLeft;
+									pending.singleHandIsolationRestoreFormID = oppositeRestoreFormID;
+									logger::info("[SpellPipe] single-hand 2H-bootstrap applied hand={} opposite={} oppositeBefore={:08X} oppositeRestore={:08X} spell={:08X}",
+										GetTargetHandName(pending.hand),
+										oppositeIsLeft ? "LEFT" : "RIGHT",
+										oppositeNowFormID,
+										oppositeRestoreFormID,
+										pending.formID);
+									// Refresh current equips after bootstrap before readiness checks.
+									equippedLeftNow = pc->GetEquippedObject(true);
+									equippedRightNow = pc->GetEquippedObject(false);
+								}
+							} else if (bothHandsSameRequestedSpell && firstReadyAttempt) {
+								logger::info("[SpellPipe] single-hand isolation skipped (not pre-cast dual-equip) hand={} preCastLeft={:08X} preCastRight={:08X} spell={:08X}",
+									GetTargetHandName(pending.hand),
+									pending.preCastLeftFormID,
+									pending.preCastRightFormID,
+									pending.formID);
+							}
+						}
+
+						// In pre-cast 2H single-hand flows, the transient dual-equip bootstrap can
+						// re-latch the opposite hand a few frames later. Re-clear opposite hand here
+						// so dispatch stays strict single-hand.
+						if (pending.preCastHadTwoHandedWeapon && !useBothHands && pending.singleHandIsolationApplied) {
+							const bool oppositeIsLeft = useRightHand;
+							RE::TESForm* oppositeEquipped = oppositeIsLeft ? equippedLeftNow : equippedRightNow;
+							const RE::FormID oppositeBeforeReclear = oppositeEquipped ? oppositeEquipped->GetFormID() : 0;
+							if (oppositeBeforeReclear == pending.formID) {
+								RE::BGSEquipSlot* oppositeSlot = oppositeIsLeft ?
+									Utils::Slot::GetLeftHandSlot() :
+									Utils::Slot::GetRightHandSlot();
+								if (oppositeSlot) {
+									Utils::Slot::CleanSlot(pc, oppositeSlot);
+									equippedLeftNow = pc->GetEquippedObject(true);
+									equippedRightNow = pc->GetEquippedObject(false);
+									const RE::FormID oppositeAfterReclear = oppositeIsLeft ?
+										(equippedLeftNow ? equippedLeftNow->GetFormID() : 0) :
+										(equippedRightNow ? equippedRightNow->GetFormID() : 0);
+									pending.requiredEquipBeforeCast = true;
+									pending.postEquipWarmupFramesRemaining =
+										(std::max)(pending.postEquipWarmupFramesRemaining, static_cast<std::uint8_t>(kPostEquipSettleFrameBudget / 2u));
+									logger::info("[SpellPipe] single-hand 2H-opposite re-clear hand={} opposite={} before={:08X} after={:08X}",
+										GetTargetHandName(pending.hand),
+										oppositeIsLeft ? "LEFT" : "RIGHT",
+										oppositeBeforeReclear,
+										oppositeAfterReclear);
+								}
+							}
+						}
+
+						RE::TESForm* equippedLeft = useLeftHand ? equippedLeftNow : nullptr;
+						RE::TESForm* equippedRight = useRightHand ? equippedRightNow : nullptr;
+						bool equipLeftReady = !useLeftHand || (equippedLeft && equippedLeft->GetFormID() == pending.formID);
+						bool equipRightReady = !useRightHand || (equippedRight && equippedRight->GetFormID() == pending.formID);
+
+						const bool periodicEquipLog = (pending.readyRetryFramesRemaining % 30u) == 0u;
+						if (useLeftHand && !equipLeftReady) {
+							pending.requiredEquipBeforeCast = true;
+							aeMan->EquipSpell(pc, spell, Utils::Slot::GetLeftHandSlot());
+							equippedLeft = pc->GetEquippedObject(true);
+							equipLeftReady = equippedLeft && equippedLeft->GetFormID() == pending.formID;
+							if (firstReadyAttempt || periodicEquipLog) {
+								logger::info("[SpellPipe] equipped spell hand=left equipped={:08X} requested={:08X}",
+									equippedLeft ? equippedLeft->GetFormID() : 0, pending.formID);
+							}
+						} else if (firstReadyAttempt && useLeftHand) {
+							logger::info("[SpellPipe] equip skipped spell already in hand=left formID={:08X}", pending.formID);
+						}
+
+						if (useRightHand && !equipRightReady) {
+							pending.requiredEquipBeforeCast = true;
+							aeMan->EquipSpell(pc, spell, Utils::Slot::GetRightHandSlot());
+							equippedRight = pc->GetEquippedObject(false);
+							equipRightReady = equippedRight && equippedRight->GetFormID() == pending.formID;
+							if (firstReadyAttempt || periodicEquipLog) {
+								logger::info("[SpellPipe] equipped spell hand=right equipped={:08X} requested={:08X}",
+									equippedRight ? equippedRight->GetFormID() : 0, pending.formID);
+							}
+						} else if (firstReadyAttempt && useRightHand) {
+							logger::info("[SpellPipe] equip skipped spell already in hand=right formID={:08X}", pending.formID);
+						}
+
+						// Non-2H single-hand cross-cast case:
+						// target equip can transiently make both hands hold the same spell, which
+						// can stall caster start for individual L/R dispatch. Clear opposite hand.
+						if (!useBothHands &&
+							!pending.preCastHadTwoHandedWeapon &&
+							!pending.singleHandIsolationApplied) {
+							const RE::FormID leftAfterEquip = [&]() -> RE::FormID {
+								if (useLeftHand && equippedLeft) {
+									return equippedLeft->GetFormID();
+								}
+								if (RE::TESForm* left = pc->GetEquippedObject(true)) {
+									return left->GetFormID();
+								}
+								return 0;
+							}();
+							const RE::FormID rightAfterEquip = [&]() -> RE::FormID {
+								if (useRightHand && equippedRight) {
+									return equippedRight->GetFormID();
+								}
+								if (RE::TESForm* right = pc->GetEquippedObject(false)) {
+									return right->GetFormID();
+								}
+								return 0;
+							}();
+							const bool bothHandsNowRequestedSpell =
+								leftAfterEquip == pending.formID &&
+								rightAfterEquip == pending.formID;
+							if (bothHandsNowRequestedSpell) {
+								const bool oppositeIsLeft = useRightHand;
+								RE::BGSEquipSlot* oppositeSlot = oppositeIsLeft ?
+									Utils::Slot::GetLeftHandSlot() :
+									Utils::Slot::GetRightHandSlot();
+								if (oppositeSlot) {
+									const RE::FormID oppositeRestoreFormID = pending.preCastHandsCaptured ?
+										getPendingRestoreTargetFormID(oppositeIsLeft) :
+										NormalizeRestorableHandFormID(pc, oppositeIsLeft ? leftAfterEquip : rightAfterEquip);
+									Utils::Slot::CleanSlot(pc, oppositeSlot);
+									equippedLeftNow = pc->GetEquippedObject(true);
+									equippedRightNow = pc->GetEquippedObject(false);
+									equippedLeft = useLeftHand ? equippedLeftNow : nullptr;
+									equippedRight = useRightHand ? equippedRightNow : nullptr;
+									equipLeftReady = !useLeftHand || (equippedLeft && equippedLeft->GetFormID() == pending.formID);
+									equipRightReady = !useRightHand || (equippedRight && equippedRight->GetFormID() == pending.formID);
+									pending.singleHandIsolationApplied = true;
+									pending.singleHandIsolationOppositeWasLeft = oppositeIsLeft;
+									pending.singleHandIsolationRestoreFormID = oppositeRestoreFormID;
+									pending.requiredEquipBeforeCast = true;
+									pending.postEquipWarmupFramesRemaining =
+										(std::max)(pending.postEquipWarmupFramesRemaining, kPostEquipSettleFrameBudget);
+									logger::info("[SpellPipe] single-hand late isolation applied hand={} opposite={} preCast2H=0 restore={:08X} spell={:08X}",
+										GetTargetHandName(pending.hand),
+										oppositeIsLeft ? "LEFT" : "RIGHT",
+										oppositeRestoreFormID,
+										pending.formID);
+								}
+							}
+						}
+
+						bool equipReady = (!useLeftHand || equipLeftReady) && (!useRightHand || equipRightReady);
+
+						if (equipReady &&
+							pending.requiredEquipBeforeCast &&
+							pending.postEquipWarmupFramesRemaining == 0) {
+							pending.postEquipWarmupFramesRemaining = kPostEquipSettleFrameBudget;
+							logger::info("[SpellPipe] waiting post-equip settle formID={:08X} hand={} settleFrames={}",
+								pending.formID,
+								GetTargetHandName(pending.hand),
+								pending.postEquipWarmupFramesRemaining);
+						}
+
+						const auto* actorState = pc->AsActorState();
+						bool drawReady = !actorState || actorState->IsWeaponDrawn();
+						if (!drawReady) {
+							// If draw transition is needed, enforce a short settle window before dispatch.
+							pending.requiredEquipBeforeCast = true;
+							pending.postEquipWarmupFramesRemaining = (std::max)(pending.postEquipWarmupFramesRemaining, kPostEquipSettleFrameBudget);
+							pc->DrawWeaponMagicHands(true);
+						}
+
+						if (equipReady &&
+							drawReady &&
+							pending.postEquipWarmupFramesRemaining > 0) {
+							pending.postEquipWarmupFramesRemaining--;
+						}
+
+						const bool castReady =
+							equipReady &&
+							drawReady &&
+							pending.postEquipWarmupFramesRemaining == 0;
+
+						if (!castReady) {
+							if (pending.readyRetryFramesRemaining > 0) {
+								if (firstReadyAttempt) {
+									logger::info("[SpellPipe] waiting cast-ready state formID={:08X} hand={} leftReady={} rightReady={} drawReady={} settleFrames={} retries={}",
+										pending.formID,
+										GetTargetHandName(pending.hand),
+										equipLeftReady ? 1 : 0,
+										equipRightReady ? 1 : 0,
+										drawReady ? 1 : 0,
+										pending.postEquipWarmupFramesRemaining,
+										pending.readyRetryFramesRemaining);
+								}
+								pending.readyRetryFramesRemaining--;
+							} else {
+								logger::warn("[SpellPipe] pending activation failed: cast-ready timeout formID={:08X} hand={} leftReady={} rightReady={} drawReady={} settleFrames={}",
+									pending.formID,
+									GetTargetHandName(pending.hand),
+									equipLeftReady ? 1 : 0,
+									equipRightReady ? 1 : 0,
+									drawReady ? 1 : 0,
+									pending.postEquipWarmupFramesRemaining);
+								_pendingSpellActivation.reset();
+							}
+						} else {
+							const float holdSeconds = std::clamp(pending.concentrationHoldSeconds, 0.0f, 60.0f);
+							const auto canCastFromSource = [&](RE::MagicSystem::CastingSource source, RE::MagicSystem::CannotCastReason& outReason) {
+								outReason = RE::MagicSystem::CannotCastReason::kOK;
+								RE::MagicCaster* caster = pc->GetMagicCaster(source);
+								if (!caster) {
+									return false;
+								}
+								float strength = 0.0f;
+								caster->CheckCast(spell, false, &strength, &outReason, false);
+								return outReason == RE::MagicSystem::CannotCastReason::kOK;
+							};
+							RE::MagicSystem::CannotCastReason leftCastReason = RE::MagicSystem::CannotCastReason::kOK;
+							RE::MagicSystem::CannotCastReason rightCastReason = RE::MagicSystem::CannotCastReason::kOK;
+							const bool leftSourceCastable = !useLeftHand ||
+								canCastFromSource(RE::MagicSystem::CastingSource::kLeftHand, leftCastReason);
+							const bool rightSourceCastable = !useRightHand ||
+								canCastFromSource(RE::MagicSystem::CastingSource::kRightHand, rightCastReason);
+							const bool allRequestedSourcesBlocked =
+								(useLeftHand ? !leftSourceCastable : true) &&
+								(useRightHand ? !rightSourceCastable : true);
+							if (allRequestedSourcesBlocked) {
+								const bool periodicCastabilityLog = firstReadyAttempt || ((pending.readyRetryFramesRemaining % 30u) == 0u);
+								if (pending.readyRetryFramesRemaining > 0) {
+									if (periodicCastabilityLog) {
+										logger::info("[SpellPipe] waiting castable source formID={:08X} hand={} leftCastable={} rightCastable={} leftReason={} rightReason={} retries={}",
+											pending.formID,
+											GetTargetHandName(pending.hand),
+											leftSourceCastable ? 1 : 0,
+											rightSourceCastable ? 1 : 0,
+											static_cast<int>(leftCastReason),
+											static_cast<int>(rightCastReason),
+											pending.readyRetryFramesRemaining);
+									}
+									pending.readyRetryFramesRemaining--;
+								} else {
+									logger::warn("[SpellPipe] pending activation failed: castability timeout formID={:08X} hand={} leftCastable={} rightCastable={} leftReason={} rightReason={}",
+										pending.formID,
+										GetTargetHandName(pending.hand),
+										leftSourceCastable ? 1 : 0,
+										rightSourceCastable ? 1 : 0,
+										static_cast<int>(leftCastReason),
+										static_cast<int>(rightCastReason));
+									_pendingSpellActivation.reset();
+								}
+							} else {
+								auto* controls = RE::PlayerControls::GetSingleton();
+								auto* userEvents = RE::UserEvents::GetSingleton();
+								if (!controls || !controls->attackBlockHandler || !userEvents) {
+									logger::warn("[SpellPipe] activate task failed: controls={} attackHandler={} userEvents={}",
+										controls ? 1 : 0, (controls && controls->attackBlockHandler) ? 1 : 0, userEvents ? 1 : 0);
+									_pendingSpellActivation.reset();
+								} else {
+									RE::INPUT_DEVICE leftDevice = RE::INPUT_DEVICE::kKeyboard;
+									RE::INPUT_DEVICE rightDevice = RE::INPUT_DEVICE::kKeyboard;
+									std::uint32_t leftIdCode = 0;
+									std::uint32_t rightIdCode = 0;
+									const bool hasLeftAttackBinding = ResolveUserEventBinding(userEvents->leftAttack, leftDevice, leftIdCode);
+									const bool hasRightAttackBinding = ResolveUserEventBinding(userEvents->rightAttack, rightDevice, rightIdCode);
+									const bool canUseLeftAttack = !useLeftHand || hasLeftAttackBinding;
+									const bool canUseRightAttack = !useRightHand || hasRightAttackBinding;
+									const bool preferLeftPrimary = pending.requestedHand == TargetHand::Left;
+
+									bool runLeftAttack = useLeftHand;
+									bool runRightAttack = useRightHand;
+									TargetHand effectiveHand = pending.hand;
+									if (useBothHands && (!canUseLeftAttack || !canUseRightAttack)) {
+										if (preferLeftPrimary && canUseLeftAttack) {
+											runLeftAttack = true;
+											runRightAttack = false;
+											effectiveHand = TargetHand::Left;
+											logger::warn("[SpellPipe] both-hand requested but right binding unresolved, keeping preferred LEFT hand");
+										} else if (!preferLeftPrimary && canUseRightAttack) {
+											runLeftAttack = false;
+											runRightAttack = true;
+											effectiveHand = TargetHand::Right;
+											logger::warn("[SpellPipe] both-hand requested but left binding unresolved, keeping preferred RIGHT hand");
+										} else if (canUseRightAttack) {
+											runLeftAttack = false;
+											runRightAttack = true;
+											effectiveHand = TargetHand::Right;
+											logger::warn("[SpellPipe] both-hand requested but left binding unresolved, falling back to right hand only");
+										} else if (canUseLeftAttack) {
+											runLeftAttack = true;
+											runRightAttack = false;
+											effectiveHand = TargetHand::Left;
+											logger::warn("[SpellPipe] both-hand requested but right binding unresolved, falling back to left hand only");
+										}
+									}
+
+									if ((!runLeftAttack && !runRightAttack) ||
+										(runLeftAttack && !canUseLeftAttack) ||
+										(runRightAttack && !canUseRightAttack)) {
+										logger::warn("[SpellPipe] activate task failed: could not resolve attack binding hand={} leftResolved={} rightResolved={}",
+											GetTargetHandName(pending.hand),
+											canUseLeftAttack ? 1 : 0,
+											canUseRightAttack ? 1 : 0);
+										_pendingSpellActivation.reset();
+									} else {
+										auto sendAttackDown = [&](bool useLeftAttack, RE::INPUT_DEVICE device, std::uint32_t idCode, const char* tag) {
+											const auto& attackEvent = useLeftAttack ? userEvents->leftAttack : userEvents->rightAttack;
+											auto* downEvent = RE::ButtonEvent::Create(device, attackEvent, idCode, 1.0f, 0.0f);
+											if (!downEvent) {
+												logger::warn("[SpellPipe] activate task failed: down event alloc{}", tag ? tag : "");
+												return false;
+											}
+											controls->attackBlockHandler->ProcessButton(downEvent, &controls->data);
+											RE::free(downEvent);
+											logger::info("[SpellPipe] sent attack DOWN{} (left={} device={} idCode={})",
+												tag ? tag : "", useLeftAttack ? 1 : 0, GetInputDeviceName(device), idCode);
+											return true;
+										};
+
+										bool primaryUseLeftAttack = runLeftAttack;
+										RE::INPUT_DEVICE primaryDevice = leftDevice;
+										std::uint32_t primaryIdCode = leftIdCode;
+										bool releaseSecondAttack = false;
+										bool secondUseLeftAttack = false;
+										RE::INPUT_DEVICE secondDevice = RE::INPUT_DEVICE::kKeyboard;
+										std::uint32_t secondIdCode = 0;
+										bool releaseSecondOnCasterStart = false;
+										bool requirePrimaryCasterStart = false;
+										bool enableStartAssistTap = false;
+										bool startAssistUseLeftAttack = false;
+										RE::INPUT_DEVICE startAssistDevice = RE::INPUT_DEVICE::kKeyboard;
+										std::uint32_t startAssistIdCode = 0;
+
+										if (runLeftAttack && runRightAttack) {
+											releaseSecondAttack = true;
+											if (preferLeftPrimary) {
+												primaryUseLeftAttack = true;
+												primaryDevice = leftDevice;
+												primaryIdCode = leftIdCode;
+												secondUseLeftAttack = false;
+												secondDevice = rightDevice;
+												secondIdCode = rightIdCode;
+											} else {
+												primaryUseLeftAttack = false;
+												primaryDevice = rightDevice;
+												primaryIdCode = rightIdCode;
+												secondUseLeftAttack = true;
+												secondDevice = leftDevice;
+												secondIdCode = leftIdCode;
+											}
+											logger::info("[SpellPipe] both-hand dispatch order requested={} primary={} secondary={}",
+												GetTargetHandName(pending.requestedHand),
+												primaryUseLeftAttack ? "LEFT" : "RIGHT",
+												secondUseLeftAttack ? "LEFT" : "RIGHT");
+										} else if (runRightAttack) {
+											primaryUseLeftAttack = false;
+											primaryDevice = rightDevice;
+											primaryIdCode = rightIdCode;
+										} else {
+											primaryUseLeftAttack = true;
+											primaryDevice = leftDevice;
+											primaryIdCode = leftIdCode;
+										}
+
+										// Final guard right before dispatch: keep opposite hand clear for
+										// pre-cast 2H single-hand casts.
+										if (pending.preCastHadTwoHandedWeapon && (runLeftAttack != runRightAttack)) {
+											const bool oppositeIsLeft = runRightAttack;
+											RE::TESForm* oppositeEquippedNow = pc->GetEquippedObject(oppositeIsLeft);
+											if (oppositeEquippedNow && oppositeEquippedNow->GetFormID() == pending.formID) {
+												RE::BGSEquipSlot* oppositeSlot = oppositeIsLeft ?
+													Utils::Slot::GetLeftHandSlot() :
+													Utils::Slot::GetRightHandSlot();
+												if (oppositeSlot) {
+													Utils::Slot::CleanSlot(pc, oppositeSlot);
+													const RE::FormID oppositeAfterFinalClear =
+														(pc->GetEquippedObject(oppositeIsLeft) ?
+																pc->GetEquippedObject(oppositeIsLeft)->GetFormID() :
+																0);
+													logger::info("[SpellPipe] single-hand 2H dispatch pre-clear primary={} opposite={} before={:08X} after={:08X}",
+														primaryUseLeftAttack ? "LEFT" : "RIGHT",
+														oppositeIsLeft ? "LEFT" : "RIGHT",
+														oppositeEquippedNow->GetFormID(),
+														oppositeAfterFinalClear);
+												}
+											}
+										}
+										// Pre-cast 2H single-hand transitions:
+										// once we run single-hand isolation/bootstrap, keep strict hand intent and
+										// avoid re-arming startup dual-down (causes both-hand/glitch regressions).
+										if (pending.preCastHadTwoHandedWeapon && !releaseSecondAttack) {
+											const RE::FormID oppositeNowFormID = primaryUseLeftAttack ?
+												(pc->GetEquippedObject(false) ? pc->GetEquippedObject(false)->GetFormID() : 0) :
+												(pc->GetEquippedObject(true) ? pc->GetEquippedObject(true)->GetFormID() : 0);
+											const bool strictSingleHand2H = pending.singleHandIsolationApplied;
+											if (strictSingleHand2H) {
+												logger::info("[SpellPipe] single-hand 2H startup assist disabled (strict hand intent) primary={} oppositeNow={:08X} spell={:08X}",
+													primaryUseLeftAttack ? "LEFT" : "RIGHT",
+													oppositeNowFormID,
+													pending.formID);
+											} else {
+												const bool oppositeStillHasRequestedSpell = oppositeNowFormID == pending.formID;
+												if (primaryUseLeftAttack && hasRightAttackBinding && oppositeStillHasRequestedSpell) {
+													releaseSecondAttack = true;
+													secondUseLeftAttack = false;
+													secondDevice = rightDevice;
+													secondIdCode = rightIdCode;
+													releaseSecondOnCasterStart = false;
+												} else if (!primaryUseLeftAttack && hasLeftAttackBinding && oppositeStillHasRequestedSpell) {
+													releaseSecondAttack = true;
+													secondUseLeftAttack = true;
+													secondDevice = leftDevice;
+													secondIdCode = leftIdCode;
+													releaseSecondOnCasterStart = false;
+												}
+												if (releaseSecondAttack) {
+													requirePrimaryCasterStart = true;
+													logger::info("[SpellPipe] single-hand 2H startup dual-down armed primary={} assist={} assistDevice={} assistIdCode={}",
+														primaryUseLeftAttack ? "LEFT" : "RIGHT",
+														secondUseLeftAttack ? "LEFT" : "RIGHT",
+														GetInputDeviceName(secondDevice),
+														secondIdCode);
+												} else {
+													logger::info("[SpellPipe] single-hand 2H startup assist skipped primary={} oppositeNow={:08X} spell={:08X}",
+														primaryUseLeftAttack ? "LEFT" : "RIGHT",
+														oppositeNowFormID,
+														pending.formID);
+												}
+											}
+										}
+
+										bool downOk = true;
+										downOk = sendAttackDown(primaryUseLeftAttack, primaryDevice, primaryIdCode, "");
+										if (downOk && releaseSecondAttack) {
+											const char* secondTag = requirePrimaryCasterStart ? " (startup-assist)" :
+												(releaseSecondOnCasterStart ? " (second-early-release)" : " (second)");
+											downOk = sendAttackDown(secondUseLeftAttack, secondDevice, secondIdCode, secondTag);
+										}
+										if (!downOk) {
+											_pendingSpellActivation.reset();
+										}
+
+										if (downOk) {
+										bool restoreLeftAfterCast = false;
+										bool restoreRightAfterCast = false;
+										RE::FormID restoreLeftFormID = 0;
+										RE::FormID restoreRightFormID = 0;
+										if (pending.preCastHandsCaptured) {
+											if (runLeftAttack) {
+												// Restore previous left state even if it was empty (formID=0).
+												const RE::FormID restoreLeftCandidate = getPendingRestoreTargetFormID(true);
+												const bool leftWasAlreadyRequestedSpell =
+													!pending.restoreOverrideLeftHand &&
+													pending.preCastLeftFormID == pending.formID;
+												const bool leftRestoreMatchesRequestedSpell =
+													restoreLeftCandidate != 0 &&
+													restoreLeftCandidate == pending.formID;
+												if ((pending.restoreOverrideLeftHand || !leftWasAlreadyRequestedSpell) &&
+													!leftRestoreMatchesRequestedSpell) {
+													restoreLeftAfterCast = true;
+													restoreLeftFormID = restoreLeftCandidate;
+												}
+											}
+											if (runRightAttack) {
+												// Restore previous right state even if it was empty (formID=0).
+												const RE::FormID restoreRightCandidate = getPendingRestoreTargetFormID(false);
+												const bool rightWasAlreadyRequestedSpell =
+													!pending.restoreOverrideRightHand &&
+													pending.preCastRightFormID == pending.formID;
+												const bool rightRestoreMatchesRequestedSpell =
+													restoreRightCandidate != 0 &&
+													restoreRightCandidate == pending.formID;
+												if ((pending.restoreOverrideRightHand || !rightWasAlreadyRequestedSpell) &&
+													!rightRestoreMatchesRequestedSpell) {
+													restoreRightAfterCast = true;
+													restoreRightFormID = restoreRightCandidate;
+												}
+											}
+										}
+										// If single-hand isolation temporarily cleared the opposite hand,
+										// always restore it to its pre-isolation state after cast.
+										if (pending.singleHandIsolationApplied) {
+											if (pending.singleHandIsolationOppositeWasLeft) {
+												restoreLeftAfterCast = true;
+												restoreLeftFormID = pending.singleHandIsolationRestoreFormID;
+											} else {
+												restoreRightAfterCast = true;
+												restoreRightFormID = pending.singleHandIsolationRestoreFormID;
+											}
+											logger::info("[SpellPipe] single-hand isolation restore armed opposite={} formID={:08X}",
+												pending.singleHandIsolationOppositeWasLeft ? "LEFT" : "RIGHT",
+												pending.singleHandIsolationRestoreFormID);
+										}
+											if (restoreLeftAfterCast || restoreRightAfterCast) {
+												logger::info("[SpellPipe] post-cast restore armed left={:08X} right={:08X} hand={}",
+													restoreLeftAfterCast ? restoreLeftFormID : 0,
+													restoreRightAfterCast ? restoreRightFormID : 0,
+													GetTargetHandName(effectiveHand));
+											}
+
+											const bool holdConcentration =
+												spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration &&
+												holdSeconds > 0.0f;
+
+											if (holdConcentration) {
+												const auto primaryCastingSource = primaryUseLeftAttack ?
+													RE::MagicSystem::CastingSource::kLeftHand :
+													RE::MagicSystem::CastingSource::kRightHand;
+												Wheeler::ArmSpellHoldRelease(
+													primaryDevice,
+													primaryIdCode,
+													primaryUseLeftAttack,
+													holdSeconds,
+													false,
+													pending.formID,
+													primaryCastingSource,
+													false,
+													0.0f,
+													releaseSecondAttack,
+													secondUseLeftAttack,
+													secondDevice,
+													secondIdCode,
+													restoreLeftAfterCast,
+													restoreLeftFormID,
+													restoreRightAfterCast,
+													restoreRightFormID,
+													enableStartAssistTap,
+													startAssistUseLeftAttack,
+													startAssistDevice,
+													startAssistIdCode,
+													releaseSecondOnCasterStart,
+													requirePrimaryCasterStart);
+												Wheeler::QueueConcentrationSpellStop(pending.formID, primaryCastingSource, holdSeconds);
+												logger::info("[SpellPipe] activate task holding concentration spell formID={:08X} holdSec={:.2f} hand={}",
+													pending.formID, holdSeconds, GetTargetHandName(effectiveHand));
+											} else {
+												// Fire-and-forget spells often need the cast bar to complete before release.
+												const float chargeTime = (std::max)(0.0f, spell->GetChargeTime());
+												const bool usesChargeWindow =
+													spell->GetCastingType() == RE::MagicSystem::CastingType::kFireAndForget ||
+													spell->GetCastingType() == RE::MagicSystem::CastingType::kScroll;
+												float releaseDelay = kDirectTapReleaseMinSec;
+												float releaseSafetyBufferSec = 0.0f;
+												if (usesChargeWindow) {
+													const bool spellIsBothOnly = ResolveSpellHandRule(spell) == SpellHandRule::BothOnly;
+													if (pending.preCastHadTwoHandedWeapon &&
+														spellIsBothOnly &&
+														chargeTime >= kDirectTapRitualChargeThresholdSec) {
+														// Ritual-scale both-hand spells are sensitive when triggered from 2H unwind.
+														// Keep attack held a bit longer after charge window to avoid early release.
+														releaseSafetyBufferSec = kDirectTapRitualSafetyBufferSec;
+													}
+													releaseDelay = std::clamp(
+														(std::max)(kDirectTapReleaseMinSec, chargeTime + kDirectTapChargeBufferSec + releaseSafetyBufferSec),
+														kDirectTapReleaseMinSec,
+														kDirectTapReleaseMaxSec);
+												}
+												const auto primaryCastingSource = primaryUseLeftAttack ?
+													RE::MagicSystem::CastingSource::kLeftHand :
+													RE::MagicSystem::CastingSource::kRightHand;
+												const float chargeAwareMaxTotalSeconds = usesChargeWindow ?
+													std::clamp(
+														(std::max)(
+															kDirectTapChargeAwareMinTotalSec,
+															(std::max)(
+																releaseDelay + 1.00f,
+																chargeTime * kDirectTapChargeAwarePerChargeMultiplier +
+																	kDirectTapChargeAwareBasePaddingSec +
+																	releaseSafetyBufferSec)),
+														kDirectTapChargeAwareMinTotalSec,
+														kDirectTapChargeAwareMaxTotalSec) :
+													0.0f;
+												Wheeler::ArmSpellHoldRelease(
+													primaryDevice,
+													primaryIdCode,
+													primaryUseLeftAttack,
+													releaseDelay,
+													usesChargeWindow,
+													pending.formID,
+													primaryCastingSource,
+													usesChargeWindow,
+													chargeAwareMaxTotalSeconds,
+													releaseSecondAttack,
+													secondUseLeftAttack,
+													secondDevice,
+													secondIdCode,
+													restoreLeftAfterCast,
+													restoreLeftFormID,
+													restoreRightAfterCast,
+													restoreRightFormID,
+													enableStartAssistTap,
+													startAssistUseLeftAttack,
+													startAssistDevice,
+													startAssistIdCode,
+													releaseSecondOnCasterStart,
+													requirePrimaryCasterStart);
+												logger::info("[SpellPipe] activate task tap-cast spell formID={:08X} hand={} releaseDelay={:.2f} chargeTime={:.2f} chargeSafety={:.2f} chargeAwareMax={:.2f}",
+													pending.formID, GetTargetHandName(effectiveHand), releaseDelay, chargeTime, releaseSafetyBufferSec, chargeAwareMaxTotalSeconds);
+											}
+
+											_pendingSpellActivation.reset();
+										}
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -2078,75 +7025,89 @@ void Wheeler::ProcessPendingActions()
 					// Set toggle-release latch and failsafe timer
 					_suppressOpenUntilToggleUp = true;
 					_suppressWheelOpenUntil = ImGui::GetTime() + 2.0; // 2 second failsafe
-					
+
 					// Log book info for diagnostics
 					const char* bookName = book->GetName();
 					const bool isNote = book->IsNote();
-					
+					const bool scriptBacked = book->HasVMAD();
+					bool bookReadAllowListed = false;
+					const char* bookReadCompatReason = nullptr;
+					const bool useBookReadCompat = ShouldUseBookReadCompatOnRead(
+						book, scriptBacked, bookReadAllowListed, bookReadCompatReason);
+
 					if (MainWheelDebug::IsEnabled()) {
-						MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Exec", 
-							"formID={:08X} name='{}' isNote={} count={}", bookFormID, bookName ? bookName : "(null)", isNote, bookCount);
+						MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Exec",
+							"formID={:08X} name='{}' isNote={} script={} compatMode={} allowlisted={} compatOnRead={} reason={} count={}",
+							bookFormID, bookName ? bookName : "(null)", isNote, scriptBacked,
+							BookReadCompatModeName(Config::WheelBehavior::BookReadCompat::Mode),
+							bookReadAllowListed, useBookReadCompat,
+							bookReadCompatReason ? bookReadCompatReason : "(null)", bookCount);
 					}
-				
-					// Defer book opening to next frame using SKSE task interface
-					// This avoids timing conflicts with wheel close happening on the same frame
-					SKSE::GetTaskInterface()->AddTask([bookFormID]() {
-						RE::TESObjectBOOK* deferredBook = RE::TESForm::LookupByID<RE::TESObjectBOOK>(bookFormID);
-						if (!deferredBook) {
-							if (MainWheelDebug::IsEnabled()) {
-								MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_DeferFail", "LookupByID failed in deferred task");
-							}
-							return;
-						}
-						
-						// Get the book's description for OpenBookMenu
-						RE::BSString desc;
-						deferredBook->GetDescription(desc, nullptr);
-						
-						// Create identity rotation matrix
-						RE::NiMatrix3 rot;
-						rot.entry[0][0] = 1.0f; rot.entry[0][1] = 0.0f; rot.entry[0][2] = 0.0f;
-						rot.entry[1][0] = 0.0f; rot.entry[1][1] = 1.0f; rot.entry[1][2] = 0.0f;
-						rot.entry[2][0] = 0.0f; rot.entry[2][1] = 0.0f; rot.entry[2][2] = 1.0f;
-						
-						// Open the book using vanilla BookMenu::OpenBookMenu
-						// Signature: OpenBookMenu(description, extraList, targetRef, book, pos, rot, scale, showNotes)
-						RE::BookMenu::OpenBookMenu(desc, nullptr, nullptr, deferredBook, {0, 0, 0}, rot, 1.0f, true);
-						
-						if (MainWheelDebug::IsEnabled()) {
-							MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Issued", 
-								"OpenBookMenu called (deferred), formID={:08X}", bookFormID);
-						}
-						
-						// Schedule a second task to verify the menu opened
+					if (Config::WheelBehavior::BookReadCompat::DebugLog) {
+						logger::info(
+							"BookReadCompat: form={:08X} name='{}' script={} mode={} allowlisted={} onRead={} reason={}",
+							bookFormID,
+							bookName ? bookName : "(null)",
+							scriptBacked,
+							BookReadCompatModeName(Config::WheelBehavior::BookReadCompat::Mode),
+							bookReadAllowListed,
+							useBookReadCompat,
+							bookReadCompatReason ? bookReadCompatReason : "(null)");
+					}
+
+					if (useBookReadCompat) {
 						SKSE::GetTaskInterface()->AddTask([bookFormID]() {
-							RE::UI* deferredUI = RE::UI::GetSingleton();
-							if (deferredUI && deferredUI->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
+							RE::PlayerCharacter* deferredPC = RE::PlayerCharacter::GetSingleton();
+							RE::TESObjectBOOK* deferredBook = RE::TESForm::LookupByID<RE::TESObjectBOOK>(bookFormID);
+							if (!deferredPC || !deferredBook) {
 								if (MainWheelDebug::IsEnabled()) {
-									MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_MenuOpen", 
-										"BookMenu IS OPEN (formID={:08X})", bookFormID);
+									MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_DeferFail", "scripted OnRead failed lookup/player");
+								}
+								return;
+							}
+
+							if (DispatchTempRefOnRead(deferredPC, deferredBook)) {
+								if (MainWheelDebug::IsEnabled()) {
+									MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_OnReadIssued",
+										"TempRef OnRead dispatched, formID={:08X}", bookFormID);
 								}
 							} else {
 								if (MainWheelDebug::IsEnabled()) {
-									MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_MenuFailed", 
-										"BookMenu did NOT open (formID={:08X})", bookFormID);
+									MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_OnReadFailed",
+										"TempRef OnRead dispatch failed, falling back to BookMenu, formID={:08X}", bookFormID);
 								}
+								OpenBookMenuNow(bookFormID, deferredBook, "onread_fallback");
 							}
 						});
-					});
+					} else {
+						// Defer book opening to next frame using SKSE task interface
+						// This avoids timing conflicts with wheel close happening on the same frame
+						SKSE::GetTaskInterface()->AddTask([bookFormID]() {
+							RE::TESObjectBOOK* deferredBook = RE::TESForm::LookupByID<RE::TESObjectBOOK>(bookFormID);
+							if (!deferredBook) {
+								if (MainWheelDebug::IsEnabled()) {
+									MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_DeferFail", "LookupByID failed in deferred task");
+								}
+								return;
+							}
+
+							OpenBookMenuNow(bookFormID, deferredBook, "legacy_deferred");
+						});
+					}
 					
 					if (MainWheelDebug::IsEnabled()) {
-						MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Scheduled", 
-							"Deferred task queued, latch=ON");
+						MainWheelDebug::Log(MainWheelDebug::Category::Input, "BookRead_Scheduled",
+							"Deferred task queued, latch=ON, compatOnRead={} reason={}",
+							useBookReadCompat, bookReadCompatReason ? bookReadCompatReason : "(null)");
 					}
 				}
 			}
 		}
 	}
 
-	// Process pending shout activation - Phase 1: Start hold sequence
+	// Process pending shout activation by starting the hold sequence.
 	// When a shout is queued, we send DOWN event and start a timer.
-	// The UP event is sent after the hold duration elapses (in Phase 2 below).
+	// The UP event is sent after the hold duration elapses.
 	if (_pendingShoutFormID.has_value() && !_shoutHoldActive) {
 		const RE::FormID shoutFormID = *_pendingShoutFormID;
 		const float hoverTime = _pendingShoutHoverTime.value_or(1.0f);
@@ -2169,25 +7130,15 @@ void Wheeler::ProcessPendingActions()
 				s_shoutForcedFromFallback = false;
 				setShoutPipeState(ShoutPipeState::Idle, shoutFormID, "LookupFailed");
 			} else {
+				if (IsShoutBlockedByTransformGuard(shout, "PendingShout")) {
+					s_shoutForcedUnlockedWords.reset();
+					s_shoutForcedFromFallback = false;
+					setShoutPipeState(ShoutPipeState::Idle, shoutFormID, "TransformGuardBlocked");
+					ClearShoutPostCastRestore();
+					return;
+				}
 				logger::info("Shout: processing activation after wheel closed: {} ({:08X})", 
 					shout->GetName(), shout->GetFormID());
-				
-				// First, equip the shout so it becomes the selected power
-				RE::ActorEquipManager* aeMan = RE::ActorEquipManager::GetSingleton();
-				if (aeMan) {
-					RE::TESForm* selectedPower = pc->GetActorRuntimeData().selectedPower;
-					if (!selectedPower || selectedPower->GetFormID() != shout->GetFormID()) {
-						aeMan->EquipShout(pc, shout);
-						logger::info("Shout: equipped shout");
-						RE::TESForm* selectedPowerAfter = pc->GetActorRuntimeData().selectedPower;
-						SHOUTPIPE("AfterEquipShout formID={:08X} selectedPower={:08X}",
-							shout->GetFormID(), selectedPowerAfter ? selectedPowerAfter->GetFormID() : 0);
-					} else {
-						SHOUTPIPE("EquipShout skipped formID={:08X} selectedPower={:08X}", shout->GetFormID(), selectedPower->GetFormID());
-					}
-				} else {
-					SHOUTPIPE("EquipShout failed: no ActorEquipManager formID={:08X}", shout->GetFormID());
-				}
 				
 				// Determine word stage and hold duration based on staged hover timing
 				// Get stage thresholds from single source of truth
@@ -2227,14 +7178,24 @@ void Wheeler::ProcessPendingActions()
 						unlockState.words[2].learned ? "true" : "false", unlockState.words[2].soulUnlocked ? "true" : "false");
 
 					if (unlockState.computeState == ShoutUtils::UnlockComputeState::Pending) {
-						const bool pendingHasUsableCount = unlockedWords > 0;
-						const bool isSingleWordShout = (shout->variations[0].word != nullptr) && (shout->variations[1].word == nullptr);
+						int pendingUsableCount = unlockedWords;
+						if (pendingUsableCount <= 0 && unlockState.previousCount > 0) {
+							pendingUsableCount = unlockState.previousCount;
+						}
+						const bool pendingHasUsableCount = pendingUsableCount > 0;
+						const bool hasFirstWordSlot = (unlockState.words[0].wordID != 0) || (shout->variations[0].word != nullptr);
+						const bool hasSecondWordSlot = (unlockState.words[1].wordID != 0) || (shout->variations[1].word != nullptr);
+						const bool isSingleWordShout = hasFirstWordSlot && !hasSecondWordSlot;
 						const bool useSingleWordPendingFallback =
 							!pendingHasUsableCount &&
 							isSingleWordShout &&
 							(unlockState.learnedCountContig >= 1);
 
 						if (pendingHasUsableCount) {
+							unlockedWords = pendingUsableCount;
+							if (unlockState.finalCount <= 0 && unlockState.previousCount > 0) {
+								detectionMethod = "PendingPrevStable";
+							}
 							SHOUTPIPE("PendingImmediate formID={:08X} unlocked={} method={} reason={} prev={}",
 								shout->GetFormID(), unlockedWords, detectionMethod, failReason, unlockState.previousCount);
 						} else if (useSingleWordPendingFallback) {
@@ -2266,6 +7227,7 @@ void Wheeler::ProcessPendingActions()
 				}
 
 				if (!proceedWithCast) {
+					ClearShoutPostCastRestore();
 					return;
 				}
 
@@ -2333,13 +7295,29 @@ void Wheeler::ProcessPendingActions()
 				if (!controls || !controls->shoutHandler) {
 					logger::warn("Shout: failed to get PlayerControls or shoutHandler");
 					setShoutPipeState(ShoutPipeState::Idle, shout->GetFormID(), "NoShoutHandler");
+					ClearShoutPostCastRestore();
 				} else {
 					auto* userEvents = RE::UserEvents::GetSingleton();
 					if (!userEvents) {
 						logger::warn("Shout: failed to get UserEvents");
 						setShoutPipeState(ShoutPipeState::Idle, shout->GetFormID(), "NoUserEvents");
+						ClearShoutPostCastRestore();
 					} else {
 						const auto& shoutEvent = userEvents->shout;
+						const RE::FormID selectedVoiceFormID = GetSelectedVoiceFormID(pc);
+						if (selectedVoiceFormID != shout->GetFormID()) {
+							const bool equipped = TrySetVoiceSelection(pc, shout->GetFormID(), "ShoutTempSelect");
+							logger::info("Shout: temporary voice select previous={:08X} requested={:08X} equipped={}",
+								selectedVoiceFormID,
+								shout->GetFormID(),
+								equipped ? 1 : 0);
+							if (!equipped) {
+								logger::warn("Shout: temporary voice select failed requested={:08X}", shout->GetFormID());
+								ClearShoutPostCastRestore();
+								setShoutPipeState(ShoutPipeState::Idle, shout->GetFormID(), "TempSelectFailed");
+								return;
+							}
+						}
 						
 						logger::info("Shout: sending DOWN (device={}, idCode={}, userEvent={})",
 							static_cast<int>(device), idCode, shoutEvent.c_str());
@@ -2370,6 +7348,17 @@ void Wheeler::ProcessPendingActions()
 				}
 			}
 		}
+	}
+
+	if (_shoutPostCastRestorePending &&
+		!_pendingShoutFormID.has_value() &&
+		!s_shoutWaitUnlockActive &&
+		!_shoutHoldActive &&
+		!_shoutPostCastRestoreDelayActive) {
+		logger::info("Shout: clearing unused queued voice restore requested={:08X} previous={:08X}",
+			_shoutPostCastRestoreExpectedFormID,
+			_shoutPostCastRestoreFormID);
+		ClearShoutPostCastRestore();
 	}
 	
 	// Depleted consumables cleanup (removes alchemy items with 0 count from their slots).
@@ -2470,6 +7459,18 @@ void Wheeler::ProcessPendingActions()
 	}
 }
 
+Wheeler::MutableInventoryCompatProfile Wheeler::GetMutableInventoryCompatProfile()
+{
+	return IsEquipmentDurabilitySystemProfile() ?
+		       MutableInventoryCompatProfile::EquipmentDurabilitySystem :
+		       MutableInventoryCompatProfile::Vanilla;
+}
+
+bool Wheeler::IsEquipmentDurabilitySystemActive()
+{
+	return GetMutableInventoryCompatProfile() == MutableInventoryCompatProfile::EquipmentDurabilitySystem;
+}
+
 void Wheeler::Update(float a_deltaTime)
 {
 	InputBroker::RefreshConfigFromSettings();
@@ -2526,15 +7527,17 @@ void Wheeler::Update(float a_deltaTime)
 						Config::OffsetSizingToViewport();
 						Config::OffsetAmmoWheelSizingToViewport();
 						MainWheelDebug::LogRateLimited(MainWheelDebug::Category::Config, "ini_reload",
-							"Reloaded wheelBehavior.ini (InstantSpell={}, InstantPowers={}, InstantTransformations={}, Cooldowns.ContentDimAlpha={:.2f}, Cooldowns.SelectedIndicatorEnabled={}, Sounds.EnableSounds={})",
+							"Reloaded wheelBehavior.ini (InstantSpell={}, DirectCast={}, InstantPowers={}, InstantTransformations={}, Cooldowns.ContentDimAlpha={:.2f}, Cooldowns.SelectedIndicatorEnabled={}, Sounds.EnableSounds={})",
 							Config::WheelBehavior::InstantSpell,
+							Config::WheelBehavior::InstantSpellUseDirectCast,
 							Config::WheelBehavior::InstantPowers,
 							Config::WheelBehavior::InstantTransformations,
 							Config::Cooldowns::ContentDimAlpha,
 							Config::Cooldowns::SelectedIndicatorEnabled,
 							Config::Sounds::EnableSounds);
-						logger::debug("Config: reloaded wheel behavior settings (InstantSpell={}, InstantPowers={}, InstantTransformations={}, Cooldowns.ContentDimAlpha={}, Cooldowns.SelectedIndicatorEnabled={}, Cooldowns.SelectedIndicatorTintColor={}, Sounds.EnableSounds={})",
+						logger::debug("Config: reloaded wheel behavior settings (InstantSpell={}, DirectCast={}, InstantPowers={}, InstantTransformations={}, Cooldowns.ContentDimAlpha={}, Cooldowns.SelectedIndicatorEnabled={}, Cooldowns.SelectedIndicatorTintColor={}, Sounds.EnableSounds={})",
 							Config::WheelBehavior::InstantSpell,
+							Config::WheelBehavior::InstantSpellUseDirectCast,
 							Config::WheelBehavior::InstantPowers,
 							Config::WheelBehavior::InstantTransformations,
 							Config::Cooldowns::ContentDimAlpha,
@@ -2550,8 +7553,6 @@ void Wheeler::Update(float a_deltaTime)
 	UpdateHandMemory();
 	TransformWheelManager::Update();
 
-	std::shared_lock<std::shared_mutex> lock(_wheelDataLock);
-	using namespace Config::Styling::Wheel;
 	if (!RE::PlayerCharacter::GetSingleton() || !RE::PlayerCharacter::GetSingleton()->Is3DLoaded()) {
 		return;
 	}
@@ -2559,6 +7560,15 @@ void Wheeler::Update(float a_deltaTime)
 	auto ui = RE::UI::GetSingleton();
 	if (!ui) {
 		return;
+	}
+
+	ActionHotkeysBridge::Update();
+	OStimIntegration::Update();
+
+	std::shared_lock<std::shared_mutex> lock(_wheelDataLock);
+	using namespace Config::Styling::Wheel;
+	if (_state == WheelState::KClosed || !_editMode) {
+		DisableEditModeGameplayInputBlock();
 	}
 
 	// Check for resolution change and recalculate sizing if needed
@@ -2583,7 +7593,29 @@ void Wheeler::Update(float a_deltaTime)
 
 	// Update Ammo Wheel (runs independently of main wheel)
 	if (_ammoWheel) {
-		_ammoWheel->Update(a_deltaTime);
+		if (TransformWheelManager::IsLichActive()) {
+			if (_ammoWheel->IsOpen()) {
+				_ammoWheel->HardClose();
+				InputBroker::SyncWheelerActiveOwner(IsWheelerOpen(), IsAmmoWheelOpen());
+				logger::info("AmmoWheel: hard-block force-close due active Lich form");
+			}
+		} else {
+			_ammoWheel->Update(a_deltaTime);
+		}
+	}
+
+	// Keep mount momentum continuous while timeslow is active and briefly after release.
+	if (_wheelerRestoreMountedVelocityOnClose) {
+		const double now = ImGui::GetTime();
+		const bool assistActive = _wheelerModifiedTimeScale || (now < _wheelerMountedMomentumAssistUntil);
+		if (assistActive) {
+			Utils::Player::TryRestoreMountedVelocity(
+				_wheelerMountedVelocityMountFormID,
+				_wheelerMountedVelocitySnapshot,
+				true);
+		} else {
+			ResetMountedVelocityRestoreState();
+		}
 	}
 
 	if (_state == WheelState::KClosed) {                  // should close
@@ -2669,7 +7701,10 @@ void Wheeler::Update(float a_deltaTime)
 			exitEditMode();
 		}
 	}
-	const bool wantGameplayBlock = (_state != WheelState::KClosed) && _editMode;
+	const bool wantGameplayBlock =
+		Config::Control::Wheel::BlockGameInputInEditMode &&
+		(_state != WheelState::KClosed) &&
+		_editMode;
 	if (wantGameplayBlock) {
 		EnableEditModeGameplayInputBlock();
 	} else {
@@ -2726,7 +7761,21 @@ void Wheeler::Update(float a_deltaTime)
 			wheelCenter = ClampMainWheelCenter(wheelCenter, Config::Styling::Wheel::OuterCircleRadius, safePad, layoutState, nullptr);
 		}
 
-		RE::TESObjectREFR::InventoryItemMap inv = RE::PlayerCharacter::GetSingleton()->GetInventory();
+		auto* pc = RE::PlayerCharacter::GetSingleton();
+		InventorySnapshotCache::Stats inventoryStats{};
+		RE::TESObjectREFR::InventoryItemMap& inv = g_mainWheelInventorySnapshot.Get(
+			pc,
+			true,
+			kMainWheelInventorySnapshotIntervalSeconds,
+			&inventoryStats);
+		if (inventoryStats.shouldLog) {
+			MainWheelDebug::Log(
+				MainWheelDebug::Category::Perf,
+				"[Perf] MainWheel InventorySnapshot refresh ms={:.2f} interval={:.2f} countThisSecond={}",
+				inventoryStats.lastRefreshMs,
+				inventoryStats.refreshIntervalSeconds,
+				inventoryStats.refreshCountThisWindow);
+		}
 
 		float cursorAngle = atan2f(_cursorPos.y, _cursorPos.x);  // where the cursor is pointing to
 
@@ -2927,17 +7976,8 @@ void Wheeler::Update(float a_deltaTime)
 					_lastHoveredEntry = hoveredEntry;
 					_hoveredEntryTime = (!gateHoverTime && hoveredEntry >= 0) ? a_deltaTime : 0.f;
 					
-					// Reset confirm hold if entry changed while holding
-					if (_confirmHeld && hoveredEntry != _confirmHoldEntryIdx) {
-						_confirmHeld = false;
-						_confirmHoldSeconds = 0.f;
-						_confirmHoldEntryIdx = -1;
-					}
-					if (_secondaryConfirmHeld && hoveredEntry != _secondaryConfirmHoldEntryIdx) {
-						_secondaryConfirmHeld = false;
-						_secondaryConfirmHoldSeconds = 0.f;
-						_secondaryConfirmHoldEntryIdx = -1;
-					}
+					// Keep hold latched until explicit ConfirmUp/CloseWheeler reset.
+					// Hover jitter or brief center hits must not silently drop hold state.
 					// Reset instant attempt state on entry change
 					if (_instantEntryIdx != hoveredEntry) {
 						if (_instantAttemptActive) {
@@ -2963,10 +8003,9 @@ void Wheeler::Update(float a_deltaTime)
 					if (std::shared_ptr<WheelItemShout> shoutItem = std::dynamic_pointer_cast<WheelItemShout>(hoveredItem)) {
 						RE::TESShout* shout = shoutItem->GetShout();
 						if (shout) {
-							// Respect Per-Type RTU setting for shout sounds
-							// If RTU:Shout is OFF, sounds should only advance while holding
-							const bool isRTU = Config::WheelBehavior::ReleaseToUse && Config::WheelBehavior::RTUShout;
-							if (isRTU) {
+							// Respect both RTU:Shout and the RTU auto-instant shout toggle.
+							// If auto RTU shout casting is disabled, stage sounds only advance while holding.
+							if (IsRTUAutoInstantShoutEnabled()) {
 								// RTU mode: use hover time
 								UpdateShoutStageSounds(_hoveredEntryTime, shout->GetFormID());
 							} else {
@@ -3020,8 +8059,7 @@ void Wheeler::Update(float a_deltaTime)
 								const float safetyThreshold = Config::WheelBehavior::HoldToCastSafetyThresholdMs / 1000.0f;
 								const float kInstantSpellThreshold = (std::max)(safetyThreshold, configThreshold);
 
-								// Respect Per-Type RTU setting for instant activation logic.
-								const bool isRTU = Config::WheelBehavior::ReleaseToUse && Config::WheelBehavior::RTUSpell;
+								const bool isRTU = IsRTUAutoInstantSpellEnabled(spell, isInTransformForIndicator);
 
 								// Determine elapsed time and effective threshold based on input mode.
 								float elapsedSec = 0.0f;
@@ -3041,10 +8079,34 @@ void Wheeler::Update(float a_deltaTime)
 
 								// Update attempt state.
 								if (elapsedSec > 0.0f) {
+									TargetHand indicatorHand = TargetHand::Right;
+									if (isRTU) {
+										indicatorHand = ResolveTargetHandRTU(
+											hoveredEntry,
+											instantHoveredItem,
+											ReleaseAction::CastSpell,
+											false);
+									} else {
+										indicatorHand = _confirmHeld ? TargetHand::Right : TargetHand::Left;
+										if (_confirmHeld &&
+											_secondaryConfirmHeld &&
+											Config::WheelBehavior::InstantSpellUseDirectCast) {
+											indicatorHand = TargetHand::Both;
+										}
+									}
+									if (Config::WheelBehavior::InstantSpellUseDirectCast) {
+										indicatorHand = ResolveDirectCastHandForSpell(
+											spell,
+											indicatorHand,
+											isRTU ? "IndicatorRTU" : "IndicatorHold",
+											hoveredEntry,
+											false);
+									}
 									_instantAttemptActive = true;
 									_instantEntryIdx = hoveredEntry;
 									_instantElapsedSec = elapsedSec;
 									_instantReady = (elapsedSec >= thresholdSec);
+									_instantTargetHand = indicatorHand;
 
 									// State-change logging (no frame spam).
 									const int progressBucket = static_cast<int>(elapsedSec / 0.25f);
@@ -3086,17 +8148,7 @@ void Wheeler::Update(float a_deltaTime)
 				_hoveredEntryTime = 0.f;
 				// Reset shout stage sounds when cursor centers
 				ResetShoutStageSounds();
-				// Reset confirm hold if cursor moved to center
-				if (_confirmHeld) {
-					_confirmHeld = false;
-					_confirmHoldSeconds = 0.f;
-					_confirmHoldEntryIdx = -1;
-				}
-				if (_secondaryConfirmHeld) {
-					_secondaryConfirmHeld = false;
-					_secondaryConfirmHoldSeconds = 0.f;
-					_secondaryConfirmHoldEntryIdx = -1;
-				}
+				// Do not clear hold state on transient center hits; release/close owns reset.
 			}
 			
 			// Update confirm hold duration if held
@@ -3153,6 +8205,13 @@ void Wheeler::Update(float a_deltaTime)
 									Config::Styling::Wheel::WheelIndicatorInactiveColor,
 					10,
 					drawArgs);
+			}
+		}
+
+		if (_editMode) {
+			DrawEditModeNavigationText(drawArgs);
+			if (_editModeHintsVisible) {
+				DrawEditModeHintsOverlay(drawArgs, IsLastInputGamepad());
 			}
 		}
 
@@ -3273,6 +8332,7 @@ void Wheeler::Clear()
 {
 	std::unique_lock<std::shared_mutex> lock(_wheelDataLock);
 	InputBroker::ClearActiveOwner(InputBroker::kWheelerRefinedPluginId);
+	WheelerAPI::ClearManagedWheels();
 	if (_state != WheelState::KClosed) {
 		CloseWheeler();  // force close menu, since we're loading items
 	}
@@ -3284,7 +8344,19 @@ void Wheeler::Clear()
 		wheel->Clear();
 	}
 	_wheels.clear();
+	_activeWheelIdx = -1;
+	_lastHoveredEntry = -1;
+	_hoveredEntryTime = 0.0f;
+	_lastHoveredEntryByWheel.clear();
+	_pendingExternalHotkeyDispatch.reset();
+	_lastExternalHotkeyDispatchTime = 0.0;
+	_lastExternalHotkeyDispatchScanCode = 0;
+	_lastExternalHotkeyDispatchModifier = 0;
+	ResetActionHotkeysBridgeCloseAssist();
 	TransformWheelManager::Reset();
+	ActionHotkeysBridge::Reset();
+	ActionHotkeysBridge::RequestRefresh(true);
+	OStimIntegration::Reset();
 }
 
 // ========== Ammo Wheel Methods ==========
@@ -3373,6 +8445,16 @@ void Wheeler::ToggleAmmoWheel()
 {
 	// Don't allow ammo wheel if main wheel is open
 	if (_state != WheelState::KClosed) {
+		return;
+	}
+
+	// Hard-block ammo wheel while Lich form is active.
+	if (TransformWheelManager::IsLichActive()) {
+		if (_ammoWheel && _ammoWheel->IsOpen()) {
+			_ammoWheel->HardClose();
+			InputBroker::SyncWheelerActiveOwner(IsWheelerOpen(), IsAmmoWheelOpen());
+		}
+		logger::info("AmmoWheel: toggle blocked due active Lich form");
 		return;
 	}
 
@@ -3573,10 +8655,10 @@ void Wheeler::LogMainWheelInputDecision(InputDecision decision, InputConsumer co
 	_mainWheelLastInput.valid = false;
 }
 
-bool Wheeler::HandleAmmoWheelMouseButton(int button, bool pressed)
+bool Wheeler::HandleAmmoWheelMouseButton(int button, bool pressed, bool fromGamepad)
 {
 	if (_ammoWheel && _ammoWheel->IsOpen()) {
-		return _ammoWheel->HandleMouseButton(button, pressed);
+		return _ammoWheel->HandleMouseButton(button, pressed, fromGamepad);
 	}
 	return false;
 }
@@ -3586,6 +8668,14 @@ void Wheeler::NotifyAmmoWheelConfigChanged()
 	if (_ammoWheel) {
 		_ammoWheel->OnConfigChanged();
 		logger::info("Wheeler: AmmoWheel config reloaded and layout recalculated");
+	}
+}
+
+void Wheeler::RefreshAmmoWheelListIfOpen()
+{
+	if (_ammoWheel && _ammoWheel->IsOpen()) {
+		_ammoWheel->RefreshAmmoList();
+		logger::info("Wheeler: AmmoWheel list refreshed (sorting/filtering change)");
 	}
 }
 
@@ -3703,6 +8793,15 @@ void Wheeler::TryOpenWheeler()
 		// Toggle released or failsafe expired - clear latch
 		_suppressOpenUntilToggleUp = false;
 	}
+
+	// Keep wheel closed while direct-cast spell pipeline is still arming/holding.
+	if (_pendingSpellActivation.has_value() || _spellHoldActive) {
+		MainWheelDebug::Log(MainWheelDebug::Category::OpenClose,
+			"TryOpen denied: spell pipeline active (pending={}, holdActive={})",
+			_pendingSpellActivation.has_value() ? 1 : 0,
+			_spellHoldActive ? 1 : 0);
+		return;
+	}
 	// here we straight up open the wheel, and set state to opening if we have a fade time.
 	// this is because for the fade to start showing the wheel has to be actually fully opened,
 	// but to track the state we give it a "opening" state.
@@ -3756,6 +8855,7 @@ void Wheeler::TryCloseWheeler()
 		if (_wheelerModifiedTimeScale) {
 			Utils::Time::SGTM(_preWheelerTimeScale);
 			_wheelerModifiedTimeScale = false;
+			TryRestoreMountedVelocityAfterTimeRestore("TryCloseWheeler");
 		}
 		_state = WheelState::KClosing;  // set state to closing, will be closed once time out
 		_closeTimer = 0;
@@ -3792,6 +8892,54 @@ void Wheeler::OpenWheeler()
 			logger::info("TransformWheels: open guard restored active wheel to {}", fallbackIdx);
 		}
 	}
+	if (ActionHotkeysBridge::IsBridgeWheelIndex(_activeWheelIdx)) {
+		int fallbackIdx = 0;
+		bool foundFallback = false;
+		if (auto previous = ActionHotkeysBridge::GetPreviousWheelIndex();
+			previous && *previous >= 0 && *previous < static_cast<int>(_wheels.size()) &&
+			!ActionHotkeysBridge::IsBridgeWheelIndex(*previous) &&
+			!TransformWheelManager::IsTransformWheelIndex(*previous) &&
+			!WheelerAPI::IsManagedWheelIndex(*previous)) {
+			fallbackIdx = *previous;
+			foundFallback = true;
+		}
+		if (!foundFallback) {
+			for (int i = 0; i < static_cast<int>(_wheels.size()); ++i) {
+				if (ActionHotkeysBridge::IsBridgeWheelIndex(i) ||
+					TransformWheelManager::IsTransformWheelIndex(i) ||
+					WheelerAPI::IsManagedWheelIndex(i)) {
+					continue;
+				}
+				fallbackIdx = i;
+				foundFallback = true;
+				break;
+			}
+		}
+		if (foundFallback) {
+			SetActiveWheelIndex(fallbackIdx);
+			if (Config::ActionHotkeysBridge::DebugLog) {
+				logger::info("ActionHotkeysBridge: open guard restored active wheel to {}", fallbackIdx);
+			}
+		}
+	}
+	if (OStimIntegration::IsManagedWheelIndex(_activeWheelIdx) &&
+		!OStimIntegration::IsSceneActive()) {
+		int fallbackIdx = 0;
+		bool foundFallback = false;
+		for (int i = 0; i < static_cast<int>(_wheels.size()); ++i) {
+			if (ActionHotkeysBridge::IsBridgeWheelIndex(i) ||
+				TransformWheelManager::IsTransformWheelIndex(i) ||
+				WheelerAPI::IsManagedWheelIndex(i)) {
+				continue;
+			}
+			fallbackIdx = i;
+			foundFallback = true;
+			break;
+		}
+		if (foundFallback) {
+			SetActiveWheelIndex(fallbackIdx);
+		}
+	}
 	
 	// Don't open main wheel if AmmoWheel is blocking (open or opening)
 	if (_ammoWheel && _ammoWheel->IsBlockingMainWheel()) {
@@ -3804,6 +8952,17 @@ void Wheeler::OpenWheeler()
 	if (!ui) {
 		_lastOpenDecision = InputDecision::DeniedNoUI;
 		_lastOpenConsumer = InputConsumer::Other;
+		return;
+	}
+	if (!Config::Control::Wheel::EnableOpenInFavoritesMenu &&
+		ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME)) {
+		_lastOpenDecision = InputDecision::DeniedMenuBlocked;
+		_lastOpenConsumer = InputConsumer::Other;
+		if (Config::Debug::LogMenuBlockReasons) {
+			logger::info("DeniedMenuBlocked consumer={} menu={} reason=EnableOpenInFavoritesMenu_OFF",
+				GetMainWheelInputConsumerName(_lastOpenConsumer),
+				RE::FavoritesMenu::MENU_NAME);
+		}
 		return;
 	}
 	static constexpr std::array<std::string_view, 17> conflictingMenus({
@@ -3846,18 +9005,27 @@ void Wheeler::OpenWheeler()
 		}
 	}
 	
-	// Loot/Container menu handling - configurable via LootMenuOverride toggle
-	static constexpr std::array<std::string_view, 3> lootMenus({
-		RE::ContainerMenu::MENU_NAME,
-		"LootMenu",      // QuickLoot / QuickLoot RE
-		"LootMenuCF"     // QuickLoot EE (Container First)
-	});
-	for (std::string_view menuName : lootMenus) {
+	// Loot/Container menu handling - configurable via LootMenuOverride toggle.
+	// Prefer movie visibility hide/show to preserve current loot target; fallback to close/show when needed.
+	_lootMenusMovieHiddenForOverride.fill(false);
+	_lootMenusClosedForOverride.fill(false);
+	_lootMenuRestorePending = false;
+	for (std::size_t i = 0; i < kLootOverrideMenus.size(); ++i) {
+		const std::string_view menuName = kLootOverrideMenus[i];
 		if (ui->IsMenuOpen(menuName)) {
 			if (Config::WheelBehavior::LootMenuOverride) {
-				// Close loot menus when Wheeler opens
-				logger::info("MainWheel[OpenClose]: Closing {} to open Wheeler", menuName);
-				RE::UIMessageQueue::GetSingleton()->AddMessage(menuName, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+				bool hiddenByMovie = SetMenuMovieVisibility(ui, menuName, false);
+				if (hiddenByMovie) {
+					logger::info("MainWheel[OpenClose]: Hiding {} visibility to open Wheeler", menuName);
+					_lootMenusMovieHiddenForOverride[i] = true;
+				} else {
+					logger::info("MainWheel[OpenClose]: Closing {} to open Wheeler (movie hide unavailable)", menuName);
+					if (auto* queue = RE::UIMessageQueue::GetSingleton()) {
+						queue->AddMessage(menuName, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+					}
+					_lootMenusClosedForOverride[i] = true;
+				}
+				_lootMenuRestorePending = true;
 			} else {
 				// Block Wheeler when loot menus are open (original behavior)
 				_lastOpenDecision = InputDecision::DeniedMenuBlocked;
@@ -3961,22 +9129,43 @@ void Wheeler::OpenWheeler()
 		}
 		// SlowTimeScale <= 0 now means vanilla pause (kPausesGame); no SGTM.
 		const float slowScale = Config::Styling::Wheel::SlowTimeScale;
+		ResetMountedVelocityRestoreState();
 		if (slowScale <= 0.0f) {
 			_wheelerModifiedTimeScale = false;
 			OpenPauseMenu();
 			_wheelerOwnedPauseMenu = true;
 			logger::info("[TimeDilation] MainWheel pause-mode: SlowTimeScale=0 -> vanilla pause (kPausesGame)");
 		} else if (slowScale < 1.0f) {
-			const float effectiveScale = (std::max)(slowScale, 0.01f);
+			const bool mountedAtOpen = Utils::Player::IsMounted();
+			const float minSlowScale = mountedAtOpen ? kMountedMinimumSlowScale : 0.01f;
+			const float effectiveScale = (std::max)(slowScale, minSlowScale);
+			if (mountedAtOpen && slowScale < kMountedMinimumSlowScale) {
+				logger::info("[TimeDilation] MainWheel mounted slow clamp: requested={:.3f}, clamped={:.3f}",
+					slowScale, effectiveScale);
+			}
 			float currentTimeScale = Utils::Time::GGTM();
 			// Only modify timescale if it's currently at normal (1.0) - don't override Slow Time shout or other effects
 			if (currentTimeScale >= 0.99f && currentTimeScale <= 1.01f) {
 				_preWheelerTimeScale = currentTimeScale;
 				_wheelerModifiedTimeScale = true;
 				_wheelerOwnedPauseMenu = false;
+				if (Utils::Player::TryCaptureMountedVelocity(_wheelerMountedVelocitySnapshot, &_wheelerMountedVelocityMountFormID)) {
+					_wheelerRestoreMountedVelocityOnClose = true;
+					logger::info("[TimeDilation] MainWheel mounted velocity snapshot: mount={:08X}, v=({:.2f},{:.2f},{:.2f})",
+						_wheelerMountedVelocityMountFormID,
+						_wheelerMountedVelocitySnapshot.x,
+						_wheelerMountedVelocitySnapshot.y,
+						_wheelerMountedVelocitySnapshot.z);
+				}
 				Utils::Time::SGTM(effectiveScale);
 				logger::info("[TimeDilation] MainWheel apply: before={:.3f}, after={:.3f}, cached={:.3f}",
 					currentTimeScale, effectiveScale, _preWheelerTimeScale);
+				if (_wheelerRestoreMountedVelocityOnClose) {
+					Utils::Player::TryRestoreMountedVelocity(
+						_wheelerMountedVelocityMountFormID,
+						_wheelerMountedVelocitySnapshot,
+						true);
+				}
 			} else {
 				// External time effect active (e.g., Slow Time shout) - don't touch timescale
 				_wheelerModifiedTimeScale = false;
@@ -4011,6 +9200,7 @@ void Wheeler::OpenWheeler()
 		} else {
 			_gamepadOpenGraceUntil = 0.0;
 		}
+		_secondaryImmediateConsumedUntilRelease = false;
 		// Sound feedback removed for compatibility with newer CommonLibSSE-NG
 		// Notify External API of wheel open
 		WheelerAPI::NotifyWheelStateChanged(GetActiveWheelIndex(), true);
@@ -4019,6 +9209,24 @@ void Wheeler::OpenWheeler()
 
 void Wheeler::CloseWheeler()
 {
+	g_mainWheelInventorySnapshot.Invalidate();
+
+	// Cancel any in-progress hold-to-use input state when the wheel closes.
+	// ConfirmUp can be blocked by broker routing after close, which would otherwise
+	// leave stale hold timers and make shout indicators appear "stuck" on next open.
+	_confirmHeld = false;
+	_confirmHoldStartTime = 0.0f;
+	_confirmHoldSeconds = 0.0f;
+	_confirmHoldEntryIdx = -1;
+	_secondaryConfirmHeld = false;
+	_secondaryConfirmHoldStartTime = 0.0f;
+	_secondaryConfirmHoldSeconds = 0.0f;
+	_secondaryConfirmHoldEntryIdx = -1;
+	_secondaryImmediateConsumedUntilRelease = false;
+	_lastHoveredEntry = -1;
+	_hoveredEntryTime = 0.0f;
+	ResetShoutStageSounds();
+
 	if (_wheelerOwnedPauseMenu) {
 		logger::info("[TimeDilation] MainWheel restore: closing owned pause menu");
 		ClosePauseMenu();
@@ -4028,12 +9236,18 @@ void Wheeler::CloseWheeler()
 	if (_wheelerModifiedTimeScale) {
 		Utils::Time::SGTM(_preWheelerTimeScale);
 		_wheelerModifiedTimeScale = false;
+		TryRestoreMountedVelocityAfterTimeRestore("CloseWheeler");
 	}
 
 	DisableEditModeGameplayInputBlock();
 	
 	if (!RE::PlayerCharacter::GetSingleton() || !RE::PlayerCharacter::GetSingleton()->Is3DLoaded()) {
 		_state = WheelState::KClosed;  // Still update state even without player
+		if (!IsAmmoWheelOpen()) {
+			InputBroker::ClearActiveOwner(InputBroker::kWheelerRefinedPluginId);
+		}
+		ActionHotkeysBridge::OnWheelClosed();
+		WheelerAPI::NotifyWheelStateChanged(GetActiveWheelIndex(), false);
 		return;
 	}
 	if (_state != WheelState::KClosed) {
@@ -4064,12 +9278,14 @@ void Wheeler::CloseWheeler()
 		_instantSuppressForEntry = false;
 		_instantElapsedSec = 0.0f;
 		_instantRtuSource = false;
+		_instantTargetHand = TargetHand::Right;
 		_gamepadOpenGraceUntil = 0.0;
 	}
 	_state = WheelState::KClosed;
 	if (!IsAmmoWheelOpen()) {
 		InputBroker::ClearActiveOwner(InputBroker::kWheelerRefinedPluginId);
 	}
+	ActionHotkeysBridge::OnWheelClosed();
 	// Notify External API of wheel close
 	WheelerAPI::NotifyWheelStateChanged(GetActiveWheelIndex(), false);
 }
@@ -4103,8 +9319,7 @@ void Wheeler::DisableEditModeGameplayInputBlock()
 
 	RE::ControlMap* controlMap = RE::ControlMap::GetSingleton();
 	if (!controlMap) {
-		_editModeGameplayInputBlocker.active = false;
-		_editModeGameplayInputBlocker.disabledByUsMask = 0;
+		// Keep state armed and retry next frame when ControlMap is available.
 		return;
 	}
 
@@ -4117,6 +9332,38 @@ void Wheeler::DisableEditModeGameplayInputBlock()
 
 	_editModeGameplayInputBlocker.active = false;
 	_editModeGameplayInputBlocker.disabledByUsMask = 0;
+}
+
+void Wheeler::ResetMountedVelocityRestoreState()
+{
+	_wheelerRestoreMountedVelocityOnClose = false;
+	_wheelerMountedVelocityMountFormID = 0;
+	_wheelerMountedVelocitySnapshot = RE::NiPoint3{ 0.0f, 0.0f, 0.0f };
+	_wheelerMountedMomentumAssistUntil = 0.0;
+}
+
+void Wheeler::TryRestoreMountedVelocityAfterTimeRestore(const char* a_reason)
+{
+	if (!_wheelerRestoreMountedVelocityOnClose) {
+		return;
+	}
+
+	const bool restored = Utils::Player::TryRestoreMountedVelocity(
+		_wheelerMountedVelocityMountFormID,
+		_wheelerMountedVelocitySnapshot,
+		true);
+
+	logger::info("[TimeDilation] MainWheel mounted velocity restore ({}): ok={}, mount={:08X}, v=({:.2f},{:.2f},{:.2f})",
+		a_reason ? a_reason : "unknown",
+		restored,
+		_wheelerMountedVelocityMountFormID,
+		_wheelerMountedVelocitySnapshot.x,
+		_wheelerMountedVelocitySnapshot.y,
+		_wheelerMountedVelocitySnapshot.z);
+
+	const double now = ImGui::GetTime();
+	_wheelerMountedMomentumAssistUntil = (std::max)(_wheelerMountedMomentumAssistUntil, now + kMountedMomentumAssistSeconds);
+	logger::info("[TimeDilation] MainWheel mounted momentum assist: duration={:.2f}s, until={:.3f}", kMountedMomentumAssistSeconds, _wheelerMountedMomentumAssistUntil);
 }
 
 void Wheeler::EnsureTimescaleRestored()
@@ -4133,6 +9380,7 @@ void Wheeler::EnsureTimescaleRestored()
 			current, _preWheelerTimeScale);
 		Utils::Time::SGTM(_preWheelerTimeScale);
 		_wheelerModifiedTimeScale = false;
+		TryRestoreMountedVelocityAfterTimeRestore("EnsureTimescaleRestored");
 	}
 	
 	// AmmoWheel timescale restore (idempotent)
@@ -4349,12 +9597,51 @@ void Wheeler::NextWheel()
 
 		const int wheelCount = static_cast<int>(_wheels.size());
 		const bool isTransformed = !TransformWheelManager::IsPlayerHuman();
+		const bool restrictToTransformWheels = TransformWheelManager::ShouldRestrictNavigationToTransformWheels();
+		const bool restrictToBridgeWheels = ActionHotkeysBridge::IsNavigationRestrictedToBridgeWheels();
 		const bool debugTransform = Config::WheelBehavior::TransformWheels::DebugLog;
 		const auto isTransformIdx = [](int idx) {
 			return TransformWheelManager::IsTransformWheelIndex(idx);
 		};
+		const auto isBridgeIdx = [&](int idx) {
+			return idx >= 0 &&
+			       idx < wheelCount &&
+			       _wheels[idx] &&
+			       ActionHotkeysBridge::IsBridgeWheelTag(_wheels[idx]->GetClientTag());
+		};
 
-		if (isTransformed) {
+		if (restrictToBridgeWheels) {
+			int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
+			if (!isBridgeIdx(startIdx)) {
+				for (int i = 0; i < wheelCount; ++i) {
+					if (isBridgeIdx(i)) {
+						startIdx = i;
+						break;
+					}
+				}
+			}
+			int nextIdx = startIdx;
+			bool found = false;
+			for (int attempts = 0; attempts < wheelCount; ++attempts) {
+				nextIdx = nextIdx + 1;
+				if (nextIdx >= wheelCount) {
+					nextIdx = 0;
+				}
+				if (isBridgeIdx(nextIdx)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found || nextIdx == _activeWheelIdx) {
+				return;
+			}
+			_activeWheelIdx = nextIdx;
+			_wheels[_activeWheelIdx]->ResetAnimation();
+			_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+			return;
+		}
+
+		if (restrictToTransformWheels) {
 			int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
 			if (!isTransformIdx(startIdx)) {
 				int firstTransform = -1;
@@ -4400,6 +9687,34 @@ void Wheeler::NextWheel()
 			return;
 		}
 
+		if (isTransformed) {
+			int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
+			int nextIdx = startIdx;
+			bool found = false;
+			for (int attempts = 0; attempts < wheelCount; ++attempts) {
+				nextIdx = nextIdx + 1;
+				if (nextIdx >= wheelCount) {
+					nextIdx = 0;
+				}
+				if (!isBridgeIdx(nextIdx)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found || nextIdx == _activeWheelIdx) {
+				return;
+			}
+			const int oldIdx = _activeWheelIdx;
+			_activeWheelIdx = nextIdx;
+			_wheels[_activeWheelIdx]->ResetAnimation();
+			_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+			if (debugTransform) {
+				logger::info("TransformWheels: NextWheel overlay {} -> {} tag='{}'",
+					oldIdx, _activeWheelIdx, _wheels[_activeWheelIdx]->GetClientTag());
+			}
+			return;
+		}
+
 		int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
 		int nextIdx = startIdx;
 		bool found = false;
@@ -4408,7 +9723,7 @@ void Wheeler::NextWheel()
 			if (nextIdx >= wheelCount) {
 				nextIdx = 0;
 			}
-			if (!isTransformIdx(nextIdx)) {
+			if (!isTransformIdx(nextIdx) && !isBridgeIdx(nextIdx)) {
 				found = true;
 				break;
 			}
@@ -4438,12 +9753,51 @@ void Wheeler::PrevWheel()
 
 		const int wheelCount = static_cast<int>(_wheels.size());
 		const bool isTransformed = !TransformWheelManager::IsPlayerHuman();
+		const bool restrictToTransformWheels = TransformWheelManager::ShouldRestrictNavigationToTransformWheels();
+		const bool restrictToBridgeWheels = ActionHotkeysBridge::IsNavigationRestrictedToBridgeWheels();
 		const bool debugTransform = Config::WheelBehavior::TransformWheels::DebugLog;
 		const auto isTransformIdx = [](int idx) {
 			return TransformWheelManager::IsTransformWheelIndex(idx);
 		};
+		const auto isBridgeIdx = [&](int idx) {
+			return idx >= 0 &&
+			       idx < wheelCount &&
+			       _wheels[idx] &&
+			       ActionHotkeysBridge::IsBridgeWheelTag(_wheels[idx]->GetClientTag());
+		};
 
-		if (isTransformed) {
+		if (restrictToBridgeWheels) {
+			int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
+			if (!isBridgeIdx(startIdx)) {
+				for (int i = 0; i < wheelCount; ++i) {
+					if (isBridgeIdx(i)) {
+						startIdx = i;
+						break;
+					}
+				}
+			}
+			int nextIdx = startIdx;
+			bool found = false;
+			for (int attempts = 0; attempts < wheelCount; ++attempts) {
+				nextIdx = nextIdx - 1;
+				if (nextIdx < 0) {
+					nextIdx = wheelCount - 1;
+				}
+				if (isBridgeIdx(nextIdx)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found || nextIdx == _activeWheelIdx) {
+				return;
+			}
+			_activeWheelIdx = nextIdx;
+			_wheels[_activeWheelIdx]->ResetAnimation();
+			_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+			return;
+		}
+
+		if (restrictToTransformWheels) {
 			int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
 			if (!isTransformIdx(startIdx)) {
 				int firstTransform = -1;
@@ -4489,6 +9843,34 @@ void Wheeler::PrevWheel()
 			return;
 		}
 
+		if (isTransformed) {
+			int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
+			int nextIdx = startIdx;
+			bool found = false;
+			for (int attempts = 0; attempts < wheelCount; ++attempts) {
+				nextIdx = nextIdx - 1;
+				if (nextIdx < 0) {
+					nextIdx = wheelCount - 1;
+				}
+				if (!isBridgeIdx(nextIdx)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found || nextIdx == _activeWheelIdx) {
+				return;
+			}
+			const int oldIdx = _activeWheelIdx;
+			_activeWheelIdx = nextIdx;
+			_wheels[_activeWheelIdx]->ResetAnimation();
+			_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+			if (debugTransform) {
+				logger::info("TransformWheels: PrevWheel overlay {} -> {} tag='{}'",
+					oldIdx, _activeWheelIdx, _wheels[_activeWheelIdx]->GetClientTag());
+			}
+			return;
+		}
+
 		int startIdx = (_activeWheelIdx >= 0 && _activeWheelIdx < wheelCount) ? _activeWheelIdx : 0;
 		int nextIdx = startIdx;
 		bool found = false;
@@ -4497,7 +9879,7 @@ void Wheeler::PrevWheel()
 			if (nextIdx < 0) {
 				nextIdx = wheelCount - 1;
 			}
-			if (!isTransformIdx(nextIdx)) {
+			if (!isTransformIdx(nextIdx) && !isBridgeIdx(nextIdx)) {
 				found = true;
 				break;
 			}
@@ -4510,6 +9892,82 @@ void Wheeler::PrevWheel()
 		_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);  // reset active entry for new wheel
 		// Sound feedback removed for compatibility with newer CommonLibSSE-NG
 	}
+}
+
+bool Wheeler::SwitchToWheelIndexForNavigation(int a_index)
+{
+	if (_state != WheelState::KOpened) {
+		return false;
+	}
+	if (a_index < 0 || a_index >= static_cast<int>(_wheels.size())) {
+		return false;
+	}
+	if (a_index == _activeWheelIdx) {
+		return true;
+	}
+
+	_cursorPos = { 0, 0 };
+	if (_activeWheelIdx >= 0 && _activeWheelIdx < static_cast<int>(_wheels.size()) && _wheels[_activeWheelIdx]) {
+		_wheels[_activeWheelIdx]->ResetAnimation();
+		_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+	}
+
+	_activeWheelIdx = a_index;
+	if (_activeWheelIdx >= 0 && _activeWheelIdx < static_cast<int>(_wheels.size()) && _wheels[_activeWheelIdx]) {
+		_wheels[_activeWheelIdx]->ResetAnimation();
+		_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+	}
+
+	return true;
+}
+
+bool Wheeler::SetWheelHoveredEntryIndex(int a_wheelIndex, int a_entryIndex, bool a_moveCursorToEntry)
+{
+	std::unique_lock<std::shared_mutex> lock(_wheelDataLock);
+	if (a_wheelIndex < 0 || a_wheelIndex >= static_cast<int>(_wheels.size())) {
+		return false;
+	}
+	if (!_wheels[a_wheelIndex]) {
+		return false;
+	}
+
+	const int entryCount = _wheels[a_wheelIndex]->GetNumEntries();
+	int clampedIndex = a_entryIndex;
+	if (entryCount <= 0) {
+		clampedIndex = -1;
+	} else {
+		clampedIndex = (std::max)(-1, (std::min)(clampedIndex, entryCount - 1));
+	}
+
+	_wheels[a_wheelIndex]->SetHoveredEntryIndex(clampedIndex);
+	if (_lastHoveredEntryByWheel.size() != _wheels.size()) {
+		_lastHoveredEntryByWheel.resize(_wheels.size(), -1);
+	}
+	_lastHoveredEntryByWheel[a_wheelIndex] = clampedIndex;
+	_hoveredEntryTime = 0.0f;
+
+	if (a_moveCursorToEntry && _state == WheelState::KOpened && a_wheelIndex == _activeWheelIdx) {
+		if (clampedIndex >= 0 && entryCount > 0) {
+			const float angle = GetEntryCenterAngleRad(clampedIndex, entryCount);
+			const float cursorRadius = getCursorRadiusMax();
+			_cursorPos = { cosf(angle) * cursorRadius, sinf(angle) * cursorRadius };
+			_gamepadIntentActive = true;
+		} else {
+			_cursorPos = { 0.0f, 0.0f };
+		}
+	}
+
+	return true;
+}
+
+void Wheeler::RefreshActionHotkeysMirror()
+{
+	ActionHotkeysBridge::RequestRefresh(true);
+}
+
+void Wheeler::ResetActionHotkeysBridgeLayout()
+{
+	ActionHotkeysBridge::ResetPersistedLayout(true);
 }
 
 void Wheeler::PrevItemInEntry()
@@ -4636,22 +10094,24 @@ float Wheeler::GetCursorDistance()
 
 void Wheeler::ActivateHoveredEntrySecondary()
 {
-	if (_wheels.empty()) {
+	if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
 		return;
 	}
 	if (_state != WheelState::KOpened) {
 		return;
 	}
 	if (_state == WheelState::KOpened) {
+		const bool allowEditMutation = _editMode;
 		std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
 		if (activeWheel->IsEmpty()) {         // empty wheel, we can only delete in edit mode.
-			if (_editMode && _wheels.size() > 1) {  // we have more than one wheel, so it's safe to delete this one.
+			if (allowEditMutation && _wheels.size() > 1) {  // we have more than one wheel, so it's safe to delete this one.
 				DeleteCurrentWheel();
 			}
 		} else {
-			if (_editMode) {
-				// Edit mode: deletion behavior (unchanged)
-				activeWheel->ActivateHoveredEntrySecondary(_editMode);
+			if (allowEditMutation) {
+				// Legacy Wheeler edit mode keeps delete semantics; FavWheel edit mode falls through
+				// to normal activation so slot management is handled only by reorder actions.
+				activeWheel->ActivateHoveredEntrySecondary(true);
 			} else {
 				// Non-edit mode: RMB pressed
 				// RTU OFF: directly equip to left hand (vanilla behavior)
@@ -4673,8 +10133,10 @@ void Wheeler::ActivateHoveredEntrySecondary()
 					RE::FormID formId = item ? item->GetFormID() : 0;
 					logger::info("Activation: rtu=OFF, entry={}, hand=LEFT, action=equip (RMB direct), formId={:08X}",
 						hoveredIdx, formId);
-					if (ShouldNotifyHandMemory(item, ReleaseAction::Equip)) {
-						HandMemory::NotifyWheelEquipOrCast();
+					if (IsBowLikeFormID(formId)) {
+						logger::info("[HandMemoryDiag] DirectSecondaryRTUOffBowLike entry={} formId={:08X} immediateNotify=0",
+							hoveredIdx,
+							formId);
 					}
 					
 					PlaySoundByEditorID(Config::Sounds::ActivateSoundEditorID.c_str(), Config::Sounds::ActivateSoundVolume);
@@ -4692,30 +10154,36 @@ void Wheeler::ActivateHoveredEntrySecondary()
 
 void Wheeler::ActivateHoveredEntryPrimary()
 {
-	if (_wheels.empty()) {
+	if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
 		return;
 	}
 	if (_state != WheelState::KOpened) {
 		return;
 	}
 	if (_state == WheelState::KOpened) {
-		std::shared_ptr<WheelItem> hoveredItem;
-		if (!_editMode) {
+		const bool allowEditMutation = _editMode;
+		int hoveredIdx = -1;
+		RE::FormID hoveredFormID = 0;
+		if (!allowEditMutation) {
 			std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
 			if (activeWheel) {
-				const int hoveredIdx = activeWheel->GetHoveredEntryIndex();
+				hoveredIdx = activeWheel->GetHoveredEntryIndex();
 				if (hoveredIdx < 0) {
 					return;
 				}
 				if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
 					return;
 				}
-				hoveredItem = activeWheel->GetHoveredSelectedItem();
+				if (std::shared_ptr<WheelItem> hoveredItem = activeWheel->GetHoveredSelectedItem()) {
+					hoveredFormID = hoveredItem->GetFormID();
+				}
 			}
 		}
-		_wheels[_activeWheelIdx]->ActivateHoveredEntryPrimary(_editMode);
-		if (!_editMode && hoveredItem && ShouldNotifyHandMemory(hoveredItem, ReleaseAction::Equip)) {
-			HandMemory::NotifyWheelEquipOrCast();
+		_wheels[_activeWheelIdx]->ActivateHoveredEntryPrimary(allowEditMutation);
+		if (!allowEditMutation && !Config::WheelBehavior::ReleaseToUse && IsBowLikeFormID(hoveredFormID)) {
+			logger::info("[HandMemoryDiag] DirectPrimaryRTUOffBowLike entry={} formId={:08X} immediateNotify=0",
+				hoveredIdx,
+				hoveredFormID);
 		}
 		if (!_editMode && Config::WheelBehavior::CloseWheelAfterUse) {
 			// Prevent RTU activation on close from double-activating the hovered slot.
@@ -4727,7 +10195,7 @@ void Wheeler::ActivateHoveredEntryPrimary()
 
 void Wheeler::ActivateHoveredEntrySpecial()
 {
-	if (_wheels.empty()) {
+	if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
 		return;
 	}
 	if (_state == WheelState::KOpened) {
@@ -4754,26 +10222,37 @@ void Wheeler::ActivateHoveredEntrySpecial()
 
 void Wheeler::OnConfirmDown()
 {
-	if (_wheels.empty() || _state != WheelState::KOpened) {
+	if (_state != WheelState::KOpened) {
 		return;
 	}
 	
 	// In edit mode, use immediate activation (add item to wheel)
 	if (_editMode) {
+		std::unique_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+		if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "OnConfirmDown")) {
+			return;
+		}
 		_wheels[_activeWheelIdx]->ActivateHoveredEntryPrimary(true);
 		return;
 	}
 	
-	std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-	if (!activeWheel) {
-		return;
+	int hoveredIdx = -1;
+	{
+		std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+		if (!HasValidActiveWheel_NoLock()) {
+			return;
+		}
+		Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+		hoveredIdx = activeWheel->GetHoveredEntryIndex();
+		if (hoveredIdx < 0) {
+			return;
+		}
+		if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
+			return;
+		}
 	}
-	
-	const int hoveredIdx = activeWheel->GetHoveredEntryIndex();
-	if (hoveredIdx < 0) {
-		return;
-	}
-	if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
+	if (_confirmHeld) {
+		logger::info("ConfirmDown: ignored repeated hold-down while already active entry={} heldEntry={}", hoveredIdx, _confirmHoldEntryIdx);
 		return;
 	}
 	
@@ -4805,35 +10284,39 @@ void Wheeler::OnConfirmUp()
 	
 	// Reset shout stage sounds on confirm release (Hold-to-Use mode)
 	ResetShoutStageSounds();
-	
-	if (_wheels.empty() || _state != WheelState::KOpened || _editMode) {
+
+	if (_state != WheelState::KOpened || _editMode) {
 		return;
 	}
-	
-	std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-	if (!activeWheel) {
-		return;
-	}
-	
-	const int currentHoveredIdx = activeWheel->GetHoveredEntryIndex();
-	
-	// Only activate if still hovering the same entry
-	if (currentHoveredIdx != heldEntryIdx || currentHoveredIdx < 0) {
-		MainWheelDebug::Log(MainWheelDebug::Category::Input, "ConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
-		if (IsControllerDebugEnabled()) {
-			logger::info("[Controller] ConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
+
+	int currentHoveredIdx = -1;
+	std::shared_ptr<WheelItem> hoveredItem;
+	{
+		std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+		if (!HasValidActiveWheel_NoLock()) {
+			return;
 		}
-		return;
+		Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+		currentHoveredIdx = activeWheel->GetHoveredEntryIndex();
+
+		// Only activate if still hovering the same entry
+		if (currentHoveredIdx != heldEntryIdx || currentHoveredIdx < 0) {
+			MainWheelDebug::Log(MainWheelDebug::Category::Input, "ConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
+			if (IsControllerDebugEnabled()) {
+				logger::info("[Controller] ConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
+			}
+			return;
+		}
+
+		if (WheelEntry* entry = activeWheel->GetEntry(currentHoveredIdx); entry && entry->IsMissingInInventory()) {
+			return;
+		}
+		hoveredItem = activeWheel->GetHoveredSelectedItem();
+		if (!hoveredItem) {
+			return;
+		}
 	}
-	
-	if (WheelEntry* entry = activeWheel->GetEntry(currentHoveredIdx); entry && entry->IsMissingInInventory()) {
-		return;
-	}
-	std::shared_ptr<WheelItem> hoveredItem = activeWheel->GetHoveredSelectedItem();
-	if (!hoveredItem) {
-		return;
-	}
-	
+
 	if (IsControllerDebugEnabled()) {
 		logger::info("[Controller] ConfirmUp entry={} hold={:.2f}s", currentHoveredIdx, holdDuration);
 	}
@@ -4847,10 +10330,14 @@ void Wheeler::OnConfirmUp()
 	const RE::FormID formId = hoveredItem ? hoveredItem->GetFormID() : 0;
 	std::shared_ptr<WheelItemShout> shoutItem = std::dynamic_pointer_cast<WheelItemShout>(hoveredItem);
 	std::shared_ptr<WheelItemSpell> spellItem = std::dynamic_pointer_cast<WheelItemSpell>(hoveredItem);
+	RE::SpellItem* guardedSpell = spellItem ? spellItem->GetSpell() : nullptr;
+	if (guardedSpell && IsSpellBlockedByTransformGuard(guardedSpell, "HoldPrimary")) {
+		return;
+	}
 
 	// InstantShout via Hold-to-Use
 	// Threshold to distinguish Tap (Equip) vs Hold (Shout)
-	// User requested delay to prevent instant firing on quick taps
+	// Delay prevents instant firing on quick taps.
 	constexpr float kInstantShoutThreshold = 0.60f; // 600ms
 	const bool shoutReady = shoutItem && Config::WheelBehavior::InstantShout && holdDuration >= kInstantShoutThreshold;
 	if (shoutReady) {
@@ -4906,7 +10393,34 @@ void Wheeler::OnConfirmUp()
 	logger::info("ReleaseResolve[Hold]: source={} action={} entry={} formId={:08X}",
 		sourceLabel, GetReleaseActionName(resolvedAction), currentHoveredIdx, formId);
 
-	const TargetHand resolvedHand = ResolveTargetHand(currentHoveredIdx);
+	TargetHand resolvedHand = ResolveTargetHand(currentHoveredIdx);
+	const bool combineWithSecondaryHeld =
+		resolvedAction == ReleaseAction::CastSpell &&
+		spellItem &&
+		Config::WheelBehavior::InstantSpellUseDirectCast &&
+		_secondaryConfirmHeld &&
+		_secondaryConfirmHoldEntryIdx == heldEntryIdx;
+	if (combineWithSecondaryHeld) {
+		resolvedHand = TargetHand::Both;
+		_secondaryConfirmHeld = false;
+		_secondaryConfirmHoldSeconds = 0.0f;
+		_secondaryConfirmHoldEntryIdx = -1;
+		if (_handOverrideActive && _handOverrideEntryIdx == heldEntryIdx && _handOverrideLeft) {
+			_handOverrideActive = false;
+			_handOverrideEntryIdx = -1;
+			_handOverrideLeft = false;
+		}
+		logger::info("ReleaseResolve[Hold]: source={} combined simultaneous hold -> hand=BOTH (primary-first)", sourceLabel);
+	}
+	if (resolvedAction == ReleaseAction::CastSpell &&
+		spellItem &&
+		Config::WheelBehavior::InstantSpellUseDirectCast) {
+		resolvedHand = ResolveDirectCastHandForSpell(
+			spellItem->GetSpell(),
+			resolvedHand,
+			sourceLabel,
+			currentHoveredIdx);
+	}
 	logger::info("ReleaseResolve[Hold]: source={} hand={} entry={} formId={:08X}",
 		sourceLabel, GetTargetHandName(resolvedHand), currentHoveredIdx, formId);
 
@@ -4938,6 +10452,31 @@ void Wheeler::OnConfirmUp()
 				_rtuConsumedByInstant = true;
 			} else {
 				logger::info("ReleaseResolve[Hold]: power queue failed, fallback to equip entry={} formId={:08X}",
+					currentHoveredIdx, formId);
+				resolvedAction = ReleaseAction::Equip;
+			}
+		} else if (!spell) {
+			logger::info("ReleaseResolve[Hold]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
+				currentHoveredIdx, formId);
+			resolvedAction = ReleaseAction::Equip;
+		} else if (Config::WheelBehavior::InstantSpellUseDirectCast) {
+			const float concentrationHoldSeconds =
+				spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ?
+				Config::WheelBehavior::InstantSpellConcentrationMaxSeconds :
+				0.0f;
+			if (resolvedHand == TargetHand::Both) {
+				const bool queuedPrimary = QueueSpellActivation(spell->GetFormID(), TargetHand::Right, concentrationHoldSeconds);
+				const bool queuedSecondary = queuedPrimary && QueueSpellActivation(spell->GetFormID(), TargetHand::Left, concentrationHoldSeconds);
+				activated = queuedPrimary && queuedSecondary;
+			} else {
+				activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+			}
+			if (activated) {
+				logger::info("Hold-to-Use: DirectCast queued entry={} inTransform={} hand={} holdSec={:.2f}",
+					currentHoveredIdx, isInTransform, GetTargetHandName(resolvedHand), concentrationHoldSeconds);
+				_rtuConsumedByInstant = true;
+			} else {
+				logger::info("ReleaseResolve[Hold]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
@@ -4979,11 +10518,29 @@ void Wheeler::OnConfirmUp()
 			currentHoveredIdx,
 			GetTargetHandName(resolvedHand),
 			formId);
+		if (!hoveredItem || (hoveredItem->RequiresRuntimeFormValidation() && formId == 0)) {
+			logger::info(
+				"WheelDispatch: skipped weapon activation entry={} hand={} formId={:08X} reason=invalid_form",
+				currentHoveredIdx,
+				GetTargetHandName(resolvedHand),
+				formId);
+			return;
+		}
 		
-		if (useLeft) {
-			activeWheel->ActivateHoveredEntrySecondary(false);
-		} else {
-			activeWheel->ActivateHoveredEntryPrimary(false);
+		{
+			std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+			if (!HasValidActiveWheel_NoLock()) {
+				return;
+			}
+			Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+			if (activeWheel->GetHoveredEntryIndex() != currentHoveredIdx) {
+				return;
+			}
+			if (useLeft) {
+				activeWheel->ActivateHoveredEntrySecondary(false);
+			} else {
+				activeWheel->ActivateHoveredEntryPrimary(false);
+			}
 		}
 		activated = true;
 		
@@ -4997,7 +10554,7 @@ void Wheeler::OnConfirmUp()
 	
 	if (activated) {
 		if (ShouldNotifyHandMemory(hoveredItem, resolvedAction)) {
-			HandMemory::NotifyWheelEquipOrCast();
+			HandMemory::NotifyWheelEquipOrCast(hoveredItem, resolvedAction);
 		}
 		if (!_directActivatedThisOpenSession) {
 			_directActivatedThisOpenSession = true;
@@ -5020,7 +10577,7 @@ void Wheeler::OnConfirmUp()
 
 void Wheeler::OnSecondaryConfirmDown()
 {
-	if (_wheels.empty() || _state != WheelState::KOpened) {
+	if (_state != WheelState::KOpened) {
 		return;
 	}
 
@@ -5030,16 +10587,28 @@ void Wheeler::OnSecondaryConfirmDown()
 		return;
 	}
 
-	std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-	if (!activeWheel) {
-		return;
+	int hoveredIdx = -1;
+	std::shared_ptr<WheelItem> hoveredItem;
+	{
+		std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+		if (!HasValidActiveWheel_NoLock()) {
+			return;
+		}
+		Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+		hoveredIdx = activeWheel->GetHoveredEntryIndex();
+		if (hoveredIdx < 0) {
+			return;
+		}
+		if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
+			return;
+		}
+		hoveredItem = activeWheel->GetHoveredSelectedItem();
 	}
-
-	const int hoveredIdx = activeWheel->GetHoveredEntryIndex();
-	if (hoveredIdx < 0) {
-		return;
-	}
-	if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
+	if (_secondaryConfirmHeld) {
+		logger::info(
+			"SecondaryConfirmDown: ignored repeated hold-down while already active entry={} heldEntry={}",
+			hoveredIdx,
+			_secondaryConfirmHoldEntryIdx);
 		return;
 	}
 
@@ -5050,13 +10619,14 @@ void Wheeler::OnSecondaryConfirmDown()
 
 	// RTU OFF: preserve direct RMB activation behavior
 	if (!Config::WheelBehavior::ReleaseToUse) {
-		std::shared_ptr<WheelItem> hoveredItem = activeWheel->GetHoveredSelectedItem();
 		if (std::shared_ptr<WheelItemSpell> spellItem = std::dynamic_pointer_cast<WheelItemSpell>(hoveredItem)) {
 			RE::SpellItem* spell = spellItem->GetSpell();
 			const bool isInTransform = !TransformWheelManager::IsPlayerHuman();
 			const bool instantEnabled = IsInstantEnabledForSpell(spell, isInTransform);
 
-			if (instantEnabled && IsBoundWeaponSpell(spell)) {
+			// For instant-enabled spells, secondary input must enter hold/release pipeline
+			// so direct-cast can be evaluated on SecondaryConfirmUp (left-hand cast path).
+			if (instantEnabled) {
 				_secondaryConfirmHeld = true;
 				_secondaryConfirmHoldStartTime = ImGui::GetTime();
 				_secondaryConfirmHoldSeconds = 0.f;
@@ -5064,6 +10634,11 @@ void Wheeler::OnSecondaryConfirmDown()
 				return;
 			}
 		}
+		if (_secondaryImmediateConsumedUntilRelease) {
+			logger::info("SecondaryConfirmDown: ignored repeated direct secondary until release entry={}", hoveredIdx);
+			return;
+		}
+		_secondaryImmediateConsumedUntilRelease = true;
 		ActivateHoveredEntrySecondary();
 		return;
 	}
@@ -5078,6 +10653,8 @@ void Wheeler::OnSecondaryConfirmDown()
 
 void Wheeler::OnSecondaryConfirmUp()
 {
+	_secondaryImmediateConsumedUntilRelease = false;
+
 	if (!_secondaryConfirmHeld) {
 		return;
 	}
@@ -5101,32 +10678,36 @@ void Wheeler::OnSecondaryConfirmUp()
 	// Reset shout stage sounds on confirm release (Hold-to-Use mode)
 	ResetShoutStageSounds();
 
-	if (_wheels.empty() || _state != WheelState::KOpened || _editMode) {
+	if (_state != WheelState::KOpened || _editMode) {
 		return;
 	}
 
-	std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-	if (!activeWheel) {
-		return;
-	}
-
-	const int currentHoveredIdx = activeWheel->GetHoveredEntryIndex();
-
-	// Only activate if still hovering the same entry
-	if (currentHoveredIdx != heldEntryIdx || currentHoveredIdx < 0) {
-		MainWheelDebug::Log(MainWheelDebug::Category::Input, "SecondaryConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
-		if (IsControllerDebugEnabled()) {
-			logger::info("[Controller] SecondaryConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
+	int currentHoveredIdx = -1;
+	std::shared_ptr<WheelItem> hoveredItem;
+	{
+		std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+		if (!HasValidActiveWheel_NoLock()) {
+			return;
 		}
-		return;
-	}
+		Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+		currentHoveredIdx = activeWheel->GetHoveredEntryIndex();
 
-	if (WheelEntry* entry = activeWheel->GetEntry(currentHoveredIdx); entry && entry->IsMissingInInventory()) {
-		return;
-	}
-	std::shared_ptr<WheelItem> hoveredItem = activeWheel->GetHoveredSelectedItem();
-	if (!hoveredItem) {
-		return;
+		// Only activate if still hovering the same entry
+		if (currentHoveredIdx != heldEntryIdx || currentHoveredIdx < 0) {
+			MainWheelDebug::Log(MainWheelDebug::Category::Input, "SecondaryConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
+			if (IsControllerDebugEnabled()) {
+				logger::info("[Controller] SecondaryConfirmUp entry changed ({} -> {})", heldEntryIdx, currentHoveredIdx);
+			}
+			return;
+		}
+
+		if (WheelEntry* entry = activeWheel->GetEntry(currentHoveredIdx); entry && entry->IsMissingInInventory()) {
+			return;
+		}
+		hoveredItem = activeWheel->GetHoveredSelectedItem();
+		if (!hoveredItem) {
+			return;
+		}
 	}
 
 	if (IsControllerDebugEnabled()) {
@@ -5142,10 +10723,14 @@ void Wheeler::OnSecondaryConfirmUp()
 	const RE::FormID formId = hoveredItem ? hoveredItem->GetFormID() : 0;
 	std::shared_ptr<WheelItemShout> shoutItem = std::dynamic_pointer_cast<WheelItemShout>(hoveredItem);
 	std::shared_ptr<WheelItemSpell> spellItem = std::dynamic_pointer_cast<WheelItemSpell>(hoveredItem);
+	RE::SpellItem* guardedSpell = spellItem ? spellItem->GetSpell() : nullptr;
+	if (guardedSpell && IsSpellBlockedByTransformGuard(guardedSpell, "HoldSecondary")) {
+		return;
+	}
 
 	// InstantShout via Hold-to-Use
 	// Threshold to distinguish Tap (Equip) vs Hold (Shout)
-	// User requested delay to prevent instant firing on quick taps
+	// Delay prevents instant firing on quick taps.
 	constexpr float kInstantShoutThreshold = 0.60f; // 600ms
 	const bool shoutReady = shoutItem && Config::WheelBehavior::InstantShout && holdDuration >= kInstantShoutThreshold;
 	if (shoutReady) {
@@ -5201,7 +10786,30 @@ void Wheeler::OnSecondaryConfirmUp()
 	logger::info("ReleaseResolve[Hold]: source={} action={} entry={} formId={:08X}",
 		sourceLabel, GetReleaseActionName(resolvedAction), currentHoveredIdx, formId);
 
-	const TargetHand resolvedHand = TargetHand::Left;
+	// Secondary direct-cast intent is always left hand (RMB/LB path).
+	TargetHand resolvedHand = TargetHand::Left;
+	const bool combineWithPrimaryHeld =
+		resolvedAction == ReleaseAction::CastSpell &&
+		spellItem &&
+		Config::WheelBehavior::InstantSpellUseDirectCast &&
+		_confirmHeld &&
+		_confirmHoldEntryIdx == heldEntryIdx;
+	if (combineWithPrimaryHeld) {
+		resolvedHand = TargetHand::Both;
+		_confirmHeld = false;
+		_confirmHoldSeconds = 0.0f;
+		_confirmHoldEntryIdx = -1;
+		logger::info("ReleaseResolve[Hold]: source={} combined simultaneous hold -> hand=BOTH (secondary-first)", sourceLabel);
+	}
+	if (resolvedAction == ReleaseAction::CastSpell &&
+		spellItem &&
+		Config::WheelBehavior::InstantSpellUseDirectCast) {
+		resolvedHand = ResolveDirectCastHandForSpell(
+			spellItem->GetSpell(),
+			resolvedHand,
+			sourceLabel,
+			currentHoveredIdx);
+	}
 	logger::info("ReleaseResolve[Hold]: source={} hand={} entry={} formId={:08X}",
 		sourceLabel, GetTargetHandName(resolvedHand), currentHoveredIdx, formId);
 
@@ -5233,6 +10841,31 @@ void Wheeler::OnSecondaryConfirmUp()
 				_rtuConsumedByInstant = true;
 			} else {
 				logger::info("ReleaseResolve[Hold]: power queue failed, fallback to equip entry={} formId={:08X}",
+					currentHoveredIdx, formId);
+				resolvedAction = ReleaseAction::Equip;
+			}
+		} else if (!spell) {
+			logger::info("ReleaseResolve[Hold]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
+				currentHoveredIdx, formId);
+			resolvedAction = ReleaseAction::Equip;
+		} else if (Config::WheelBehavior::InstantSpellUseDirectCast) {
+			const float concentrationHoldSeconds =
+				spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ?
+				Config::WheelBehavior::InstantSpellConcentrationMaxSeconds :
+				0.0f;
+			if (resolvedHand == TargetHand::Both) {
+				const bool queuedPrimary = QueueSpellActivation(spell->GetFormID(), TargetHand::Left, concentrationHoldSeconds);
+				const bool queuedSecondary = queuedPrimary && QueueSpellActivation(spell->GetFormID(), TargetHand::Right, concentrationHoldSeconds);
+				activated = queuedPrimary && queuedSecondary;
+			} else {
+				activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+			}
+			if (activated) {
+				logger::info("Hold-to-Use: DirectCast queued entry={} inTransform={} hand={} holdSec={:.2f}",
+					currentHoveredIdx, isInTransform, GetTargetHandName(resolvedHand), concentrationHoldSeconds);
+				_rtuConsumedByInstant = true;
+			} else {
+				logger::info("ReleaseResolve[Hold]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
@@ -5273,8 +10906,26 @@ void Wheeler::OnSecondaryConfirmUp()
 			currentHoveredIdx,
 			GetTargetHandName(resolvedHand),
 			formId);
+		if (!hoveredItem || (hoveredItem->RequiresRuntimeFormValidation() && formId == 0)) {
+			logger::info(
+				"WheelDispatch: skipped weapon activation entry={} hand={} formId={:08X} reason=invalid_form",
+				currentHoveredIdx,
+				GetTargetHandName(resolvedHand),
+				formId);
+			return;
+		}
 
-		activeWheel->ActivateHoveredEntrySecondary(false);
+		{
+			std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+			if (!HasValidActiveWheel_NoLock()) {
+				return;
+			}
+			Wheel* activeWheel = _wheels[_activeWheelIdx].get();
+			if (activeWheel->GetHoveredEntryIndex() != currentHoveredIdx) {
+				return;
+			}
+			activeWheel->ActivateHoveredEntrySecondary(false);
+		}
 		activated = true;
 
 		// Diagnostic log (gated, once per activation)
@@ -5287,7 +10938,7 @@ void Wheeler::OnSecondaryConfirmUp()
 
 	if (activated) {
 		if (ShouldNotifyHandMemory(hoveredItem, resolvedAction)) {
-			HandMemory::NotifyWheelEquipOrCast();
+			HandMemory::NotifyWheelEquipOrCast(hoveredItem, resolvedAction);
 		}
 		if (!_directActivatedThisOpenSession) {
 			_directActivatedThisOpenSession = true;
@@ -5391,7 +11042,7 @@ Wheeler::TargetHand Wheeler::ResolveTargetHand(int entryIdx)
 	return TargetHand::Right;
 }
 
-Wheeler::TargetHand Wheeler::ResolveTargetHandRTU(int entryIdx, const std::shared_ptr<WheelItem>& hoveredItem, ReleaseAction resolvedAction)
+Wheeler::TargetHand Wheeler::ResolveTargetHandRTU(int entryIdx, const std::shared_ptr<WheelItem>& hoveredItem, ReleaseAction resolvedAction, bool a_logDecision)
 {
 	auto fallback = [&]() {
 		return ResolveTargetHand(entryIdx);
@@ -5399,7 +11050,7 @@ Wheeler::TargetHand Wheeler::ResolveTargetHandRTU(int entryIdx, const std::share
 
 	const RE::FormID formId = hoveredItem ? hoveredItem->GetFormID() : 0;
 	auto logDecision = [&](TargetHand chosen, const char* reason, std::uint32_t allowedMask, int leftEmpty, int rightEmpty, SmartAssignCategory category) {
-		if (!Config::WheelBehavior::RTUSmartAssignDebugLog) {
+		if (!a_logDecision || !Config::WheelBehavior::RTUSmartAssignDebugLog) {
 			return;
 		}
 		logger::info("RTU SmartAssign: entry={} formId={:08X} category={} allowedMask={} leftEmpty={} rightEmpty={} chosen={} reason={}",
@@ -5433,6 +11084,14 @@ Wheeler::TargetHand Wheeler::ResolveTargetHandRTU(int entryIdx, const std::share
 	if (resolvedAction == ReleaseAction::CastShout) {
 		TargetHand hand = fallback();
 		logDecision(hand, "cast_shout", 0, -1, -1, SmartAssignCategory::None);
+		return hand;
+	}
+	// RTU direct-cast should honor explicit hand intent (R/L override) instead of
+	// SmartAssign, which can otherwise force all casts to one side (e.g. LEFT-only mask).
+	if (resolvedAction == ReleaseAction::CastSpell &&
+		Config::WheelBehavior::InstantSpellUseDirectCast) {
+		TargetHand hand = fallback();
+		logDecision(hand, "cast_spell_direct_pipeline_fallback", 0, -1, -1, SmartAssignCategory::Spells);
 		return hand;
 	}
 	if (!hoveredItem) {
@@ -5597,7 +11256,7 @@ Wheeler::TargetHand Wheeler::ResolveTargetHandRTU(int entryIdx, const std::share
 	return chosen;
 }
 
-bool Wheeler::GetInstantSpellState(int& outEntryIdx, float& outElapsed, float& outThreshold, bool& outReady, bool& outCancelled)
+bool Wheeler::GetInstantSpellState(int& outEntryIdx, float& outElapsed, float& outThreshold, bool& outReady, bool& outCancelled, TargetHand& outHand)
 {
 	if (_state == WheelState::KClosed) {
 		return false;
@@ -5648,16 +11307,105 @@ bool Wheeler::GetInstantSpellState(int& outEntryIdx, float& outElapsed, float& o
 	} else {
 		outThreshold = fullThreshold;
 	}
-	
+
 	outReady = _instantReady;
 	outCancelled = _instantCancelled;
+	outHand = _instantTargetHand;
+	return true;
+}
+
+void Wheeler::ToggleEditModeHintsVisibility()
+{
+	if (!_editMode || _state == WheelState::KClosed || !Config::MainWheel::EditHints::Enabled) {
+		return;
+	}
+	_editModeHintsVisible = !_editModeHintsVisible;
+}
+
+bool Wheeler::HasValidActiveWheel_NoLock()
+{
+	return !_wheels.empty() &&
+	       _activeWheelIdx >= 0 &&
+	       _activeWheelIdx < static_cast<int>(_wheels.size()) &&
+	       _wheels[_activeWheelIdx] != nullptr;
+}
+
+bool Wheeler::EnsureValidActiveWheelForEdit_NoLock(std::optional<int> a_preferredIndex, const char* a_context)
+{
+	if (HasValidActiveWheel_NoLock()) {
+		return true;
+	}
+
+	const int activeBefore = _activeWheelIdx;
+	if (_wheels.empty()) {
+		_activeWheelIdx = -1;
+		return false;
+	}
+
+	auto isUsableWheel = [&](int idx) {
+		return idx >= 0 &&
+		       idx < static_cast<int>(_wheels.size()) &&
+		       _wheels[idx] != nullptr;
+	};
+
+	int sanitizedIdx = -1;
+	if (a_preferredIndex.has_value() && isUsableWheel(*a_preferredIndex)) {
+		sanitizedIdx = *a_preferredIndex;
+	} else if (isUsableWheel(0)) {
+		sanitizedIdx = 0;
+	} else {
+		for (int i = 0; i < static_cast<int>(_wheels.size()); ++i) {
+			if (_wheels[i]) {
+				sanitizedIdx = i;
+				break;
+			}
+		}
+	}
+
+	if (sanitizedIdx < 0) {
+		static double s_lastNullWheelWarnTime = 0.0;
+		const double now = ImGui::GetTime();
+		if (now - s_lastNullWheelWarnTime >= 1.0) {
+			logger::warn("Wheeler: wheels exist but no valid wheel object is available (active={}, wheels={})",
+				activeBefore,
+				_wheels.size());
+			s_lastNullWheelWarnTime = now;
+		}
+		_activeWheelIdx = -1;
+		return false;
+	}
+
+	_activeWheelIdx = sanitizedIdx;
+
+	static double s_lastSanitizeWarnTime = 0.0;
+	const double now = ImGui::GetTime();
+	if (now - s_lastSanitizeWarnTime >= 1.0) {
+		if (a_context && a_context[0] != '\0') {
+			logger::warn("Wheeler: sanitized invalid active wheel index (active={}, wheels={}) -> {} ({})",
+				activeBefore,
+				_wheels.size(),
+				sanitizedIdx,
+				a_context);
+		} else {
+			logger::warn("Wheeler: sanitized invalid active wheel index (active={}, wheels={}) -> {}",
+				activeBefore,
+				_wheels.size(),
+				sanitizedIdx);
+		}
+		s_lastSanitizeWarnTime = now;
+	}
+
 	return true;
 }
 
 void Wheeler::AddEmptyEntryToCurrentWheel()
 {
 	std::unique_lock<std::shared_mutex> lock(_wheelDataLock);
-	if (!_editMode || _state == WheelState::KClosed || _wheels.empty() || _activeWheelIdx == -1) {
+	if (!_editMode || _state == WheelState::KClosed) {
+		return;
+	}
+	// Clear/Revert can leave _activeWheelIdx stale while wheel data is rebuilt in edit mode.
+	if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "AddEmptyEntryToCurrentWheel")) {
 		return;
 	}
 	_wheels[_activeWheelIdx]->PushEmptyEntry();
@@ -5670,13 +11418,25 @@ void Wheeler::AddWheel()
 	if (!_editMode || _state == WheelState::KClosed) {
 		return;
 	}
+	const bool hadValidActive = HasValidActiveWheel_NoLock();
 	_wheels.push_back(std::make_unique<Wheel>());
+	if (!hadValidActive) {
+		_activeWheelIdx = static_cast<int>(_wheels.size()) - 1;
+		_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+	}
+	_lastHoveredEntryByWheel.resize(_wheels.size(), -1);
 }
 
 void Wheeler::PushWheel()
 {
 	std::unique_lock<std::shared_mutex> lock(_wheelDataLock);
+	const bool hadValidActive = HasValidActiveWheel_NoLock();
 	_wheels.push_back(std::make_unique<Wheel>());
+	if (!hadValidActive) {
+		_activeWheelIdx = static_cast<int>(_wheels.size()) - 1;
+		_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);
+	}
+	_lastHoveredEntryByWheel.resize(_wheels.size(), -1);
 }
 
 void Wheeler::DeleteCurrentWheel()
@@ -5685,16 +11445,27 @@ void Wheeler::DeleteCurrentWheel()
 	if (!_editMode || _state == WheelState::KClosed) {
 		return;
 	}
+	if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "DeleteCurrentWheel")) {
+		return;
+	}
 	if (_wheels.size() > 1) {
+		const int deletedIdx = _activeWheelIdx;
 		std::unique_ptr<Wheel>& toDelete = _wheels[_activeWheelIdx];
-		if (!toDelete->IsEmpty()) { // do not delete an non-empty wheel
+		if (!toDelete || !toDelete->IsEmpty()) { // do not delete an non-empty wheel
 			return;
 		}
 		_wheels.erase(_wheels.begin() + _activeWheelIdx);
-		if (_activeWheelIdx == _wheels.size() && _activeWheelIdx != 0) {  //deleted the last wheel
-			_activeWheelIdx = _wheels.size() - 1;
+		if (deletedIdx >= 0 && deletedIdx < static_cast<int>(_lastHoveredEntryByWheel.size())) {
+			_lastHoveredEntryByWheel.erase(_lastHoveredEntryByWheel.begin() + deletedIdx);
+		}
+		if (_activeWheelIdx == static_cast<int>(_wheels.size()) && _activeWheelIdx != 0) {  // deleted the last wheel
+			_activeWheelIdx = static_cast<int>(_wheels.size()) - 1;
+		}
+		if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "DeleteCurrentWheel/postErase")) {
+			return;
 		}
 		_wheels[_activeWheelIdx]->SetHoveredEntryIndex(-1);  // reset active entry for new wheel
+		_lastHoveredEntryByWheel.resize(_wheels.size(), -1);
 	}
 }
 
@@ -5704,9 +11475,10 @@ void Wheeler::MoveEntryForwardInCurrentWheel()
 	if (!_editMode || _state == WheelState::KClosed) {
 		return;
 	}
-	if (_activeWheelIdx != -1) {
-		_wheels[_activeWheelIdx]->MoveHoveredEntryForward();
+	if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "MoveEntryForwardInCurrentWheel")) {
+		return;
 	}
+	_wheels[_activeWheelIdx]->MoveHoveredEntryForward();
 }
 
 void Wheeler::MoveEntryBackInCurrentWheel()
@@ -5715,9 +11487,10 @@ void Wheeler::MoveEntryBackInCurrentWheel()
 	if (!_editMode || _state == WheelState::KClosed) {
 		return;
 	}
-	if (_activeWheelIdx != -1) {
-		_wheels[_activeWheelIdx]->MoveHoveredEntryBack();
+	if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "MoveEntryBackInCurrentWheel")) {
+		return;
 	}
+	_wheels[_activeWheelIdx]->MoveHoveredEntryBack();
 }
 
 void Wheeler::MoveWheelForward()
@@ -5726,17 +11499,31 @@ void Wheeler::MoveWheelForward()
 	if (!_editMode || _state == WheelState::KClosed) {
 		return;
 	}
+	if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "MoveWheelForward")) {
+		return;
+	}
 	if (_wheels.size() > 1) {
 		int targetIdx;
-		if (_activeWheelIdx == _wheels.size() - 1) {
+		if (_activeWheelIdx == static_cast<int>(_wheels.size()) - 1) {
 			// Move the current wheel to the very front
 			targetIdx = 0;
 			auto currentWheel = std::move(_wheels.back());
 			_wheels.pop_back();
 			_wheels.insert(_wheels.begin(), std::move(currentWheel));
+			if (_lastHoveredEntryByWheel.size() == _wheels.size() && !_lastHoveredEntryByWheel.empty()) {
+				const int currentHovered = _lastHoveredEntryByWheel.back();
+				_lastHoveredEntryByWheel.pop_back();
+				_lastHoveredEntryByWheel.insert(_lastHoveredEntryByWheel.begin(), currentHovered);
+			}
 		} else {
 			targetIdx = _activeWheelIdx + 1;
 			std::swap(_wheels[_activeWheelIdx], _wheels[targetIdx]);
+			if (_activeWheelIdx >= 0 &&
+				targetIdx >= 0 &&
+				targetIdx < static_cast<int>(_lastHoveredEntryByWheel.size()) &&
+				_activeWheelIdx < static_cast<int>(_lastHoveredEntryByWheel.size())) {
+				std::swap(_lastHoveredEntryByWheel[_activeWheelIdx], _lastHoveredEntryByWheel[targetIdx]);
+			}
 		}
 		_activeWheelIdx = targetIdx;
 	}
@@ -5748,18 +11535,32 @@ void Wheeler::MoveWheelBack()
 	if (!_editMode || _state == WheelState::KClosed) {
 		return;
 	}
+	if (!EnsureValidActiveWheelForEdit_NoLock(std::nullopt, "MoveWheelBack")) {
+		return;
+	}
 	if (_wheels.size() > 1) {
 		int targetIdx;
 		if (_activeWheelIdx == 0) {
 			// Move the current wheel to the very end
-			targetIdx = _wheels.size() - 1;
+			targetIdx = static_cast<int>(_wheels.size()) - 1;
 			auto currentWheel = std::move(_wheels.front());
 			_wheels.erase(_wheels.begin());
 			_wheels.push_back(std::move(currentWheel));
-			_activeWheelIdx = _wheels.size() - 1;
+			if (!_lastHoveredEntryByWheel.empty()) {
+				const int currentHovered = _lastHoveredEntryByWheel.front();
+				_lastHoveredEntryByWheel.erase(_lastHoveredEntryByWheel.begin());
+				_lastHoveredEntryByWheel.push_back(currentHovered);
+			}
+			_activeWheelIdx = static_cast<int>(_wheels.size()) - 1;
 		} else {
 			targetIdx = _activeWheelIdx - 1;
 			std::swap(_wheels[_activeWheelIdx], _wheels[targetIdx]);
+			if (_activeWheelIdx >= 0 &&
+				targetIdx >= 0 &&
+				targetIdx < static_cast<int>(_lastHoveredEntryByWheel.size()) &&
+				_activeWheelIdx < static_cast<int>(_lastHoveredEntryByWheel.size())) {
+				std::swap(_lastHoveredEntryByWheel[_activeWheelIdx], _lastHoveredEntryByWheel[targetIdx]);
+			}
 		}
 		_activeWheelIdx = targetIdx;
 	}
@@ -5869,7 +11670,13 @@ void Wheeler::SerializeIntoJsonObj(nlohmann::json& j_wheeler)
 	if (_activeWheelIdx >= 0 &&
 		(WheelerAPI::IsManagedWheelIndex(_activeWheelIdx) ||
 			TransformWheelManager::IsTransformWheelIndex(_activeWheelIdx))) {
-		if (auto saved = TransformWheelManager::GetSavedHumanWheelIndex(); saved.has_value()) {
+		if (ActionHotkeysBridge::IsBridgeWheelIndex(_activeWheelIdx)) {
+			if (auto previous = ActionHotkeysBridge::GetPreviousWheelIndex(); previous.has_value()) {
+				if (auto mapped = mapRuntimeToUserIndex(*previous); mapped.has_value()) {
+					activeSaveIdx = *mapped;
+				}
+			}
+		} else if (auto saved = TransformWheelManager::GetSavedHumanWheelIndex(); saved.has_value()) {
 			if (auto mapped = mapRuntimeToUserIndex(*saved); mapped.has_value()) {
 				activeSaveIdx = *mapped;
 			} else {
@@ -5924,7 +11731,8 @@ bool Wheeler::shouldBeInEditMode(RE::UI* a_ui)
 {
 	return a_ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME) 
 		|| a_ui->IsMenuOpen(RE::MagicMenu::MENU_NAME)
-		|| a_ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME);
+		|| (Config::Control::Wheel::EnableEditModeInFavoritesMenu &&
+			a_ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME));
 }
 
 void Wheeler::hideEditModeVanillaMenus(RE::UI* a_ui)
@@ -5944,7 +11752,8 @@ void Wheeler::hideEditModeVanillaMenus(RE::UI* a_ui)
 			uiMovie->SetVisible(false);
 		}
 	}
-	if (a_ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME)) {
+	if (Config::Control::Wheel::EnableEditModeInFavoritesMenu &&
+		a_ui->IsMenuOpen(RE::FavoritesMenu::MENU_NAME)) {
 		RE::GFxMovieView* uiMovie = a_ui->GetMenu<RE::FavoritesMenu>()->uiMovie.get();
 		if (uiMovie) {
 			uiMovie->SetVisible(false);
@@ -5982,6 +11791,7 @@ void Wheeler::enterEditMode()
 	RE::UI* ui = RE::UI::GetSingleton();
 	if (!ui) {
 		_editMode = true;
+		_editModeHintsVisible = true;
 		return;
 	}
 	
@@ -5992,6 +11802,7 @@ void Wheeler::enterEditMode()
 	}
 	
 	_editMode = true;
+	_editModeHintsVisible = true;
 }
 
 void Wheeler::exitEditMode()
@@ -6057,7 +11868,14 @@ void Wheeler::PruneWheelEntries_NotInInventory(PruneReason reason)
 	}
 
 	const bool logMissing = MainWheelDebug::IsCategoryEnabled(MainWheelDebug::Category::Input);
-	auto inventoryMap = pc->GetInventory();
+	RE::TESObjectREFR::InventoryItemMap inventoryMap;
+	if (!Utils::Inventory::TryGetInventorySnapshot(pc, inventoryMap, "PruneWheelEntries_NotInInventory")) {
+		if (MainWheelDebug::IsEnabled()) {
+			MainWheelDebug::Log(MainWheelDebug::Category::Input, "InventoryPrune",
+				"skipped reason={} source=unsafe_inventory_snapshot", reasonStr);
+		}
+		return;
+	}
 	auto getInventoryInfoByFormID = [&](RE::FormID formID, std::uint16_t* outUniqueID) -> int {
 		if (outUniqueID) {
 			*outUniqueID = 0;
@@ -6155,7 +11973,7 @@ void Wheeler::PruneWheelEntries_NotInInventory(PruneReason reason)
 				const int countByForm = getInventoryInfoByFormID(item->GetFormID(), &inventoryUniqueID);
 				
 				if (item->IsInventoryBacked()) {
-					inInventory = item->IsInPlayerInventory();
+					inInventory = item->IsAvailable(inventoryMap);
 					if (!inInventory && countByForm > 0) {
 						inInventory = true;
 						usedInventoryFallback = true;
@@ -6250,7 +12068,7 @@ void Wheeler::PruneWheelEntries_NotInInventory(PruneReason reason)
 					bool selectedInInventory = false;
 					std::uint16_t inventoryUniqueID = 0;
 					if (selectedItem->IsInventoryBacked()) {
-						selectedInInventory = selectedItem->IsInPlayerInventory();
+						selectedInInventory = selectedItem->IsAvailable(inventoryMap);
 						if (!selectedInInventory && Config::WheelBehavior::KeepMissing::Enabled) {
 							const int countByForm = getInventoryInfoByFormID(selectedItem->GetFormID(), &inventoryUniqueID);
 							if (countByForm > 0) {

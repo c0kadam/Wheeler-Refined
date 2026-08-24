@@ -17,6 +17,7 @@ public:
 	};
 	void ActivateItemSecondary() override;
 	void ActivateItemPrimary() override;
+	virtual const char* GetItemTypeName() const override { return ITEM_TYPE_STR; }
 	
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
 

@@ -1,4 +1,8 @@
 #pragma once
+#include <array>
+#include <string>
+#include <unordered_map>
+
 #include "imgui.h"
 
 static ImU32 C_SKYRIMGREY = IM_COL32(255, 255, 255, 100 );
@@ -15,11 +19,18 @@ namespace Config
 	#define REFERENCE_WIDTH 1920
 	#define REFERENCE_HEIGHT 1080
 
+	// Runtime config layering:
+	// - shipped defaults/factory files seed new keys for updates
+	// - live *.ini files are treated as user overrides and may be omitted from releases
+
 	void ReadStyleConfig();
 	void ReadControlConfig();
+	void ReadActionHotkeysBridgeConfig();
+	void ReadOStimIntegrationConfig();
 	void ReadAmmoWheelConfig();
 	void WriteAmmoWheelPresetOverrideIfActive();
 	bool WriteAmmoWheelKeybindOverrides();
+	bool WriteActionHotkeysBridgeLayout();
 
 	void OffsetSizingToViewport();
 	void OffsetAmmoWheelSizingToViewport();
@@ -39,6 +50,77 @@ namespace Config
 		inline float Epsilon = 0.01f;
 		inline bool LogOncePerOpen = true;
 	}
+
+	namespace I4
+	{
+		// Master toggle for InventoryInjector icon integration.
+		// Default OFF for backward compatibility.
+		inline bool Enabled = false;
+		inline bool PreferI4Icons = true;
+		// Alternative I4 resolver path.
+		// - Allows I4 attempts for non-inventory wheel items (spell/shout/power).
+		// If I4 resolve/render fails, Wheeler still falls back to its normal icon pipeline.
+		inline bool UseAlternativePath = false;
+		inline std::uint32_t CacheMaxEntries = 256;
+		inline bool DebugLog = false;
+		// Very verbose I4 pipeline trace logs (provider/resolver/renderer decisions).
+		inline bool TraceLog = false;
+		// Include cache-hit level traces (can be very noisy when TraceLog is enabled).
+		inline bool TraceCacheHits = false;
+		// 0 = MatchSlotIconSize, 1 = Fixed
+		inline std::uint32_t RenderSizePolicy = 0;
+		inline std::uint32_t FixedRenderSize = 128;
+		// Optional on-screen extraction capture path for non-default SWF icon sources.
+		inline bool ExtractionMode = false;
+		// Per-category opt-in toggles for I4 pipeline. When false, Wheeler uses its normal fallback icon chain.
+		inline bool UseForWeapons = true;
+		inline bool UseForArmor = true;
+		inline bool UseForAmmo = true;
+		inline bool UseForPotions = true;
+		inline bool UseForFood = true;
+		inline bool UseForIngredients = true;
+		inline bool UseForPoisons = true;
+		inline bool UseForBooks = true;
+		inline bool UseForScrolls = true;
+		inline bool UseForLights = true;
+		inline bool UseForMisc = true;
+		inline bool UseForSpells = true;
+		inline bool UseForShouts = true;
+		inline bool UseForPowers = true;
+		// Per-category extraction routing (only applies when ExtractionMode=true).
+		// When false for a category, renderer uses built-in I4 fallback mapping for that category.
+		inline bool ExtractForWeapons = true;
+		inline bool ExtractForArmor = true;
+		inline bool ExtractForAmmo = true;
+		inline bool ExtractForPotions = true;
+		inline bool ExtractForFood = true;
+		inline bool ExtractForIngredients = true;
+		inline bool ExtractForPoisons = true;
+		inline bool ExtractForBooks = true;
+		inline bool ExtractForScrolls = true;
+		inline bool ExtractForLights = true;
+		inline bool ExtractForMisc = true;
+		inline bool ExtractForSpells = true;
+		inline bool ExtractForShouts = true;
+		inline bool ExtractForPowers = true;
+	}
+
+	inline constexpr std::size_t kActionHotkeysBridgeMaxWheels = 8;
+
+	struct ActionHotkeysBridgeWheelSettings
+	{
+		std::uint32_t EntryCapacity = 10;
+		std::uint32_t JumpKey = 0;
+		std::uint32_t JumpKeyModifier = 0;
+	};
+
+	struct ActionHotkeysBridgeSlotPlacement
+	{
+		std::uint32_t wheelNumber = 0;
+		std::uint32_t entryIndex = 0;
+
+		bool operator==(const ActionHotkeysBridgeSlotPlacement&) const = default;
+	};
 
 	namespace MainWheel
 	{
@@ -100,6 +182,31 @@ namespace Config
 			inline bool PreferPrimitiveBackgrounds = false;
 		}
 
+		namespace EditHints
+		{
+			// Master toggle for on-screen edit mode control hints.
+			inline bool Enabled = true;
+			// 0=Auto (last input), 1=MKB, 2=Gamepad, 3=Both
+			inline std::uint32_t DisplayMode = 0;
+			// 0=Xbox glyphs, 1=PlayStation glyphs
+			inline std::uint32_t GamepadIconSet = 0;
+			inline bool ShowBackground = true;
+			inline bool ShowTitle = true;
+			inline float AnchorX = 36.0f;
+			inline float AnchorY = 140.0f;
+			inline float LabelWidth = 210.0f;
+			inline float FontSize = 18.0f;
+			inline float HeaderFontSize = 20.0f;
+			inline float IconSize = 26.0f;
+			inline float RowSpacing = 7.0f;
+			inline float KeyGap = 12.0f;
+			inline float PanelPaddingX = 12.0f;
+			inline float PanelPaddingY = 10.0f;
+			inline ImU32 TextColor = C_SKYRIMWHITE;
+			inline ImU32 HeaderColor = C_SKYRIMWHITE;
+			inline ImU32 BackgroundColor = IM_COL32(0, 0, 0, 170);
+		}
+
 		inline bool ShowHandIndicator = false;
 
 		struct HandIndicatorStyle
@@ -110,12 +217,27 @@ namespace Config
 			float Thickness = 0.0f;
 			float OffsetX = 0.0f;
 			float OffsetY = 0.0f;
+			float SecondaryOffsetX = 0.0f;
+			float SecondaryOffsetY = 0.0f;
+			float DualTopOffsetX = 0.0f;
+			float DualTopOffsetY = 0.0f;
+			float SlotLeftOffsetX = 0.0f;
+			float SlotLeftOffsetY = 0.0f;
+			float SlotRightOffsetX = 0.0f;
+			float SlotRightOffsetY = 0.0f;
+			std::string AssetPath{};
+			std::string SecondaryAssetPath{};
 		};
 
 		namespace HandIndicators
 		{
 			inline HandIndicatorStyle Left{};
 			inline HandIndicatorStyle Right{};
+			inline HandIndicatorStyle Dual{};
+			inline float RightSideOffsetX = 0.0f;
+			inline float RightSideOffsetY = 0.0f;
+			inline float DualRightSideOffsetX = 0.0f;
+			inline float DualRightSideOffsetY = 0.0f;
 		}
 
 		// Mouse hover stability settings (Main Wheel only)
@@ -202,8 +324,8 @@ namespace Config
 	}
 
 	// Wheel Behavior defaults:
-	// - On the first dMenu save of the Wheel Behavior panel, Wheeler snapshots the current wheelBehavior.ini
-	//   to a separate defaults file. The "Restore Defaults" button restores from that snapshot.
+	// - Wheeler no longer snapshots the current wheelBehavior.ini on panel save.
+	// - The "Restore Defaults" button restores directly from the shipped factory file.
 	bool StoreWheelBehaviorDefaultsIfMissing();
 	bool RestoreWheelBehaviorDefaults();
 
@@ -233,6 +355,7 @@ namespace Config
 			inline uint32_t nextWheel = 281;          // right trigger
 			inline uint32_t prevWheel = 0;    // unmapped
 			inline uint32_t toggleWheel = 280;        // left trigger
+			inline uint32_t toggleEditHints = 272;    // left stick click
 			inline uint32_t toggleWheelModifier = 0;  // optional toggle modifier
 			inline uint32_t nextItem = 269;           // DPAD right
 			inline uint32_t prevItem = 268;      // DPAD left
@@ -256,6 +379,9 @@ namespace Config
 			inline uint32_t nextWheel = 0x12;  // e
 			inline uint32_t prevWheel = 0x10;  // q
 			inline uint32_t toggleWheel = 58;  // capslock
+			inline uint32_t toggleEditHints = 35;  // h
+			inline uint32_t closeWheel = 15;  // tab
+			inline uint32_t closeWheelAlt = 1;  // esc
 			inline uint32_t toggleWheelModifier = 0;  // optional toggle modifier
 			inline uint32_t prevItem = 264;    // mouse wheel up
 			inline uint32_t nextItem = 265;    // mouse wheel down
@@ -268,6 +394,74 @@ namespace Config
 			inline uint32_t moveWheelForward = 205;   // right arrow
 			inline uint32_t moveWheelBack = 203;      // left arrow
 		}
+
+	}
+
+	namespace ActionHotkeysBridge
+	{
+		inline bool Enabled = false;
+		inline std::string SourceIniPath = R"(Data\SKSE\Plugins\ActionHotkeys.ini)";
+		inline std::string SourceSlotsIniPath = R"(Data\SKSE\Plugins\ActionSlots.ini)";
+		inline std::string SourceIconsPath = "";
+		inline bool AutoInjection = true;
+		inline std::uint32_t ManualWheelCount = 2;
+		inline bool AutoRefresh = true;
+		inline std::uint32_t RefreshDebounceMs = 500;
+		inline std::uint32_t DispatchCooldownMs = 150;
+		inline bool CloseAssistEnabled = true;
+		inline bool CloseAssistUseEsc = true;
+		inline bool CloseAssistUseGamepadB = true;
+		inline std::uint32_t CloseAssistTimeoutMs = 2000;
+		inline bool BlockConflictingWheelerHotkeys = true;
+		inline bool MirrorSecondaryActivate = true;
+		inline bool MirrorSpecialActivate = false;
+		inline bool DebugLog = false;
+	    inline std::array<ActionHotkeysBridgeWheelSettings, kActionHotkeysBridgeMaxWheels> Wheels = [] {
+			std::array<ActionHotkeysBridgeWheelSettings, kActionHotkeysBridgeMaxWheels> wheels{};
+			for (auto& wheel : wheels) {
+				wheel.EntryCapacity = 10;
+			}
+			return wheels;
+		}();
+		inline std::uint32_t ResetLayout = 0;
+		inline std::uint32_t ResetLayoutModifier = 0;
+		inline std::uint32_t ReturnToPrevious = 0;
+		inline std::uint32_t ReturnToPreviousModifier = 0;
+		inline std::uint32_t RefreshMirror = 0;
+		inline std::uint32_t RefreshMirrorModifier = 0;
+		inline std::unordered_map<std::string, ActionHotkeysBridgeSlotPlacement> PersistedLayout;
+	}
+
+	namespace OStimIntegration
+	{
+		inline bool Enabled = false;
+		inline bool AutoDetect = true;
+		inline bool CreateManagedWheel = true;
+		inline bool AutoSwitchToSceneWheel = false;
+		inline bool RestorePreviousWheelOnSceneEnd = true;
+		inline bool AllowPositionBrowsing = true;
+		inline bool ShowOnlyValidPositions = true;
+		inline bool ShowPositionNames = true;
+		inline bool ShowPositionPreviews = true;
+		inline bool RestrictRegularWheelActionsDuringScenes = false;
+		inline bool HideInvalidActions = true;
+		inline bool PreferMetadataPreviews = true;
+		inline bool UseResourcePreviewFallback = true;
+		inline bool PreferCurrentAnimationClass = true;
+		inline bool DebugLog = false;
+		inline std::uint32_t MaxPositionsPerPage = 6;
+		inline float SVGSlotScale = 1.0f;
+		inline float SVGSlotOffsetX = 0.0f;
+		inline float SVGSlotOffsetY = 0.0f;
+		inline float SVGCenterScale = 1.0f;
+		inline float SVGCenterOffsetX = 0.0f;
+		inline float SVGCenterOffsetY = 0.0f;
+		inline float DDSSlotScale = 1.0f;
+		inline float DDSSlotOffsetX = 0.0f;
+		inline float DDSSlotOffsetY = 0.0f;
+		inline float DDSCenterScale = 1.0f;
+		inline float DDSCenterOffsetX = 0.0f;
+		inline float DDSCenterOffsetY = 0.0f;
 	}
 	namespace Sound
 	{
@@ -331,6 +525,9 @@ namespace Config
 			// the the user presses shorter than this, the wheel will close on a second press.
 			inline float ToggleHoldThreshold = 0.25f;  
 
+			inline bool BlockGameInputInEditMode = true;
+			inline bool EnableOpenInFavoritesMenu = true;
+			inline bool EnableEditModeInFavoritesMenu = true;
 			inline bool HideGameUIInEditMode = true;
 		}
 
@@ -362,9 +559,50 @@ namespace Config
 			inline float Thickness = 4.0f;
 			inline ImU32 Color = IM_COL32(255, 220, 0, 200);
 			inline ImU32 BackgroundColor = IM_COL32(255, 255, 255, 60);
+			// Instant Shout SVG stage reskin placement/toggle controls (Wheeler Styles).
+			inline bool InstantShoutAnimateReveal = true;
+			inline float InstantShoutAssetScale = 1.0f;
+			inline float InstantShoutAssetOffsetX = 0.0f;
+			inline float InstantShoutAssetOffsetY = 0.0f;
+			// Per-stage transform overrides (applied on top of base shout asset offset/scale).
+			inline float InstantShoutStage1OffsetX = 0.0f;
+			inline float InstantShoutStage1OffsetY = 0.0f;
+			inline float InstantShoutStage1RotationDeg = 0.0f;
+			inline float InstantShoutStage2OffsetX = 0.0f;
+			inline float InstantShoutStage2OffsetY = 0.0f;
+			inline float InstantShoutStage2RotationDeg = 0.0f;
+			inline float InstantShoutStage3OffsetX = 0.0f;
+			inline float InstantShoutStage3OffsetY = 0.0f;
+			inline float InstantShoutStage3RotationDeg = 0.0f;
 			// Instant Spell Indicator colors (separate from activation indicator)
-			inline ImU32 InstantSpellColor = IM_COL32(255, 220, 0, 200);
-			inline ImU32 InstantSpellBackgroundColor = IM_COL32(255, 255, 255, 60);
+			inline ImU32 InstantSpellColor = 3355443455u;
+			inline ImU32 InstantSpellBackgroundColor = 1023410175u;
+			// Hybrid reskin assets for Instant Spell indicator (background/overlay SVG).
+			inline bool InstantSpellUseReskinAssets = false;
+			inline float InstantSpellAssetScale = 1.9f;
+			inline float InstantSpellAssetOffsetX = 2.0f;
+			inline float InstantSpellAssetOffsetY = 0.0f;
+			inline float InstantSpellAssetOpacity = 1.0f;
+			inline bool InstantSpellUseAtlasAnimation = true;
+			inline std::uint32_t InstantSpellAtlasCols = 8;
+			inline std::uint32_t InstantSpellAtlasRows = 8;
+			inline std::uint32_t InstantSpellAtlasFrameCount = 64;
+			inline std::string InstantSpellBackgroundAssetPath{};
+			inline std::string InstantSpellOverlayAssetPath{};
+			inline std::string InstantSpellAtlasAssetPath{};
+			inline float InstantSpellHandIndicatorScale = 3.0f;
+			inline float InstantSpellHandIndicatorOffsetX = 0.0f;
+			inline float InstantSpellHandIndicatorOffsetY = -18.0f;
+			inline float InstantSpellHandIndicatorLeftOffsetX = -105.0f;
+			inline float InstantSpellHandIndicatorLeftOffsetY = -10.0f;
+			inline float InstantSpellHandIndicatorRightOffsetX = 105.0f;
+			inline float InstantSpellHandIndicatorRightOffsetY = -10.0f;
+			inline float InstantSpellHandIndicatorBothOffsetX = 0.5f;
+			inline float InstantSpellHandIndicatorBothOffsetY = -10.0f;
+			inline float InstantSpellHandIndicatorOpacity = 1.0f;
+			inline std::string InstantSpellHandLeftAssetPath{};
+			inline std::string InstantSpellHandRightAssetPath{};
+			inline std::string InstantSpellHandBothAssetPath{};
 		}
 
 		namespace Wheel
@@ -408,7 +646,7 @@ namespace Config
 			inline float ActiveArcWidth = 7.f;
 			
 			inline bool BlurOnOpen = true;
-			inline float SlowTimeScale = .1f;
+			inline float SlowTimeScale = 0.5f;
 
 			
 			// offset of wheel center, to which everything else is relative to
@@ -449,6 +687,9 @@ namespace Config
 					inline float OffsetX = 0;
 					inline float OffsetY = 20;
 					inline float Size = 35;
+					inline bool AutoFit = true;
+					inline float MinSize = 24.0f;
+					inline float MaxWidth = 500.0f;
 				}
 
 				namespace Desc
@@ -458,6 +699,14 @@ namespace Config
 					inline float Size = 30;
 					inline float LineLength = 500.f;
 					inline float LineSpacing = 5.f;
+					inline bool AutoFit = true;
+					inline float MinSize = 18.0f;
+					inline float MaxHeight = 190.0f;
+					inline std::uint32_t MaxLines = 8;
+					inline float BottomSafeMargin = 150.0f;
+					inline bool AutoShiftUp = true;
+					inline float ShiftUpThreshold = 110.0f;
+					inline float MaxShiftUp = 32.0f;
 				}
 
 				namespace StatIcon
@@ -488,6 +737,13 @@ namespace Config
 					inline float OffsetX = 0;
 					inline float OffsetY = 10;
 					inline float Size = 30;
+					inline bool AutoFit = true;
+					inline float MinSize = 18.0f;
+					inline float MaxWidth = 0.0f;
+					inline std::uint32_t AutoWidthMinChars = 10;
+					inline float MaxHeight = 0.0f;
+					inline std::uint32_t MaxLines = 2;
+					inline float LineSpacing = 0.0f;
 				}
 
 				namespace BackgroundTexture
@@ -553,8 +809,17 @@ namespace Config
 		inline bool AutoDrawOnUse = false;
 
 		// If true, spells will be cast instantly on wheel activation (bypasses charge time; "cheaty").
-		// Only applies when ReleaseToUse and RTUSpell are enabled.
+		// Hold-to-cast inputs can still use this when RTU auto instant is disabled.
 		inline bool InstantSpell = false;
+
+		// If true, instant-cast spells use vanilla attack input pipeline after wheel close
+		// (equip in hand + synthetic attack press/release) instead of CastSpellImmediate.
+		// This preserves cast animations and vanilla timing behavior better.
+		inline bool InstantSpellUseDirectCast = false;
+
+		// If false, RTU close will not auto-trigger InstantSpell/DirectCast/InstantPowers.
+		// Users can still trigger those manually via the primary/secondary confirm hold path.
+		inline bool RTUAutoInstantSpell = true;
 
 		// If true, powers (Power/LesserPower/VoicePower) can instant-cast while human.
 		// If missing in INI, config loader falls back to InstantSpell for backward compatibility.
@@ -593,9 +858,12 @@ namespace Config
 		inline std::string TransformationAllowFormIDs;  // Forms to treat as transformations
 		inline std::string TransformationDenyFormIDs;   // Forms to NOT treat as transformations
 
-		// If true, shouts will be cast immediately on wheel activation instead of just equipping.
-		// Only applies when ReleaseToUse and RTUShout are enabled.
+		// If true, shouts will be cast immediately on activation instead of just equipping.
+		// Hold-to-cast inputs can still use this when RTU auto instant is disabled.
 		inline bool InstantShout = false;
+
+		// If false, RTU close will only equip shouts. Manual confirm hold can still instant-cast.
+		inline bool RTUAutoInstantShout = true;
 
 		// Shout word level selection thresholds (in seconds of hover time).
 		// If hover time < ShoutWord2Threshold, use 1-word shout.
@@ -635,6 +903,8 @@ namespace Config
 		// If true, any alchemy item (food/potion/poison) that reaches 0 count will be removed from its wheel slot.
 		// This prevents stale slots showing "0" after the last consumable is used.
 		inline bool ClearDepletedConsumables = true;
+		// Allow ingredients to be bound to Wheeler and used via the same game API path as consumables.
+		inline bool AllowIngredientUse = true;
 		// Allow non-scripted misc items to activate via EquipObject (unsafe by default).
 		inline bool AllowUnsafeMiscActivation = false;
 		
@@ -649,6 +919,26 @@ namespace Config
 		};
 		// Config key: [WheelBehavior] ScriptedMiscDispatchMode (default 0 = Auto)
 		inline std::uint32_t ScriptedMiscDispatchModeValue = static_cast<std::uint32_t>(ScriptedMiscDispatchMode::Auto);
+
+		// Dispatch policy for script-backed books that need inventory-style OnRead events.
+		enum class BookReadCompatMode : std::uint32_t
+		{
+			AutoScripted = 0,
+			AllowListOnly = 1,
+			Disabled = 2
+		};
+		namespace BookReadCompat
+		{
+			// Config key: [BookReadCompat] Mode
+			// 0/AutoScripted: any VMAD book uses temp-ref OnRead; allowlist always uses OnRead.
+			// 1/AllowListOnly: only this section's allowlist entries use temp-ref OnRead.
+			// 2/Disabled: all books use Wheeler's legacy deferred BookMenu path.
+			inline std::uint32_t Mode = static_cast<std::uint32_t>(BookReadCompatMode::AutoScripted);
+			inline std::string OnReadFormIDs{};
+			inline std::string OnReadPlugins = "TheArcaneTome.esp";
+			inline std::string OnReadNameTokens{};
+			inline bool DebugLog = false;
+		}
 
 		// Optional vanilla-style hand memory for restoring left/right when leaving 2H.
 		namespace HandMemory
@@ -681,6 +971,18 @@ namespace Config
 		// When false, Wheeler is blocked by these menus (original behavior).
 		inline bool LootMenuOverride = true;
 
+		// Heavy-list compatibility mode for unresolved sentinel weapons (`uniqueID == 0`).
+		// When enabled, same-hand unresolved weapon activations enforce a minimum settle/cooldown
+		// window even if the game reports an equip state change immediately.
+		// Default OFF so normal lists keep original behavior.
+		inline bool HeavyListCompatibilityMode = false;
+		// Minimum settle/cooldown window in milliseconds while HeavyListCompatibilityMode is enabled.
+		// Applies only to unresolved sentinel weapon activations.
+		inline float HeavyListCompatibilitySettleMs = 420.0f;
+		// Startup-only opt-in for the global weapon/armor inventory mutation hooks.
+		// Default OFF while the broader armor/BaseExtraList crash risk remains unresolved.
+		inline bool MutableInventoryHooks = false;
+
 		// Global scale multiplier for all main wheel sizing (1.0 = default)
 		// Applied on top of resolution scaling. Allows users to scale the entire wheel.
 		// Range: 0.5 to 2.0
@@ -706,6 +1008,97 @@ namespace Config
 			inline bool PersistGeneratedWheels = false;
 			inline bool UpdateOnlyOnChange = true;
 			inline bool DebugLog = false;
+			inline bool GenericEnabled = false;
+			inline std::string GenericStateID = "GenericTransform";
+			inline std::string GenericWheelID = "Wheel_GenericTransform";
+			inline std::string GenericRaceEditorIDContains = "";
+			inline std::string GenericRaceKeywords = "";
+			inline std::string GenericRaceFormIDs = "";
+			// Order evaluated when multiple transform detectors match.
+			// Tokens: Werewolf, VampireLord, Lich, GenericOthers.
+			inline std::string PrecedenceOrder = "Werewolf,VampireLord,Lich,GenericOthers";
+			// Private-test opt-in. When enabled, transformed navigation may leave the
+			// dedicated transform wheel, but runtime activation on base wheels remains
+			// conservatively limited to consumables.
+			inline bool WerewolfAllowBaseWheel = false;
+			inline bool VampireLordAllowBaseWheel = false;
+			// Private-test opt-in. Only affects werewolf state while a non-transform
+			// wheel is active. Keeps transform-entry powers blocked and only relaxes
+			// the human spell/shout runtime guard on base wheels.
+			inline bool WerewolfAllowBaseWheelSpells = false;
+			inline bool WerewolfAllowBaseWheelShouts = false;
+
+			namespace WerewolfForm
+			{
+				inline bool Enabled = true;
+				// Delta preserves the existing werewolf generated-wheel behavior.
+				// ModList can be used to rely on configured tokens/race/equipped sources.
+				inline std::string PopulateMode = "Delta";
+				inline std::string RaceEditorIDContains = "Werewolf";
+				inline std::string RaceKeywords = "ActorTypeWerewolf";
+				inline std::string RaceFormIDs = "Skyrim.esm|0x000CDD84";
+				inline std::string SpellTokens = "Werewolf,Howl,Growl,Lycan,Manbeast,Night Eye,Totem,Predator,Savage,Terror,Hunt,Brotherhood,Call of the Wild,Moonlight,Feed";
+				inline std::string ExitSpellTokens = "Revert,HumanForm,Human Form,Return to Human,Mortal Form";
+				// Optional plugin-qualified entries are accepted as Plugin.esp|0x123456.
+				inline std::string AdditionalSpellFormIDs = "";
+				inline bool DebugLog = false;
+			}
+
+			namespace VampireLordForm
+			{
+				inline bool Enabled = true;
+				// Delta preserves the existing Vampire Lord generated-wheel behavior.
+				// ModList can be used to rely on configured tokens/race/equipped sources.
+				inline std::string PopulateMode = "Delta";
+				inline bool HideTransformSpell = true;
+				inline bool HideForcedRightHandSpells = true;
+				inline bool BlockHiddenSpellActivation = true;
+				// VL-only safety guard: in confirmed melee mode, block regular hand-spell equips.
+				// Powers still go through the voice/power path.
+				inline bool BlockRegularSpellsInMeleeMode = true;
+				inline std::string RaceEditorIDContains = "DLC1VampireBeastRace,VampireLord";
+				inline std::string RaceKeywords = "";
+				inline std::string RaceFormIDs = "Dawnguard.esm|0x0000283A";
+				inline std::string SpellTokens = "VampireLord,DLC1Vampire,Vampiric,Vampire Lord,Vampiric Grip,Conjure Gargoyle,Gargoyle,Conjure Death Hound,Death Hound,Mist Form,Bats,Hunter's Sight,Hunters Sight,Vampire's Sight,Vampires Sight,Vampire Sight,Blood Storm,Raze,Raise Dead,Raised Dead,Choke Hold,Chokehold";
+				inline std::string ExitSpellTokens = "Revert,Revert Form,Change Form";
+				// Optional plugin-qualified entries are accepted as Plugin.esp|0x123456.
+				inline std::string AdditionalSpellFormIDs = "Skyrim.esm|0x000C4DE1";
+				// VL-only hidden magic forms; accepts SpellItem and TESShout forms.
+				inline std::string HiddenSpellFormIDs = "Dawnguard.esm|0x0000BFED,Dawnguard.esm|0x00013EC9";
+				inline std::string HiddenSpellTokens = "Vampiric Drain";
+				inline bool DebugLog = false;
+			}
+
+			namespace LichForm
+			{
+				inline bool Enabled = true;
+				// Overlay: switch to lich wheel on entry but allow base wheel access (if AllowBaseWheel=true).
+				// Replace: transform-only wheel navigation (classic behavior).
+				// Disabled: bypass lich-specific handling.
+				inline std::string Mode = "Overlay";
+				// ModList: use curated lich tokens (+ race/equipped hints).
+				// Delta: include snapshot delta in addition to ModList.
+				// Manual: do not auto-populate (keep/create empty managed wheel).
+				inline std::string PopulateMode = "ModList";
+				inline bool AllowBaseWheel = true;
+				// Off | BlockOtherTransforms | BlockAllTransformsExceptExit
+				inline std::string TransformGuard = "BlockOtherTransforms";
+				inline bool BlockBoundSpells = true;
+				inline bool HideWeapons = false;
+				inline bool HideGear = true;
+				inline bool BlockStaffSwapping = true;
+				inline bool SuppressDirectCast = true;
+				inline std::string RaceEditorIDContains = "Lich,Necro,UCL";
+				inline std::string RaceKeywords = "";
+				inline std::string RaceFormIDs = "";
+				// Conservative Lich kit tokens. Add broader lich-themed combat spells manually via SpellTokens or AdditionalSpellFormIDs if desired.
+				inline std::string SpellTokens = "Death Grip,Ice Coffin,Dark Conduit,Revert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal";
+				// Exit/revert tokens always allowed when transform guard is active.
+				inline std::string ExitSpellTokens = "Revert,NecroRevert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal";
+				// Optional comma-separated FormIDs for upgraded lich spells that do not expose stable tokens.
+				inline std::string AdditionalSpellFormIDs = "";
+				inline bool DebugLog = false;
+			}
 		}
 
 		// Gamepad navigation behavior (main wheel only)
@@ -789,7 +1182,8 @@ namespace Config
 		// Master toggle for the ammo wheel feature
 		inline bool Enabled = true;
 
-		// Require a ranged weapon (bow/crossbow) to be equipped
+		// Legacy compatibility toggle. AmmoWheel runtime is gameplay-only and still requires
+		// a ranged weapon to be equipped before it can open.
 		inline bool RequireWeaponEquipped = true;
 
 		namespace LayoutScaling
@@ -857,7 +1251,6 @@ namespace Config
 		inline ImU32 ActiveArcColorEnd = IM_COL32(60, 160, 220, 255);
 
 		// Behavior
-		inline bool AutoSwitchAmmo = true;
 		inline bool CloseOnSelection = true;
 		inline bool UseRTUSystem = true;
 		inline float RTUHoverDelay = 0.3f;
@@ -876,6 +1269,7 @@ namespace Config
 			inline bool LogSorting = false;       // Log sorting decisions and comparisons
 			inline bool LogLayout = false;        // Log layout calculations and positioning
 			inline bool LogCentralPanel = false;  // Log central panel highlight decisions
+			inline bool LogPerf = false;          // Log 1Hz AmmoWheel perf counters
 			inline bool DebugShoutPipeline = false; // Log shouts pipeline
 			
 			// ========== RESKIN DEBUG (Task D) ==========
@@ -884,7 +1278,7 @@ namespace Config
 			inline bool LogAssetLoading = false;      // Log PNG/flipbook asset loading
 		}
 		
-		// ========== SORTING SYSTEM (Phase 1) ==========
+		// ========== SORTING SYSTEM ==========
 		// Sort keys: 0=None, 1=Count, 2=Power, 3=Type, 4=Favorites
 		namespace Sort {
 			inline int Primary = 1;               // Default: Count
@@ -896,6 +1290,7 @@ namespace Config
 			inline bool Stable = true;            // Use stable sort for deterministic ordering
 			inline bool FavoritesFirst = true;    // Push favorites to top regardless of other criteria
 			inline bool GroupByType = false;      // Convenience: sets Primary=Type when enabled
+			inline bool RememberAmmoByWeaponType = false;  // Restore separate arrow/bolt memory when switching bow/crossbow
 			
 			// Ammo limits: 0 = no limit (show all), >0 = show only top N items after sorting
 			inline int ArrowLimit = 0;
@@ -913,7 +1308,7 @@ namespace Config
 		inline float GamepadDeadzone = 0.15f;       // Stick deadzone (0.05..0.5)
 		inline float GamepadSmoothingSpeed = 10.0f; // Cursor smoothing speed (1..20)
 		
-		// Phase 6: Navigation reliability
+		// Navigation reliability
 		inline int NavigationApplyMode = 1;         // 0=Live (instant), 1=OnOpen (apply when wheel opens)
 		inline bool ResetFiltersOnOpen = true;      // Reset smoothing filters when wheel opens
 		inline bool DebugLogNavigation = false;     // Log navigation state changes
@@ -932,7 +1327,7 @@ namespace Config
 			constexpr float GamepadSmoothingSpeed = 10.0f;
 		}
 		
-		// ========== SELECTION BEHAVIOR (PHASE 4) ==========
+		// ========== SELECTION BEHAVIOR ==========
 		inline bool StartOnLastSelected = true;     // Open with last selected ammo highlighted
 		inline bool RememberLastAcrossSessions = true; // Persist last selected ammo across game sessions
 		inline bool SmoothSlotTransition = true;    // Smooth visual transition between slots
@@ -965,6 +1360,7 @@ namespace Config
 		inline float IconSize = 48.0f;
 		inline float IconRadiusRatio = 0.72f;  // Position icons at this ratio between inner and outer radius
 		inline bool IconHoverGlow = true;
+		inline bool ShowCursorIndicator = true;  // Draw the cursor marker dot/asset on the wheel ring
 		inline ImU32 IconHoverGlowColor = IM_COL32(255, 215, 0, 100);  // Gold glow
 		
 		// ========== GEOMETRY ==========
@@ -1012,9 +1408,18 @@ namespace Config
 		// Circular bubble popup (TASK 5)
 		inline float PopupBubbleRadius = 85.0f;     // Fixed bubble radius in pixels
 		inline bool PopupCircular = true;           // Use circular bubble instead of rectangle
+		// Popup shape mode: 0=Legacy (uses PopupCircular), 1=Circle, 2=RoundedRect, 3=OrganicBlob,
+		// 4=DragonFireBlob, 5=SunDragonBlob
+		inline int PopupShapeMode = 0;
+		// Organic/DragonFire/SunDragon blob tuning (used when PopupShapeMode=3, 4, or 5)
+		inline float PopupBlobJaggedness = 0.16f;   // 0.0..0.45, higher = more irregular silhouette
+		inline float PopupBlobWobbleSpeed = 1.0f;   // 0.0..8.0, wobble animation speed
+		inline int PopupBlobPointCount = 18;        // 8..48, polygon complexity
+		// SunDragon palette tone: 0.0=pale/soft, 1.0=default, 2.0=more vivid
+		inline float PopupSunDragonTone = 0.65f;
 		inline float PopupAnimationSpeed = 8.0f;    // Scale/fade animation speed
 		
-		// ========== PHASE 4: POPUP ANIMATION ==========
+		// ========== POPUP ANIMATION ==========
 		namespace PopupAnim {
 			inline bool Enabled = true;
 			inline float HoverInMs = 120.0f;        // Animation duration for hover in (ms)
@@ -1134,13 +1539,14 @@ namespace Config
 		inline float SelectedSlotBlinkStrength = 0.3f;  // How much the slot brightens (0-1)
 		
 		// ========== TASK 4: POPUP FLIPBOOK TOGGLE ==========
-		inline bool PopupFlipbookEnabled = true;  // When false, use primitive fallback
+		inline bool PopupFlipbookEnabled = true;  // When false, block only flipbook popup-bubble assets
 		
 		// ========== VISUAL POLISH ==========
 		// Background layer (blurred backdrop behind wheel)
 		inline bool BackgroundEnabled = true;
 		inline float BackgroundOpacity = 0.6f;
 		inline float BackgroundRadiusScale = 1.12f;  // Scale relative to outer radius
+		inline float BackgroundSoftEdgeRatio = 0.28f;  // 0=no fade, 1=full radial fade
 		
 		// Decorative border ring
 		inline bool BorderEnabled = true;
@@ -1159,6 +1565,10 @@ namespace Config
 		inline bool SlotHighlightEnabled = true;
 		inline float SlotHighlightThickness = 2.0f;
 		inline uint32_t SlotHighlightAlpha = 100;
+
+		// Reskin slot background shade (helps foreground assets pop)
+		inline bool SlotBackgroundShadeEnabled = false;
+		inline float SlotBackgroundShadeOpacity = 0.0f;  // 0.0..1.0
 		
 		// Text shadow (Skyrim-style multi-layer shadow)
 		inline bool TextShadowEnabled = true;
@@ -1181,6 +1591,7 @@ namespace Config
 			inline bool OverrideLabels = false;
 			inline bool OverrideCenterPanel = false;
 			inline bool OverrideIndicators = false;
+			inline float InventorySnapshotIntervalSeconds = 0.25f;
 		}
 
 		// ========== ANIMATIONS ==========
@@ -1192,6 +1603,10 @@ namespace Config
 		
 		// Slot dividers (decorative lines between slots)
 		inline bool SlotDividersEnabled = true;
+		inline bool SlotDividerReskinBreathingEnabled = false;  // Pulse alpha for reskin slot divider assets
+		inline float SlotDividerReskinBreathingSpeed = 2.2f;      // Pulse speed (Hz-like multiplier)
+		inline float SlotDividerReskinBreathingIntensity = 0.45f; // 0=static, 1=full pulse range
+		inline float SlotDividerReskinBreathingOpacity = 1.0f;    // Base opacity multiplier
 		inline float SlotDividerThickness = 2.0f;
 		inline ImU32 SlotDividerColor = IM_COL32(139, 69, 19, 200);  // SaddleBrown
 		
@@ -1205,8 +1620,8 @@ namespace Config
 
 		// ========== TIME SLOW ==========
 		inline bool TimeSlowEnabled = false;
-		// 1.0 = normal time, 0.1 = 10% speed
-		inline float TimeSlowScale = 0.1f;
+		// 1.0 = normal time, 0.5 = Skyrim Souls RE-style half speed
+		inline float TimeSlowScale = 0.5f;
 		
 		// ========== INDICATORS ==========
 		inline bool LowAmmoIndicatorEnabled = true;
@@ -1329,10 +1744,18 @@ namespace Config
 		inline bool CenterTextPreferWordSplit = true;
 		inline bool CenterTextShadowEnabled = true;
 		inline bool CenterTextOutlineEnabled = false;
+		inline float CenterTextOffsetX = 0.0f;  // Per-panel text block offset (pixels)
+		inline float CenterTextOffsetY = 0.0f;  // Per-panel text block offset (pixels)
 		inline bool CenterShowDescription = false;
 		inline int CenterMaxDescriptionLines = 2;
+		inline float CenterDescriptionFontScale = 0.72f;
+		inline float CenterDescriptionOffsetX = 0.0f;
+		inline float CenterDescriptionOffsetY = 0.0f;
+		inline float CenterDescriptionLineSpacingPx = 0.0f;
+		inline float CenterDescriptionOpacity = 1.0f;
+		inline ImU32 CenterDescriptionColor = IM_COL32(220, 220, 220, 255);
 		
-		// ========== PHASE 1: CENTER PANEL TEXT WRAPPING ==========
+		// ========== CENTER PANEL TEXT WRAPPING ==========
 		// Word wrap settings for long ammo names in half-wheel edge layouts
 		inline bool EnableWordWrap = true;          // Enable word wrapping for long text
 		inline bool WrapAtWordBoundary = true;      // Prefer word boundaries over mid-word breaks
@@ -1342,7 +1765,7 @@ namespace Config
 		inline bool AddWrapHyphen = false;          // Add '-' at end of wrapped lines
 		inline int WrapMaxLines = 3;                // Maximum number of wrapped lines
 		
-		// ========== PHASE 3: CENTER PANEL FIELDS ==========
+		// ========== CENTER PANEL FIELDS ==========
 		namespace CenterFields {
 			inline bool ShowName = true;
 			inline bool ShowDamage = true;
@@ -1357,7 +1780,7 @@ namespace Config
 			inline ImU32 OtherDamageColor = IM_COL32(255, 120, 120, 255); // Light red for other damage values
 		}
 		
-		// ========== PHASE 3: CENTER PANEL SVG SKIN ==========
+		// ========== CENTER PANEL SVG SKIN ==========
 		namespace CenterSkin {
 			inline bool UseSVG = false;
 			inline std::string SVGPath = R"(Data\SKSE\Plugins\wheeler\resources\ammo_wheel\center_panel.svg)";

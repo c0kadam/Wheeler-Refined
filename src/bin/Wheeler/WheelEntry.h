@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdint>
+#include <limits>
+#include <memory>
 #include <shared_mutex>
 #include "nlohmann/json.hpp"
 #include "imgui.h"
@@ -6,6 +9,8 @@
 #include "bin/Animation/TimeInterpolator/TimeFloatInterpolator.h"
 #include "bin/Animation/TimeBounceInterpolator.h"
 class WheelItem;
+enum class MissingCategory : std::uint8_t;
+struct EquippedHandsCache;
 class WheelEntry
 {
 public:
@@ -44,7 +49,7 @@ public:
 	/// Draw the content in slot and (if applicable) highlight region of this wheel entry.
 	/// This function should be called after DrawBackGround to prevent background from being drawn over the content.
 	/// </summary> 
-	void DrawSlotAndHighlight(ImVec2 a_wheelCenter, ImVec2 a_entryCenter, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs);
+	void DrawSlotAndHighlight(ImVec2 a_wheelCenter, ImVec2 a_entryCenter, bool a_slotOnRightSide, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs, const EquippedHandsCache& a_hands);
 
 	/// <summary>
 	/// Get the radius changes made by arcRadiusIncInterpolator. Use this function to calculate the offset of item center.
@@ -85,29 +90,63 @@ public:
 	void NextItem();
 	void PushItem(std::shared_ptr<WheelItem> item);
 
+	std::shared_ptr<WheelItem> GetSelectedItem();
 	int GetSelectedItemIndex();
 	void SetSelectedItem(int a_selected);
 
 	bool IsEmpty();
 	int GetNumItems();
+	bool IsMissingInInventory() const;
+	MissingCategory GetMissingCategory() const;
+	void SetMissingState(bool missing, MissingCategory category);
+	bool ReplaceSelectedItem(std::shared_ptr<WheelItem> item);
+	bool ReplaceItemAt(int index, std::shared_ptr<WheelItem> item);
+
+	// Removes depleted consumables (alchemy items with 0 count) from this slot.
+	// Leaves the entry in place (slot becomes empty).
+	void ClearDepletedConsumables();
+
+	// Clears ALL items from this entry, making it empty while preserving the slot.
+	// Used by inventory prune to maintain index stability.
+	void ClearAllItems();
 
     void SerializeIntoJsonObj(nlohmann::json& a_json);
 	static std::unique_ptr<WheelEntry> SerializeFromJsonObj(const nlohmann::json& a_json, SKSE::SerializationInterface* a_intfc);
 
 	void ResetAnimation();
 
+	// ============================================================================
+	// External API Accessors
+	// ============================================================================
+
+	/// <summary>
+	/// Get item at index. Returns nullptr if out of range.
+	/// Caller should hold appropriate lock if accessing from another thread.
+	/// </summary>
+	WheelItem* GetItem(int a_index);
+
+	/// <summary>
+	/// Remove item at index. Returns true if successful, false if out of range.
+	/// </summary>
+	bool RemoveItemAt(int a_index);
+
 private:
-	void drawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs);
-	void drawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs);
-	
+	void drawSlot(ImVec2 a_center, bool a_slotOnRightSide, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs, bool a_isMissing, const EquippedHandsCache& a_hands);
+	void drawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs, bool a_isMissing);
+
 	bool _prevHovered = false;  // used to detect when the mouse enters the entry
+	float _lastHighlightExpandSize = std::numeric_limits<float>::quiet_NaN();
+	float _lastHighlightOuterAngleInc = std::numeric_limits<float>::quiet_NaN();
+	float _lastHighlightInnerAngleInc = std::numeric_limits<float>::quiet_NaN();
 	int _selectedItem = -1;
 
-	std::shared_mutex _lock;
+	mutable std::shared_mutex _lock;
 	std::vector<std::shared_ptr<WheelItem>> _items;
 	
 	TimeFloatInterpolator _arcRadiusIncInterpolator;  // for animating the arc radius's increase when the entry is hovered
 	TimeFloatInterpolator _arcInnerAngleIncInterpolator;   // for animating the arc's angle increase when the entry is hovered
 	TimeFloatInterpolator _arcOuterAngleIncInterpolator;  // for animating the arc's angle increase when the entry is hovered
 	TimeBounceInterpolator _arcRadiusBounceInterpolator = TimeBounceInterpolator(0);      // for animating the arc radius's bouncing when the entry is clicked
+	bool _missingInInventory = false;
+	MissingCategory _missingCategory = MissingCategory{};
 };

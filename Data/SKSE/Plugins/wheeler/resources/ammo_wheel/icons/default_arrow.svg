@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Clean arrow silhouette pointing up -->
+  <!-- Arrowhead triangle -->
+  <polygon points="32,4 22,22 26,20 32,18 38,20 42,22" fill="#c9a84c" fill-opacity="0.85"/>
+  <!-- Shaft -->
+  <rect x="30" y="18" width="4" height="34" rx="1" fill="#a08030" fill-opacity="0.8"/>
+  <!-- Nock -->
+  <rect x="29" y="52" width="6" height="4" rx="1" fill="#8b6914" fill-opacity="0.6"/>
+</svg>

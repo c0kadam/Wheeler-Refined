@@ -1,10 +1,46 @@
 #include "WheelItemArmor.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Utilities/Utils.h"
+#include "bin/Wheeler/TransformWheelManager.h"
+
+namespace
+{
+	float GetArmorRatingSafe(RE::PlayerCharacter* a_player, RE::InventoryEntryData* a_entry, RE::TESObjectARMO* a_armor)
+	{
+		if (!a_armor) {
+			return 0.0f;
+		}
+
+		float armorRating = a_armor->GetArmorRating();
+		if (!a_player || !a_entry) {
+			return armorRating;
+		}
+
+#if defined(_MSC_VER)
+		__try {
+			armorRating = a_player->GetArmorValue(a_entry);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			// Corrupted or stale InventoryEntryData can crash vanilla stat computation.
+			// Keep wheel stable by falling back to base armor rating.
+		}
+#else
+		try {
+			armorRating = a_player->GetArmorValue(a_entry);
+		} catch (...) {
+			// Fallback to base armor rating on any exception.
+		}
+#endif
+
+		return armorRating;
+	}
+}
 
 void WheelItemArmor::DrawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
 {
-	std::string text = this->_obj->GetName();
+	if (TransformWheelManager::ShouldDimGearActivation()) {
+		a_drawArgs.alphaMult *= 0.35f;
+	}
+	std::string text = this->GetDisplayName(a_imap);
 	int itemCount = this->GetItemExtraDataAndCount(a_imap).first;
 	if (itemCount > 1) {
 		text += " (" + std::to_string(itemCount) + ")";
@@ -15,9 +51,9 @@ void WheelItemArmor::DrawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREFR
 
 void WheelItemArmor::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
 {
-	this->drawHighlightText(a_center, this->_obj->GetName(), a_drawArgs);
-	this->drawHighlightTexture(a_center, a_drawArgs);
-
+	if (TransformWheelManager::ShouldDimGearActivation()) {
+		a_drawArgs.alphaMult *= 0.35f;
+	}
 	// get inventory entry data, ptr -> unique_ptr(dangerous)
 	RE::TESObjectARMO* armor = this->_obj->As<RE::TESObjectARMO>();
 	RE::InventoryEntryData* invData = nullptr;
@@ -34,19 +70,18 @@ void WheelItemArmor::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::Inventory
 		std::vector<RE::EnchantmentItem*> enchants;
 		this->GetItemEnchantment(invData, enchants);
 		if (!enchants.empty()) {
-			// take 1st item for now.
+			// Use the first item from the result.
 			Utils::Magic::GetMagicItemDescription(enchants[0], descriptionBuf);
 		}
 	}
-	this->drawHighlightDescription(a_center, descriptionBuf.data(), a_drawArgs);
+	const float textShiftY = calculateHighlightTextShiftY(descriptionBuf.c_str());
+	this->drawHighlightText(a_center, this->GetDisplayName(a_imap).c_str(), a_drawArgs, textShiftY);
+	this->drawHighlightTexture(a_center, a_drawArgs);
+	this->drawHighlightDescription(a_center, descriptionBuf.data(), a_drawArgs, textShiftY);
 
 	// draw armor rating
-	float armorRating = 0;
-	if (invData != nullptr) {
-		armorRating = RE::PlayerCharacter::GetSingleton()->GetArmorValue(invData);
-	} else {
-		armorRating = armor->GetArmorRating();
-	}
+	auto* player = RE::PlayerCharacter::GetSingleton();
+	const float armorRating = GetArmorRatingSafe(player, invData, armor);
 
 	this->drawItemHighlightStatIconAndValue(a_center, this->_stat_texture, armorRating, a_drawArgs);
 	
@@ -108,7 +143,7 @@ WheelItemArmor::WheelItemArmor(RE::TESBoundObject* a_armor, uint16_t a_uniqueID)
 	}
 
 	_texture = Texture::GetIconImage(iconType, a_armor);
-	_stat_texture = Texture::GetIconImage(Texture::icon_image_type::armor_default, nullptr);
+	_stat_texture = Texture::GetIconImage(Texture::icon_image_type::armor_rating, nullptr);
 	// get description
 	RE::BSString descriptionBuf = "";
 	armor->GetDescription(descriptionBuf, nullptr);
@@ -117,11 +152,23 @@ WheelItemArmor::WheelItemArmor(RE::TESBoundObject* a_armor, uint16_t a_uniqueID)
 
 void WheelItemArmor::ActivateItemSecondary()
 {
+	if (TransformWheelManager::ShouldBlockGearActivation()) {
+		logger::info("TransformWheels: blocked gear activation source=ArmorSecondary formId={:08X} name='{}'",
+			this->_obj ? this->_obj->GetFormID() : 0,
+			this->_obj ? this->_obj->GetName() : "");
+		return;
+	}
 	toggleEquip();
 }
 
 void WheelItemArmor::ActivateItemPrimary()
 {
+	if (TransformWheelManager::ShouldBlockGearActivation()) {
+		logger::info("TransformWheels: blocked gear activation source=ArmorPrimary formId={:08X} name='{}'",
+			this->_obj ? this->_obj->GetFormID() : 0,
+			this->_obj ? this->_obj->GetName() : "");
+		return;
+	}
 	toggleEquip();
 }
 
@@ -130,6 +177,9 @@ void WheelItemArmor::SerializeIntoJsonObj(nlohmann::json& a_json)
 	a_json["type"] = WheelItemArmor::ITEM_TYPE_STR;
 	a_json["formID"] = this->_obj->GetFormID();
 	a_json["uniqueID"] = this->GetUniqueID();
+	if (this->GetUniqueID() == 0) {
+		a_json["formLevelStack"] = true;
+	}
 }
 
 void WheelItemArmor::toggleEquip()
