@@ -39,7 +39,29 @@
           },
           "text": {
             "name": "Auto Detect OStim",
-            "desc": "Probe OStim at runtime and disable the bridge gracefully if the quest/scripts are missing."
+            "desc": "Keep OStim availability detection active while the integration is disabled. When the integration is enabled, detection always runs."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_enabled",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
+          "default": false,
+          "ini": {
+            "id": "RefreshAppearanceAfterUndress",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Refresh Appearance After Undress",
+            "desc": "Request a delayed actor appearance refresh when OStim has already removed worn clothing but the visual model has not updated correctly. Does not remove or equip items."
           },
           "type": "checkbox"
         },
@@ -61,7 +83,7 @@
           },
           "text": {
             "name": "Debug Logging",
-            "desc": "Reserved toggle for OStim bridge diagnostics. Leave OFF for normal play."
+            "desc": "Write detailed OStim state, navigation, action-dispatch, participant-equipment, and tracker-revision diagnostics to the Wheeler log. Leave OFF for normal play."
           },
           "type": "checkbox"
         }
@@ -111,6 +133,28 @@
               }
             ]
           },
+          "default": true,
+          "ini": {
+            "id": "CloseWheelAfterSceneAction",
+            "section": "OStimIntegration"
+          },
+          "text": {
+            "name": "Close Wheel After Scene Action",
+            "desc": "Close Wheeler after selecting an OStim scene action. Disable to keep the OStim control wheel open while navigating scenes."
+          },
+          "type": "checkbox"
+        },
+        {
+          "control": {
+            "failAction": "disable",
+            "requirements": [
+              {
+                "id": "ostim_managed_wheel",
+                "type": "checkbox",
+                "value": true
+              }
+            ]
+          },
           "default": false,
           "ini": {
             "id": "AutoSwitchToSceneWheel",
@@ -141,28 +185,6 @@
           "text": {
             "name": "Restore Previous Wheel",
             "desc": "Return to the last normal wheel after the OStim scene ends."
-          },
-          "type": "checkbox"
-        },
-        {
-          "control": {
-            "failAction": "disable",
-            "requirements": [
-              {
-                "id": "ostim_managed_wheel",
-                "type": "checkbox",
-                "value": true
-              }
-            ]
-          },
-          "default": true,
-          "ini": {
-            "id": "HideInvalidActions",
-            "section": "OStimIntegration"
-          },
-          "text": {
-            "name": "Hide Invalid OStim Actions",
-            "desc": "Suppress stage/swap/variant controls when the current OStim build does not expose a safe native API."
           },
           "type": "checkbox"
         }
@@ -196,52 +218,8 @@
             "section": "OStimIntegration"
           },
           "text": {
-            "name": "Allow Position Browsing",
-            "desc": "Expose runtime-filtered OStim scene positions through Wheeler browser pages."
-          },
-          "type": "checkbox"
-        },
-        {
-          "control": {
-            "failAction": "disable",
-            "requirements": [
-              {
-                "id": "ostim_position_browser",
-                "type": "checkbox",
-                "value": true
-              }
-            ]
-          },
-          "default": true,
-          "ini": {
-            "id": "ShowOnlyValidPositions",
-            "section": "OStimIntegration"
-          },
-          "text": {
-            "name": "Show Only Valid Positions",
-            "desc": "Keep browser output restricted to runtime-compatible candidates. This build already prefers filtered live data, so leaving this ON is safest."
-          },
-          "type": "checkbox"
-        },
-        {
-          "control": {
-            "failAction": "disable",
-            "requirements": [
-              {
-                "id": "ostim_position_browser",
-                "type": "checkbox",
-                "value": true
-              }
-            ]
-          },
-          "default": true,
-          "ini": {
-            "id": "ShowPositionNames",
-            "section": "OStimIntegration"
-          },
-          "text": {
-            "name": "Show Position Names",
-            "desc": "Prefer OStim display names over raw scene IDs in the browser wheel."
+            "name": "Show Scene Actions",
+            "desc": "Show the current OStim scene's native navigation actions in the unified managed wheel."
           },
           "type": "checkbox"
         },
@@ -262,35 +240,8 @@
             "section": "OStimIntegration"
           },
           "text": {
-            "name": "Show Position Previews",
-            "desc": "Allow OStim metadata previews or Wheeler resource fallback icons for browser entries."
-          },
-          "type": "checkbox"
-        },
-        {
-          "control": {
-            "failAction": "disable",
-            "requirements": [
-              {
-                "id": "ostim_position_browser",
-                "type": "checkbox",
-                "value": true
-              },
-              {
-                "id": "ostim_enabled",
-                "type": "checkbox",
-                "value": true
-              }
-            ]
-          },
-          "default": true,
-          "ini": {
-            "id": "PreferMetadataPreviews",
-            "section": "OStimIntegration"
-          },
-          "text": {
-            "name": "Prefer OStim Metadata Previews",
-            "desc": "If a future OStim build exposes preview paths directly, prefer those before Wheeler fallback mappings."
+            "name": "Show Scene Previews",
+            "desc": "Show OStim metadata artwork when available, with Wheeler resource fallback artwork for scene actions when enabled."
           },
           "type": "checkbox"
         },
@@ -332,48 +283,26 @@
               }
             ]
           },
-          "default": true,
-          "ini": {
-            "id": "PreferCurrentAnimationClass",
-            "section": "OStimIntegration"
-          },
-          "text": {
-            "name": "Prefer Current Animation Class",
-            "desc": "Prioritize positions from the active OStim animation class before broader actor-count-compatible results."
-          },
-          "type": "checkbox"
-        },
-        {
-          "control": {
-            "failAction": "disable",
-            "requirements": [
-              {
-                "id": "ostim_position_browser",
-                "type": "checkbox",
-                "value": true
-              }
-            ]
-          },
-          "default": 6,
+          "default": 8,
           "ini": {
             "id": "MaxPositionsPerPage",
             "section": "OStimIntegration"
           },
           "style": {
             "min": 4,
-            "max": 10,
+            "max": 16,
             "step": 1
           },
           "text": {
-            "name": "Max Positions Per Page",
-            "desc": "Maximum number of OStim position entries per Wheeler browser page."
+            "name": "Scene Actions Per Page",
+            "desc": "Maximum number of OStim scene-action slots shown on one wheel page. Higher values show more choices at once but create smaller wheel segments."
           },
           "type": "slider"
         }
       ],
       "text": {
-        "name": "Position Browser",
-        "desc": "Runtime position browsing, naming, and preview fallback behavior."
+        "name": "Scene Actions",
+        "desc": "Native OStim navigation actions, unified-wheel capacity, and preview fallback behavior."
       },
       "type": "group"
     },

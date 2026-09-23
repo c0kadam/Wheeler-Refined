@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "Integrations/OStimConfigPolicy.h"
 #include "imgui.h"
 
 static ImU32 C_SKYRIMGREY = IM_COL32(255, 255, 255, 100 );
@@ -439,17 +440,16 @@ namespace Config
 		inline bool CreateManagedWheel = true;
 		inline bool AutoSwitchToSceneWheel = false;
 		inline bool RestorePreviousWheelOnSceneEnd = true;
+		inline bool CloseWheelAfterSceneAction = true;
+		inline bool RefreshAppearanceAfterUndress = false;
 		inline bool AllowPositionBrowsing = true;
-		inline bool ShowOnlyValidPositions = true;
-		inline bool ShowPositionNames = true;
 		inline bool ShowPositionPreviews = true;
 		inline bool RestrictRegularWheelActionsDuringScenes = false;
-		inline bool HideInvalidActions = true;
-		inline bool PreferMetadataPreviews = true;
 		inline bool UseResourcePreviewFallback = true;
+		// Legacy fallback only; has no effect on native current-navigation mode.
 		inline bool PreferCurrentAnimationClass = true;
 		inline bool DebugLog = false;
-		inline std::uint32_t MaxPositionsPerPage = 6;
+		inline std::uint32_t MaxPositionsPerPage = OStimConfigPolicy::kDefaultSceneActionsPerPage;
 		inline float SVGSlotScale = 1.0f;
 		inline float SVGSlotOffsetX = 0.0f;
 		inline float SVGSlotOffsetY = 0.0f;
@@ -478,7 +478,7 @@ namespace Config
 		inline bool EnableSounds = true;
 
 		// Editor IDs for looking up sounds (configurable via INI).
-		// These are passed directly to BSAudioManager::GetSoundHandleByName.
+		// These are passed directly to BSAudioManager::BuildSoundDataFromEditorID.
 		inline std::string HoverSoundEditorID = "UIFavorite";
 		inline std::string ActivateSoundEditorID = "UIMenuOK";
 
@@ -1017,12 +1017,12 @@ namespace Config
 			// Order evaluated when multiple transform detectors match.
 			// Tokens: Werewolf, VampireLord, Lich, GenericOthers.
 			inline std::string PrecedenceOrder = "Werewolf,VampireLord,Lich,GenericOthers";
-			// Private-test opt-in. When enabled, transformed navigation may leave the
+			// Advanced opt-in. When enabled, transformed navigation may leave the
 			// dedicated transform wheel, but runtime activation on base wheels remains
 			// conservatively limited to consumables.
 			inline bool WerewolfAllowBaseWheel = false;
 			inline bool VampireLordAllowBaseWheel = false;
-			// Private-test opt-in. Only affects werewolf state while a non-transform
+			// Advanced opt-in. Only affects werewolf state while a non-transform
 			// wheel is active. Keeps transform-entry powers blocked and only relaxes
 			// the human spell/shout runtime guard on base wheels.
 			inline bool WerewolfAllowBaseWheelSpells = false;
@@ -1265,7 +1265,7 @@ namespace Config
 		inline int PresetApplied = 0;
 		inline std::string PresetBasePath = R"(.\Data\SKSE\Plugins\wheeler\presets)";
 		
-		// ========== DEBUG LOGGING (Phase 0) ==========
+		// ========== DEBUG LOGGING ==========
 		namespace Debug {
 			inline bool LogConfigApply = false;   // Log when config values are applied
 			inline bool LogInput = false;         // Log input events and navigation
@@ -1302,7 +1302,7 @@ namespace Config
 
 		
 		// ========== NAVIGATION ==========
-		// Mouse input settings (TASK 1)
+		// Mouse input settings
 		inline float MouseDeadzone = 0.02f;         // Mouse deadzone (0.0..0.1) - smaller than gamepad
 		inline float MouseSmoothingSpeed = 15.0f;   // Mouse smoothing speed (5..25)
 		inline float MouseMaxAngularSpeed = 720.0f; // Max angular speed in degrees/sec (prevents runaway)
@@ -1384,7 +1384,7 @@ namespace Config
 		inline float CenterMaxWidthRatio = 0.75f; // 0.3..1.0, width relative to inner radius
 		inline float CenterLineSpacingPx = 4.0f;  // 0..20
 		
-		// Center panel positioning (TASK 2)
+		// Center panel positioning
 		inline float CenterPanelInsetRatio = 0.5f;  // How far to push panel toward arc mid (0..1)
 		inline float CenterPanelSafeMargin = 60.0f; // Viewport edge margin in pixels
 		
@@ -1408,7 +1408,7 @@ namespace Config
 		inline bool PopupUseCustomColor = false;
 		inline ImU32 PopupBackgroundColor = IM_COL32(0, 0, 0, 180);
 		
-		// Circular bubble popup (TASK 5)
+		// Circular bubble popup
 		inline float PopupBubbleRadius = 85.0f;     // Fixed bubble radius in pixels
 		inline bool PopupCircular = true;           // Use circular bubble instead of rectangle
 		// Popup shape mode: 0=Legacy (uses PopupCircular), 1=Circle, 2=RoundedRect, 3=OrganicBlob,
@@ -1440,7 +1440,7 @@ namespace Config
 		inline int LabelTruncateLength = 10;    // Max chars before truncation
 		inline bool LabelAbbreviate = true;     // Use abbreviations if available
 		
-		// Multi-line text stacking (TASK 3)
+		// Multi-line text stacking
 		inline bool LabelMultiLine = true;      // Enable dynamic multi-line stacking
 		inline float LabelMaxSlotArcRatio = 0.75f; // Max text width as ratio of slot arc length
 		
@@ -1488,7 +1488,7 @@ namespace Config
 		inline uint32_t SelectedColorR = 255, SelectedColorG = 255, SelectedColorB = 255, SelectedColorA = 255;
 		inline uint32_t HoverColorR = 255, HoverColorG = 255, HoverColorB = 255, HoverColorA = 60;
 		
-		// ========== TASK 1: COLOR OVERRIDE SYSTEM ==========
+		// ========== COLOR OVERRIDE SYSTEM ==========
 		// Override colors persist as packed ImU32 (0xAABBGGRR) in AmmoWheel.ini:
 		// SlotLabelColor, ArrowLabelColor, BorderColor, CenterLabelColor, SelectedIndicatorColor.
 		// Legacy R/G/B/A keys remain supported for backward compatibility.
@@ -1520,12 +1520,12 @@ namespace Config
 		inline float CenterLabelColorOpacity = 1.0f;
 		inline ImU32 CenterLabelColorComputed = IM_COL32(255, 255, 255, 255);
 		
-		// ========== TASK 2: BOLD LABEL FORMATTING ==========
+		// ========== BOLD LABEL FORMATTING ==========
 		inline bool NameBoldEnabled = false;
 		inline int NameBoldMode = 1;  // 0=FontVariant (if available), 1=FauxBold
 		inline float NameBoldStrengthPx = 0.8f;  // Faux-bold offset in pixels (0.5-2.0)
 		
-		// ========== TASK 3: INDICATOR REDESIGN ==========
+		// ========== INDICATOR REDESIGN ==========
 		// Hover indicator (brightness only, no blink)
 		inline bool HoverBrightnessEnabled = true;
 		inline float HoverBrightnessStrength = 1.3f;  // Multiplier (1.0-2.0)
@@ -1541,7 +1541,7 @@ namespace Config
 		inline float SelectedIndicatorSizeScale = 1.0f;
 		inline float SelectedSlotBlinkStrength = 0.3f;  // How much the slot brightens (0-1)
 		
-		// ========== TASK 4: POPUP FLIPBOOK TOGGLE ==========
+		// ========== POPUP FLIPBOOK TOGGLE ==========
 		inline bool PopupFlipbookEnabled = true;  // When false, block only flipbook popup-bubble assets
 		
 		// ========== VISUAL POLISH ==========
@@ -1714,7 +1714,7 @@ namespace Config
 		}
 
 		
-		// ========== INPUT BLOCKING (TASK 1) ==========
+		// ========== INPUT BLOCKING ==========
 		// Block attack input when AmmoWheel is open
 		inline bool BlockAttackWhenOpen = true;       // Master toggle for attack blocking
 		inline bool ConsumeLMBWhenOpen = true;        // Consume LMB (select ammo, no attack)
@@ -1723,7 +1723,7 @@ namespace Config
 		inline bool ClickSelectRequiresHover = true;  // LMB only selects if hovering valid slot
 		inline bool AllowRMBUnequip = true;           // RMB unequips current ammo
 		
-		// ========== CENTER PANEL SHAPE (TASK 2) ==========
+		// ========== CENTER PANEL SHAPE ==========
 		// Shape: 0=Auto, 1=Rectangle, 2=Circle, 3=RoundedRect
 		inline int CenterPanelShapeIndex = 0;
 		inline float CenterPanelCornerRounding = 8.0f;  // For RoundedRect shape
@@ -1797,7 +1797,7 @@ namespace Config
 		// AmmoWheel-specific icon folders for reskin mods
 		inline std::string IconDirectory = R"(.\Data\SKSE\Plugins\wheeler\resources\ammo_wheel\icons)";
 		inline std::string IconCustomDirectory = R"(.\Data\SKSE\Plugins\wheeler\resources\ammo_wheel\icons_custom)";
-		inline bool UseDedicatedIconFolder = true;  // If false, uses main Wheeler icons only (emergency rollback)
+		inline bool UseDedicatedIconFolder = true;  // If false, uses main Wheeler icons as a fallback.
 		
 		// ========== SKIN SYSTEM (FULLY DATA-DRIVEN RESKIN) ==========
 		namespace Skin {

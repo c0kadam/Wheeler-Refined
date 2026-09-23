@@ -1,9 +1,13 @@
 #include "OStimIntegration.h"
 
+#include "OStimAutoModePolicy.h"
 #include "OStimBridge.h"
+#include "OStimNGSceneAPI.h"
 #include "OStimNGThreadAPI.h"
-#include "OStimPreviewResolver.h"
+#include "OStimSceneActionClosePolicy.h"
 #include "OStimStateTracker.h"
+#include "OStimUndressVisualRefresh.h"
+#include "OStimUnifiedWheelModel.h"
 #include "bin/API/WheelerAPI.h"
 #include "bin/Config.h"
 #include "bin/Integrations/ActionHotkeysBridge.h"
@@ -14,11 +18,16 @@
 #include "bin/Wheeler/WheelItems/WheelItemFactory.h"
 #include "bin/Wheeler/Wheeler.h"
 
+#include <RE/E/ExtraUniqueID.h>
+#include <RE/E/ExtraWorn.h>
+#include <RE/E/ExtraWornLeft.h>
+#include <RE/T/TESObjectARMO.h>
 #include <SKSE/SKSE.h>
 
 #include <algorithm>
 #include <array>
-#include <cctype>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -32,54 +41,60 @@ namespace
 	constexpr std::string_view kControlWheelTag = "OStimIntegration.Control";
 	constexpr std::string_view kBrowserWheelTag = "OStimIntegration.Browser";
 	constexpr std::string_view kLegacyBrowserWheelTagPrefix = "OStimIntegration.Browser.";
-	constexpr std::array<OStimActionKind, 8> kControlLayout{
+	constexpr std::array<OStimActionKind, OStimUnifiedWheel::kFixedControlCount> kFixedControlActions{
 		OStimActionKind::StopScene,
-		OStimActionKind::PreviousPosition,
-		OStimActionKind::NextPosition,
 		OStimActionKind::DecreaseSpeed,
-		OStimActionKind::IncreaseSpeed,
-		OStimActionKind::OpenPositionBrowser,
-		OStimActionKind::PreviousStage,
-		OStimActionKind::NextStage
+		OStimActionKind::ToggleAutoMode,
+		OStimActionKind::IncreaseSpeed
+	};
+
+	enum class DiagnosticSequenceSource
+	{
+		NativeEvent,
+		Action
+	};
+
+	struct PendingEquipmentSnapshot
+	{
+		std::int64_t dueAtMs = 0;
+		std::uint64_t sequenceID = 0;
+		DiagnosticSequenceSource source = DiagnosticSequenceSource::NativeEvent;
+		std::string trigger;
+		std::vector<OStimParticipantInfo> participants;
 	};
 
 	struct IntegrationState
 	{
-		struct BrowserContextLevel
-		{
-			std::string sceneID;
-			std::string parentSceneID;
-			std::string displayName;
-			std::string previewPath;
-			std::string iconPath;
-			std::string category;
-			std::string subcategory;
-			std::vector<OStimPositionInfo> positions;
-			std::uint32_t page = 0;
-			std::int32_t focusIndex = -1;
-			std::int32_t parentReturnFocusIndex = -1;
-			bool allowDirectSelection = false;
-		};
-
 		bool refreshRequested = true;
+		bool wheelRebuildRequested = true;
 		bool lastSceneActive = false;
 		bool lastAvailable = false;
 		std::uint64_t lastAppliedRevision = 0;
 		std::optional<int> previousWheelIndex;
-		std::vector<BrowserContextLevel> browserStack;
+		std::uint32_t browserPage = 0;
+		std::int32_t browserFocusIndex = -1;
+		std::size_t lastUnifiedEntryCount = 0;
+		std::uint64_t unifiedLayoutRevision = 0;
+		bool acceptedNavigationPending = false;
+		std::string acceptedNavigationSourceSceneID;
 		bool suppressManagedWheelsUntilSceneStops = false;
 		std::string lastAvailabilityReason;
+		bool diagnosticsEnabled = false;
+		std::uint64_t lastDiagnosticNativeRevision = 0;
+		std::vector<PendingEquipmentSnapshot> pendingEquipmentSnapshots;
 	};
 
-	struct BrowserWheelLayout
+	struct UnifiedWheelLayout
 	{
 		std::vector<std::shared_ptr<WheelItem>> items;
 		int previousPageIndex = -1;
 		int nextPageIndex = -1;
-		int defaultFocusIndex = -1;
+		int firstPositionIndex = -1;
+		int lastPositionIndex = -1;
+		std::uint32_t page = 0;
 	};
 
-	enum class BrowserFocusHint
+	enum class UnifiedFocusHint
 	{
 		None,
 		PreserveCurrent,
@@ -88,6 +103,33 @@ namespace
 	};
 
 	IntegrationState s_state;
+	std::atomic<std::uint64_t> s_nextActionID{ 0 };
+
+	bool IsStaleManagedWheelPayload(const OStimActionPayload* a_payload)
+	{
+		return a_payload &&
+		       a_payload->wheelLayoutRevision != 0 &&
+		       !OStimUnifiedWheel::IsCurrentLayoutRevision(
+			       a_payload->wheelLayoutRevision,
+			       s_state.unifiedLayoutRevision);
+	}
+
+	void ClearAcceptedNavigationPending()
+	{
+		s_state.acceptedNavigationPending = false;
+		s_state.acceptedNavigationSourceSceneID.clear();
+	}
+
+	bool ShouldHoldAcceptedNavigation(const OStimTrackerSnapshot& a_snapshot)
+	{
+		const bool sceneActive = a_snapshot.sceneInfo && a_snapshot.sceneInfo->active;
+		const bool currentSceneMatchesSource = sceneActive &&
+			a_snapshot.sceneInfo->sceneID == s_state.acceptedNavigationSourceSceneID;
+		return OStimSceneActionUI::ShouldHoldAcceptedNavigation(
+			s_state.acceptedNavigationPending,
+			sceneActive,
+			currentSceneMatchesSource);
+	}
 
 	template <class... TArgs>
 	void DebugLog(const char* a_format, TArgs&&... a_args)
@@ -95,12 +137,6 @@ namespace
 		if (Config::OStimIntegration::DebugLog) {
 			logger::info(fmt::runtime(a_format), std::forward<TArgs>(a_args)...);
 		}
-	}
-
-	std::string BuildBrowserWheelTag(std::uint32_t a_page)
-	{
-		(void)a_page;
-		return std::string(kBrowserWheelTag);
 	}
 
 	bool IsSceneBlockedByMenus()
@@ -148,40 +184,11 @@ namespace
 		return std::nullopt;
 	}
 
-	std::optional<std::uint32_t> ParseBrowserPage(std::string_view a_tag)
-	{
-		if (a_tag == kBrowserWheelTag) {
-			if (s_state.browserStack.empty()) {
-				return 0;
-			}
-			return s_state.browserStack.back().page;
-		}
-		if (!a_tag.starts_with(kLegacyBrowserWheelTagPrefix)) {
-			return std::nullopt;
-		}
-
-		const std::string suffix(a_tag.substr(kLegacyBrowserWheelTagPrefix.size()));
-		if (suffix.empty()) {
-			return std::nullopt;
-		}
-
-		try {
-			return static_cast<std::uint32_t>(std::stoul(suffix, nullptr, 10));
-		} catch (...) {
-			return std::nullopt;
-		}
-	}
-
 	bool IsManagedTagInternal(std::string_view a_tag)
 	{
 		return a_tag == kControlWheelTag ||
 		       a_tag == kBrowserWheelTag ||
 		       a_tag.starts_with(kLegacyBrowserWheelTagPrefix);
-	}
-
-	bool IsBrowserWheelTag(std::string_view a_tag)
-	{
-		return a_tag == kBrowserWheelTag || a_tag.starts_with(kLegacyBrowserWheelTagPrefix);
 	}
 
 	void TagWheelIndex(int a_wheelIndex, std::string_view a_tag)
@@ -267,165 +274,396 @@ namespace
 		return false;
 	}
 
-	std::string HumanizeBrowserLabel(std::string_view a_value)
+	std::int64_t DiagnosticNowMs()
 	{
-		std::string out(a_value);
-		if (out.empty()) {
-			return out;
-		}
-
-		if (!out.empty() && out.front() == '$') {
-			out.erase(0, 1);
-		}
-
-		constexpr std::string_view kNavPrefix = "ostim_nav_";
-		std::string lowered(out);
-		std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
-			return static_cast<char>(std::tolower(c));
-		});
-		if (lowered.starts_with(kNavPrefix)) {
-			out.erase(0, kNavPrefix.size());
-		}
-
-		std::string cleaned;
-		cleaned.reserve(out.size());
-		bool inBraces = false;
-		for (char c : out) {
-			if (c == '{') {
-				inBraces = true;
-				continue;
-			}
-			if (inBraces) {
-				if (c == '}') {
-					inBraces = false;
-				}
-				continue;
-			}
-			if (c == '_' || c == '-' || c == '/') {
-				cleaned.push_back(' ');
-				continue;
-			}
-			if (std::isalnum(static_cast<unsigned char>(c)) || std::isspace(static_cast<unsigned char>(c))) {
-				cleaned.push_back(c);
-			}
-		}
-
-		while (!cleaned.empty() && std::isspace(static_cast<unsigned char>(cleaned.back()))) {
-			cleaned.pop_back();
-		}
-		if (const auto split = cleaned.find_last_of(' '); split != std::string::npos) {
-			const auto suffixSize = cleaned.size() - split - 1;
-			if (suffixSize == 1 &&
-				std::isalpha(static_cast<unsigned char>(cleaned.back()))) {
-				cleaned.erase(split);
-			}
-		}
-
-		bool newWord = true;
-		for (char& c : cleaned) {
-			if (std::isspace(static_cast<unsigned char>(c))) {
-				newWord = true;
-				continue;
-			}
-			c = static_cast<char>(newWord ?
-				std::toupper(static_cast<unsigned char>(c)) :
-				std::tolower(static_cast<unsigned char>(c)));
-			newWord = false;
-		}
-
-		return cleaned;
+		return std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch())
+			.count();
 	}
 
-	std::string NormalizeSceneKey(std::string_view a_value)
+	constexpr int Bool01(bool a_value)
 	{
-		std::string out(a_value);
-		std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-			return static_cast<char>(std::tolower(c));
-		});
-		return out;
+		return a_value ? 1 : 0;
 	}
 
-	bool SceneKeysEqual(std::string_view a_lhs, std::string_view a_rhs)
+	const char* RuntimeEventName(OStimNGThreadAPI::RuntimeEvent a_event)
 	{
-		return !a_lhs.empty() &&
-		       !a_rhs.empty() &&
-		       NormalizeSceneKey(a_lhs) == NormalizeSceneKey(a_rhs);
+		switch (a_event) {
+		case OStimNGThreadAPI::RuntimeEvent::ThreadStarted:
+			return "ThreadStarted";
+		case OStimNGThreadAPI::RuntimeEvent::ThreadEnded:
+			return "ThreadEnded";
+		case OStimNGThreadAPI::RuntimeEvent::NodeChanged:
+			return "NodeChanged";
+		case OStimNGThreadAPI::RuntimeEvent::ControlInput:
+			return "ControlInput";
+		default:
+			return "None";
+		}
 	}
 
-	bool NeedsDisplayNameHydration(const OStimPositionInfo& a_position)
+	bool IsNavigationAction(OStimActionKind a_kind)
 	{
-		return a_position.displayName.empty() ||
-		       a_position.displayName.front() == '$' ||
-		       a_position.displayName == a_position.id ||
-		       a_position.displayName == a_position.destinationID;
+		return a_kind == OStimActionKind::SelectSpecificPosition;
 	}
 
-	void HydratePositionDisplayNames(std::vector<OStimPositionInfo>& a_positions)
+	const char* DiagnosticSourceName(DiagnosticSequenceSource a_source)
 	{
-		std::vector<std::string> sceneIDs;
-		std::vector<std::size_t> sceneIndices;
-		sceneIDs.reserve(a_positions.size());
-		sceneIndices.reserve(a_positions.size());
+		return a_source == DiagnosticSequenceSource::Action ? "Action" : "NativeEvent";
+	}
 
-		for (std::size_t i = 0; i < a_positions.size(); ++i) {
-			if (!NeedsDisplayNameHydration(a_positions[i])) {
-				continue;
-			}
-
-			const auto& sceneID = a_positions[i].destinationID.empty() ?
-				a_positions[i].id :
-				a_positions[i].destinationID;
-			if (sceneID.empty()) {
-				continue;
-			}
-
-			sceneIndices.push_back(i);
-			sceneIDs.push_back(sceneID);
+	std::string GetActiveManagedWheelTag()
+	{
+		const int activeIndex = Wheeler::GetActiveWheelIndex();
+		if (activeIndex < 0) {
+			return {};
 		}
 
-		if (!sceneIDs.empty()) {
-			std::vector<std::string> sceneNames;
-			if (OStimBridge::GetSceneNames(sceneIDs, sceneNames) && sceneNames.size() == sceneIDs.size()) {
-				for (std::size_t i = 0; i < sceneNames.size(); ++i) {
-					if (!sceneNames[i].empty() && sceneNames[i].front() != '$') {
-						a_positions[sceneIndices[i]].displayName = sceneNames[i];
+		std::shared_lock<std::shared_mutex> lock(Wheeler::GetWheelDataLock());
+		if (Wheel* wheel = Wheeler::GetWheelByIndex(activeIndex)) {
+			const auto& tag = wheel->GetClientTag();
+			if (IsManagedTagInternal(tag)) {
+				return std::string(tag);
+			}
+		}
+		return {};
+	}
+
+	OStimTrackerSnapshot GetDiagnosticSnapshot()
+	{
+		return OStimStateTracker::GetSnapshot();
+	}
+
+	void LogStateSnapshot(
+		std::string_view a_trigger,
+		std::uint64_t a_nativeRevision,
+		const std::optional<OStimSceneInfo>& a_scene,
+		std::size_t a_navigationCount,
+		std::optional<std::uint32_t> a_threadID = std::nullopt)
+	{
+		const OStimSceneInfo emptyScene{};
+		const auto& scene = a_scene ? *a_scene : emptyScene;
+		const int participantCount = scene.participantCount > 0 ?
+			scene.participantCount :
+			static_cast<int>(scene.participants.size());
+		DebugLog(
+			"[OStimDiag] STATE trigger='{}' nativeRev={} trackerRev={} thread={} scene='{}' animation='{}' node='{}' active={} participants={} speed={}/{} transition={} sequence={} controlDisabled={} auto={} nav={} browserPage={} wheel='{}'",
+			a_trigger,
+			a_nativeRevision,
+			OStimStateTracker::GetRevision(),
+			a_threadID.value_or(scene.threadID),
+			scene.sceneID,
+			scene.animationID,
+			scene.animationName,
+			Bool01(scene.active),
+			participantCount,
+			scene.currentSpeed,
+			scene.maxSpeed,
+			Bool01(scene.inTransition),
+			Bool01(scene.inSequence),
+			Bool01(scene.playerControlDisabled),
+			Bool01(scene.autoMode),
+			a_navigationCount,
+			s_state.browserPage,
+			GetActiveManagedWheelTag());
+	}
+
+	void LogNavigationSnapshot(
+		std::uint32_t a_threadID,
+		const std::vector<OStimPositionInfo>& a_positions)
+	{
+		DebugLog("[OStimDiag] NAV_SNAPSHOT source=Action thread={} count={}", a_threadID, a_positions.size());
+		for (std::size_t index = 0; index < a_positions.size(); ++index) {
+			const auto& position = a_positions[index];
+			DebugLog(
+				"[OStimDiag] NAV_SNAPSHOT_ITEM source=Action idx={} sceneID='{}' destinationID='{}' transition={} valid={} label='{}' description='{}'",
+				index,
+				position.id,
+				position.destinationID,
+				Bool01(position.isTransition),
+				Bool01(position.isValidNow),
+				position.displayName,
+				position.description);
+		}
+	}
+
+	struct WornExtraListDiagnostic
+	{
+		std::size_t ordinal = 0;
+		bool extraWorn = false;
+		bool extraWornLeft = false;
+		bool hasUniqueID = false;
+		std::uint16_t uniqueID = 0;
+	};
+
+	void LogActorEquipment(
+		RE::Actor* a_actor,
+		const OStimParticipantInfo& a_participant,
+		std::string_view a_trigger)
+	{
+		const char* actorName = a_actor && a_actor->GetName() ?
+			a_actor->GetName() :
+			a_participant.name.c_str();
+		DebugLog(
+			"[OStimDiag] EQUIP actor={:08X} name='{}' player={} trigger='{}' resolved={}",
+			a_participant.formID,
+			actorName ? actorName : "",
+			Bool01(a_participant.isPlayer),
+			a_trigger,
+			Bool01(a_actor != nullptr));
+		if (!a_actor) {
+			return;
+		}
+
+		const RE::TESObjectREFR::InventoryItemMap inventory = a_actor->GetInventory();
+		for (const auto& [object, data] : inventory) {
+			auto* armor = object ? object->As<RE::TESObjectARMO>() : nullptr;
+			auto* entry = data.second.get();
+			if (!armor || !entry) {
+				continue;
+			}
+
+			const bool isWorn = entry->IsWorn();
+			std::vector<WornExtraListDiagnostic> wornLists;
+			std::size_t extraListCount = 0;
+			bool wornLeft = false;
+			if (entry->extraLists) {
+				for (auto* extraList : *entry->extraLists) {
+					const std::size_t ordinal = extraListCount++;
+					if (!extraList) {
+						continue;
 					}
+
+					WornExtraListDiagnostic detail{};
+					detail.ordinal = ordinal;
+					detail.extraWorn = extraList->HasType(RE::ExtraDataType::kWorn);
+					detail.extraWornLeft = extraList->HasType(RE::ExtraDataType::kWornLeft);
+					wornLeft = wornLeft || detail.extraWornLeft;
+					if (!detail.extraWorn && !detail.extraWornLeft) {
+						continue;
+					}
+					if (auto* uniqueID = extraList->GetByType<RE::ExtraUniqueID>()) {
+						detail.hasUniqueID = true;
+						detail.uniqueID = uniqueID->uniqueID;
+					}
+					wornLists.push_back(detail);
 				}
 			}
-		}
 
-		for (auto& position : a_positions) {
-			if (!NeedsDisplayNameHydration(position)) {
+			if (!isWorn && wornLists.empty()) {
 				continue;
 			}
 
-			if (!position.description.empty()) {
-				position.displayName = HumanizeBrowserLabel(position.description);
+			const char* armorName = armor->GetName();
+			const std::uint32_t slotMask = armor->GetSlotMask().underlying();
+			if (wornLists.empty()) {
+				DebugLog(
+					"[OStimDiag] EQUIP_ITEM actor={:08X} form={:08X} name='{}' count={} slotMask={:08X} isWorn={} wornLeft={} xLists={} x=-1 uid=0 hasUID=0 extraWorn=0 extraWornLeft=0",
+					a_participant.formID,
+					armor->GetFormID(),
+					armorName ? armorName : "",
+					data.first,
+					slotMask,
+					Bool01(isWorn),
+					Bool01(wornLeft),
+					extraListCount);
+				continue;
 			}
-			if (position.displayName.empty()) {
-				const auto& fallbackSceneID = position.destinationID.empty() ? position.id : position.destinationID;
-				position.displayName = HumanizeBrowserLabel(fallbackSceneID);
-			}
-			if (position.displayName.empty()) {
-				position.displayName = position.destinationID.empty() ? position.id : position.destinationID;
+
+			for (const auto& detail : wornLists) {
+				DebugLog(
+					"[OStimDiag] EQUIP_ITEM actor={:08X} form={:08X} name='{}' count={} slotMask={:08X} isWorn={} wornLeft={} xLists={} x={} uid={} hasUID={} extraWorn={} extraWornLeft={}",
+					a_participant.formID,
+					armor->GetFormID(),
+					armorName ? armorName : "",
+					data.first,
+					slotMask,
+					Bool01(isWorn),
+					Bool01(wornLeft),
+					extraListCount,
+					detail.ordinal,
+					detail.uniqueID,
+					Bool01(detail.hasUniqueID),
+					Bool01(detail.extraWorn),
+					Bool01(detail.extraWornLeft));
 			}
 		}
 	}
 
-	bool HasBrowserEntries(const IntegrationState::BrowserContextLevel& a_level)
+	void LogEquipmentSnapshot(
+		DiagnosticSequenceSource a_source,
+		std::uint64_t a_sequenceID,
+		std::string_view a_trigger,
+		const std::vector<OStimParticipantInfo>& a_participants)
 	{
-		return !a_level.positions.empty() ||
-		       (a_level.allowDirectSelection && !a_level.sceneID.empty());
+		const auto snapshot = GetDiagnosticSnapshot();
+		LogStateSnapshot(
+			a_trigger,
+			OStimNGThreadAPI::GetEventRevision(),
+			snapshot.sceneInfo,
+			snapshot.positions.size());
+
+		const OStimSceneInfo emptyScene{};
+		const auto& currentScene = snapshot.sceneInfo ? *snapshot.sceneInfo : emptyScene;
+		DebugLog(
+			"[OStimDiag] EQUIP_SNAPSHOT sequence={} source={} trigger='{}' scene='{}' node='{}' active={} capturedParticipants={} currentParticipants={}",
+			a_sequenceID,
+			DiagnosticSourceName(a_source),
+			a_trigger,
+			currentScene.sceneID,
+			currentScene.animationName,
+			Bool01(currentScene.active),
+			a_participants.size(),
+			currentScene.participants.size());
+		for (const auto& participant : a_participants) {
+			LogActorEquipment(
+				RE::TESForm::LookupByID<RE::Actor>(participant.formID),
+				participant,
+				a_trigger);
+		}
 	}
 
-	IntegrationState::BrowserContextLevel* GetCurrentBrowserLevel()
+	void ScheduleEquipmentSnapshot(
+		DiagnosticSequenceSource a_source,
+		std::uint64_t a_sequenceID,
+		std::string a_trigger,
+		std::int64_t a_delayMs,
+		std::vector<OStimParticipantInfo> a_participants)
 	{
-		return s_state.browserStack.empty() ? nullptr : &s_state.browserStack.back();
+		if (!Config::OStimIntegration::DebugLog) {
+			return;
+		}
+
+		constexpr std::size_t kMaxPendingEquipmentSnapshots = 64;
+		if (s_state.pendingEquipmentSnapshots.size() >= kMaxPendingEquipmentSnapshots) {
+			s_state.pendingEquipmentSnapshots.erase(s_state.pendingEquipmentSnapshots.begin());
+		}
+		s_state.pendingEquipmentSnapshots.push_back(PendingEquipmentSnapshot{
+			DiagnosticNowMs() + a_delayMs,
+			a_sequenceID,
+			a_source,
+			std::move(a_trigger),
+			std::move(a_participants)
+		});
+	}
+
+	void ScheduleNativeEventEquipmentSnapshots(
+		const OStimNGThreadAPI::DiagnosticEvent& a_event,
+		const std::optional<OStimSceneInfo>& a_scene)
+	{
+		const auto participants = a_scene ? a_scene->participants : std::vector<OStimParticipantInfo>{};
+		auto schedule = [&](std::int64_t a_delayMs) {
+			ScheduleEquipmentSnapshot(
+				DiagnosticSequenceSource::NativeEvent,
+				a_event.revision,
+				fmt::format("{}+{}ms", RuntimeEventName(a_event.event), a_delayMs),
+				a_delayMs,
+				participants);
+		};
+
+		if (a_event.event == OStimNGThreadAPI::RuntimeEvent::ThreadStarted ||
+			a_event.event == OStimNGThreadAPI::RuntimeEvent::ThreadEnded) {
+			for (const auto delay : { 0, 250, 1000, 2500 }) {
+				schedule(delay);
+			}
+		} else if (a_event.event == OStimNGThreadAPI::RuntimeEvent::NodeChanged) {
+			for (const auto delay : { 0, 500, 1500 }) {
+				schedule(delay);
+			}
+		}
+	}
+
+	void ProcessNativeDiagnosticEvents()
+	{
+		const auto events = OStimNGThreadAPI::GetDiagnosticEventsAfter(s_state.lastDiagnosticNativeRevision);
+		for (const auto& event : events) {
+			if (event.revision > s_state.lastDiagnosticNativeRevision + 1) {
+				DebugLog(
+					"[OStimDiag] NATIVE_EVENT_QUEUE_GAP expected={} received={}",
+					s_state.lastDiagnosticNativeRevision + 1,
+					event.revision);
+			}
+			s_state.lastDiagnosticNativeRevision = event.revision;
+			DebugLog(
+				"[OStimDiag] NATIVE_EVENT rev={} event={} thread={} control={}",
+				event.revision,
+				RuntimeEventName(event.event),
+				event.threadID,
+				event.control);
+
+			if (event.event != OStimNGThreadAPI::RuntimeEvent::ThreadStarted &&
+				event.event != OStimNGThreadAPI::RuntimeEvent::NodeChanged &&
+				event.event != OStimNGThreadAPI::RuntimeEvent::ThreadEnded) {
+				continue;
+			}
+
+			const auto snapshot = GetDiagnosticSnapshot();
+			LogStateSnapshot(
+				RuntimeEventName(event.event),
+				event.revision,
+				snapshot.sceneInfo,
+				snapshot.positions.size(),
+				event.threadID);
+			LogNavigationSnapshot(event.threadID, snapshot.positions);
+			ScheduleNativeEventEquipmentSnapshots(event, snapshot.sceneInfo);
+		}
+	}
+
+	void ProcessPendingEquipmentSnapshots()
+	{
+		const std::int64_t nowMs = DiagnosticNowMs();
+		for (auto it = s_state.pendingEquipmentSnapshots.begin();
+			it != s_state.pendingEquipmentSnapshots.end();) {
+			if (it->dueAtMs > nowMs) {
+				++it;
+				continue;
+			}
+
+			const auto pending = std::move(*it);
+			it = s_state.pendingEquipmentSnapshots.erase(it);
+			LogEquipmentSnapshot(
+				pending.source,
+				pending.sequenceID,
+				pending.trigger,
+				pending.participants);
+		}
+	}
+
+	struct ActionDispatchResult
+	{
+		bool result = false;
+		const char* path = "Rejected";
+		const char* backend = "None";
+		std::string target;
+	};
+
+	void LogActionEnd(
+		std::uint64_t a_actionID,
+		OStimActionKind a_kind,
+		const ActionDispatchResult& a_result,
+		std::uint32_t a_pageBefore,
+		std::uint32_t a_pageAfter)
+	{
+		if (a_actionID == 0) {
+			return;
+		}
+		DebugLog(
+			"[OStimDiag] ACTION_END id={} kind={} kindValue={} result={} path={} backend={} target='{}' pageBefore={} pageAfter={}",
+			a_actionID,
+			OStimIntegration::GetActionLabel(a_kind),
+			static_cast<std::uint32_t>(a_kind),
+			Bool01(a_result.result),
+			a_result.path,
+			a_result.backend,
+			a_result.target,
+			a_pageBefore,
+			a_pageAfter);
 	}
 
 	void InvalidateBrowserState()
 	{
-		s_state.browserStack.clear();
+		s_state.browserPage = 0;
+		s_state.browserFocusIndex = -1;
 	}
 
 	void RememberPreviousWheelIfNeeded()
@@ -535,6 +773,8 @@ namespace
 		if (indices.empty()) {
 			s_state.previousWheelIndex.reset();
 			InvalidateBrowserState();
+			s_state.lastUnifiedEntryCount = 0;
+			++s_state.unifiedLayoutRevision;
 			return;
 		}
 
@@ -553,33 +793,8 @@ namespace
 
 		s_state.previousWheelIndex.reset();
 		InvalidateBrowserState();
-	}
-
-	std::size_t GetBrowserPageCount(const std::vector<OStimPositionInfo>& a_positions)
-	{
-		const std::size_t perPage = static_cast<std::size_t>(
-			(std::max)(4u, Config::OStimIntegration::MaxPositionsPerPage));
-		return a_positions.empty() ? 0 :
-			((a_positions.size() + perPage - 1) / perPage);
-	}
-
-	std::uint32_t ClampBrowserPage(std::uint32_t a_page, const std::vector<OStimPositionInfo>& a_positions)
-	{
-		const std::size_t pageCount = GetBrowserPageCount(a_positions);
-		if (pageCount == 0) {
-			return 0;
-		}
-		return static_cast<std::uint32_t>((std::min<std::size_t>)(a_page, pageCount - 1));
-	}
-
-	std::optional<int> GetControlWheelEntryIndex(OStimActionKind a_kind)
-	{
-		for (std::size_t i = 0; i < kControlLayout.size(); ++i) {
-			if (kControlLayout[i] == a_kind) {
-				return static_cast<int>(i);
-			}
-		}
-		return std::nullopt;
+		s_state.lastUnifiedEntryCount = 0;
+		++s_state.unifiedLayoutRevision;
 	}
 
 	bool SceneAllowsDirectControls(const std::optional<OStimSceneInfo>& a_scene)
@@ -591,318 +806,190 @@ namespace
 		       !a_scene->playerControlDisabled;
 	}
 
-	bool HasBrowserSnapshot()
+	const char* GetFixedControlLabel(
+		OStimActionKind a_kind,
+		const OStimTrackerSnapshot& a_snapshot)
 	{
-		const auto* level = GetCurrentBrowserLevel();
-		return level && HasBrowserEntries(*level);
-	}
-
-	std::vector<OStimPositionInfo> GetActionPositions(const OStimSceneInfo& a_scene)
-	{
-		auto positions = OStimStateTracker::GetAvailablePositions();
-		if (!positions.empty()) {
-			return positions;
-		}
-
-		if (OStimNGThreadAPI::IsAvailable()) {
-			positions = OStimNGThreadAPI::GetNavigationPositions(a_scene);
-			if (!positions.empty()) {
-				return positions;
-			}
-		}
-
-		return OStimBridge::GetCandidatePositions(Config::OStimIntegration::PreferCurrentAnimationClass);
-	}
-
-	bool NavigateToPosition(const OStimPositionInfo& a_position)
-	{
-		if (!a_position.id.empty() && OStimNGThreadAPI::NavigateToScene(a_position.id)) {
-			return true;
-		}
-
-		return !a_position.id.empty() &&
-		       OStimBridge::CallAPIMethod("TravelToAnimationIfPossible", a_position.id);
-	}
-
-	bool ShouldShowControlAction(OStimActionKind a_kind)
-	{
-		const auto scene = OStimStateTracker::GetCurrentSceneInfo();
-		const bool sceneActive = scene && scene->active;
-		const bool sceneControllable = SceneAllowsDirectControls(scene);
-		const auto positions = OStimStateTracker::GetAvailablePositions();
-
 		switch (a_kind) {
 		case OStimActionKind::StopScene:
-			return sceneActive;
-		case OStimActionKind::IncreaseSpeed:
+			return "End Scene";
 		case OStimActionKind::DecreaseSpeed:
-			return sceneControllable;
-		case OStimActionKind::NextPosition:
-		case OStimActionKind::PreviousPosition:
-			return sceneControllable && !positions.empty();
-		case OStimActionKind::OpenPositionBrowser:
-			return sceneControllable &&
-			       Config::OStimIntegration::AllowPositionBrowsing &&
-			       !positions.empty();
-		case OStimActionKind::NextStage:
-		case OStimActionKind::PreviousStage:
-		case OStimActionKind::SwapPartner:
-		case OStimActionKind::ChangeVariant:
-			return false;
+			return "Speed -";
+		case OStimActionKind::ToggleAutoMode:
+			return GetOStimAutoModeLabel(a_snapshot.sceneInfo && a_snapshot.sceneInfo->autoMode);
+		case OStimActionKind::IncreaseSpeed:
+			return "Speed +";
 		default:
-			return sceneActive;
+			return OStimIntegration::GetActionLabel(a_kind);
 		}
 	}
 
-	std::vector<std::shared_ptr<WheelItem>> BuildControlWheelItems()
+	UnifiedWheelLayout BuildUnifiedWheelLayout(
+		const OStimTrackerSnapshot& a_snapshot,
+		std::uint64_t a_layoutRevision)
 	{
-		std::vector<std::shared_ptr<WheelItem>> items;
-		items.resize(kControlLayout.size());
-
-		for (std::size_t i = 0; i < kControlLayout.size(); ++i) {
+		UnifiedWheelLayout layout{};
+		const bool suppressPreviousNavigation = ShouldHoldAcceptedNavigation(a_snapshot);
+		const std::size_t visiblePositionCount =
+			!Config::OStimIntegration::AllowPositionBrowsing || suppressPreviousNavigation ?
+			0 : a_snapshot.positions.size();
+		const auto model = OStimUnifiedWheel::BuildLayout(
+			visiblePositionCount,
+			s_state.browserPage,
+			Config::OStimIntegration::MaxPositionsPerPage);
+		layout.items.resize(model.physical.entryCount);
+		for (std::size_t i = 0; i < kFixedControlActions.size(); ++i) {
+			const OStimActionKind kind = kFixedControlActions[i];
 			OStimActionPayload payload{};
-			payload.kind = kControlLayout[i];
-			payload.displayName = OStimIntegration::GetActionLabel(payload.kind);
-			payload.requiresActiveScene = payload.kind != OStimActionKind::OpenControlWheel;
+			payload.kind = kind;
+			payload.displayName = GetFixedControlLabel(kind, a_snapshot);
+			payload.requiresActiveScene = true;
+			payload.wheelLayoutRevision = a_layoutRevision;
+			layout.items[model.physical.fixedIndices[i]] = WheelItemFactory::MakeOStimActionItem(std::move(payload));
+		}
 
-			if (!ShouldShowControlAction(payload.kind) &&
-				Config::OStimIntegration::HideInvalidActions) {
+		layout.page = model.page;
+		for (std::size_t i = 0; i < model.dynamicSlotCount; ++i) {
+			const auto& slot = model.dynamicSlots[i];
+			OStimActionPayload payload{};
+			if (slot.kind == OStimUnifiedWheel::DynamicSlotKind::PreviousPage ||
+				slot.kind == OStimUnifiedWheel::DynamicSlotKind::NextPage) {
+				payload.kind = OStimActionKind::OpenPositionBrowser;
+				payload.displayName = slot.kind == OStimUnifiedWheel::DynamicSlotKind::PreviousPage ?
+					"< Prev" : "Next >";
+				payload.browserPage = slot.targetPage;
+				payload.browserFocusIndex = static_cast<int>(slot.physicalIndex);
+				payload.requiresActiveScene = true;
+				payload.wheelLayoutRevision = a_layoutRevision;
+				layout.items[slot.physicalIndex] = WheelItemFactory::MakeOStimActionItem(std::move(payload));
+				if (slot.kind == OStimUnifiedWheel::DynamicSlotKind::PreviousPage) {
+					layout.previousPageIndex = static_cast<int>(slot.physicalIndex);
+				} else {
+					layout.nextPageIndex = static_cast<int>(slot.physicalIndex);
+				}
+				continue;
+			}
+			if (slot.kind != OStimUnifiedWheel::DynamicSlotKind::Position ||
+				slot.positionIndex >= a_snapshot.positions.size()) {
 				continue;
 			}
 
-			items[i] = WheelItemFactory::MakeOStimActionItem(std::move(payload));
-		}
-
-		return items;
-	}
-
-	bool PositionOpensSubmenu(const OStimPositionInfo& a_position)
-	{
-		return !a_position.id.empty() &&
-		       OStimPreviewResolver::HasBrowsableChildScenes(a_position.id, a_position.sourceSceneID);
-	}
-
-	IntegrationState::BrowserContextLevel& EnsureRootBrowserLevel(bool a_refresh)
-	{
-		if (s_state.browserStack.empty()) {
-			s_state.browserStack.emplace_back();
-			a_refresh = true;
-		}
-
-		auto& root = s_state.browserStack.front();
-		if (a_refresh || root.positions.empty()) {
-			const auto preservedPage = root.page;
-			const auto preservedFocus = root.focusIndex;
-			root = IntegrationState::BrowserContextLevel{};
-			root.page = preservedPage;
-			root.focusIndex = preservedFocus;
-			root.positions = OStimIntegration::GetAvailablePositions();
-			HydratePositionDisplayNames(root.positions);
-			root.page = ClampBrowserPage(root.page, root.positions);
-		}
-
-		return root;
-	}
-
-	void CollapseBrowserToRoot(bool a_refreshRoot)
-	{
-		EnsureRootBrowserLevel(a_refreshRoot);
-		if (s_state.browserStack.size() > 1) {
-			s_state.browserStack.resize(1);
-		}
-	}
-
-	std::optional<std::size_t> FindBrowserLevelIndexByScene(std::string_view a_sceneID)
-	{
-		if (a_sceneID.empty()) {
-			return std::nullopt;
-		}
-
-		for (std::size_t i = 0; i < s_state.browserStack.size(); ++i) {
-			if (SceneKeysEqual(s_state.browserStack[i].sceneID, a_sceneID)) {
-				return i;
-			}
-		}
-
-		return std::nullopt;
-	}
-
-	void CollapseBrowserToLevel(std::size_t a_levelIndex)
-	{
-		if (a_levelIndex >= s_state.browserStack.size()) {
-			return;
-		}
-		s_state.browserStack.resize(a_levelIndex + 1);
-	}
-
-	BrowserWheelLayout BuildBrowserWheelLayout(const IntegrationState::BrowserContextLevel& a_level)
-	{
-		const std::uint32_t page = ClampBrowserPage(a_level.page, a_level.positions);
-		const std::size_t perPage = static_cast<std::size_t>(
-			(std::max)(4u, Config::OStimIntegration::MaxPositionsPerPage));
-		const std::size_t start = static_cast<std::size_t>(page) * perPage;
-		const std::size_t end = (std::min)(a_level.positions.size(), start + perPage);
-		const std::size_t pageCount = GetBrowserPageCount(a_level.positions);
-		const bool isSubmenu = s_state.browserStack.size() > 1;
-
-		BrowserWheelLayout layout{};
-
-		OStimActionPayload returnPayload{};
-		returnPayload.kind = isSubmenu ?
-			OStimActionKind::ReturnToPositionBrowserParent :
-			OStimActionKind::ReturnToControlWheel;
-		returnPayload.displayName = OStimIntegration::GetActionLabel(returnPayload.kind);
-		returnPayload.requiresActiveScene = false;
-		layout.items.push_back(WheelItemFactory::MakeOStimActionItem(std::move(returnPayload)));
-
-		if (a_level.allowDirectSelection && !a_level.sceneID.empty()) {
-			OStimActionPayload selectCurrent{};
-			selectCurrent.kind = OStimActionKind::SelectSpecificPosition;
-			selectCurrent.sceneID = a_level.sceneID;
-			selectCurrent.positionID = a_level.sceneID;
-			selectCurrent.sourceSceneID = a_level.parentSceneID;
-			selectCurrent.displayName = Config::OStimIntegration::ShowPositionNames ?
-				a_level.displayName :
-				a_level.sceneID;
-			selectCurrent.previewPath = a_level.previewPath;
-			selectCurrent.iconPath = a_level.iconPath;
-			selectCurrent.category = a_level.category;
-			selectCurrent.subcategory = a_level.subcategory;
-			selectCurrent.requiresActiveScene = true;
-			layout.defaultFocusIndex = static_cast<int>(layout.items.size());
-			layout.items.push_back(WheelItemFactory::MakeOStimActionItem(std::move(selectCurrent)));
-		}
-
-		if (page > 0) {
-			OStimActionPayload previousPage{};
-			previousPage.kind = OStimActionKind::OpenPositionBrowser;
-			previousPage.displayName = "Previous Page";
-			previousPage.browserPage = page - 1;
-			previousPage.browserFocusIndex = static_cast<int>(layout.items.size());
-			previousPage.requiresActiveScene = true;
-			layout.previousPageIndex = static_cast<int>(layout.items.size());
-			layout.items.push_back(WheelItemFactory::MakeOStimActionItem(std::move(previousPage)));
-		}
-
-		for (std::size_t i = start; i < end; ++i) {
-			const auto& position = a_level.positions[i];
-			OStimActionPayload payload{};
-			payload.kind = PositionOpensSubmenu(position) ?
-				OStimActionKind::OpenPositionSubmenu :
-				OStimActionKind::SelectSpecificPosition;
+			const auto& position = a_snapshot.positions[slot.positionIndex];
+			payload.kind = GetOStimOneHopNavigationRowActionKind();
 			payload.sceneID = position.id;
-			payload.positionID = position.destinationID.empty() ? position.id : position.destinationID;
-			payload.sourceSceneID = position.sourceSceneID;
+			payload.positionID = GetOStimNavigationPresentationID(position);
+			payload.sourceSceneID = a_snapshot.sceneInfo ? a_snapshot.sceneInfo->sceneID : std::string{};
+			payload.semantic = position.semantic;
 			payload.previewPath = position.previewPath;
 			payload.iconPath = position.iconPath;
 			payload.category = position.category;
 			payload.subcategory = position.subcategory;
-			payload.browserFocusIndex = static_cast<int>(layout.items.size());
+			payload.browserFocusIndex = static_cast<int>(slot.physicalIndex);
 			payload.requiresActiveScene = position.requiresActiveScene;
-			payload.displayName = Config::OStimIntegration::ShowPositionNames ?
-				position.displayName :
-				(position.destinationID.empty() ? position.id : position.destinationID);
-			if (layout.defaultFocusIndex < 0) {
-				layout.defaultFocusIndex = static_cast<int>(layout.items.size());
+			payload.wheelLayoutRevision = a_layoutRevision;
+			payload.displayName = !position.description.empty() ?
+				position.description :
+				(!position.displayName.empty() ? position.displayName : GetOStimNavigationPresentationID(position));
+			layout.items[slot.physicalIndex] = WheelItemFactory::MakeOStimActionItem(std::move(payload));
+			if (layout.firstPositionIndex < 0) {
+				layout.firstPositionIndex = static_cast<int>(slot.physicalIndex);
 			}
-			layout.items.push_back(WheelItemFactory::MakeOStimActionItem(std::move(payload)));
+			layout.lastPositionIndex = static_cast<int>(slot.physicalIndex);
 		}
-
-		if (page + 1 < pageCount) {
-			OStimActionPayload nextPage{};
-			nextPage.kind = OStimActionKind::OpenPositionBrowser;
-			nextPage.displayName = "Next Page";
-			nextPage.browserPage = page + 1;
-			nextPage.browserFocusIndex = static_cast<int>(layout.items.size());
-			nextPage.requiresActiveScene = true;
-			layout.nextPageIndex = static_cast<int>(layout.items.size());
-			layout.items.push_back(WheelItemFactory::MakeOStimActionItem(std::move(nextPage)));
-		}
-
-		if (layout.defaultFocusIndex < 0 && !layout.items.empty()) {
-			layout.defaultFocusIndex = 0;
-		}
-
 		return layout;
 	}
 
-	int ResolveBrowserFocusIndex(
-		const BrowserWheelLayout& a_layout,
-		BrowserFocusHint a_focusHint,
+	int ResolveUnifiedFocusIndex(
+		const UnifiedWheelLayout& a_layout,
+		UnifiedFocusHint a_focusHint,
 		int a_preservedFocusIndex)
 	{
+		const auto hasItem = [&](int a_index) {
+			return a_index >= 0 &&
+			       a_index < static_cast<int>(a_layout.items.size()) &&
+			       a_layout.items[static_cast<std::size_t>(a_index)] != nullptr;
+		};
 		switch (a_focusHint) {
-		case BrowserFocusHint::PreserveCurrent:
-			if (a_preservedFocusIndex >= 0 &&
-				a_preservedFocusIndex < static_cast<int>(a_layout.items.size())) {
+		case UnifiedFocusHint::PreserveCurrent:
+			if (hasItem(a_preservedFocusIndex)) {
 				return a_preservedFocusIndex;
 			}
 			break;
-		case BrowserFocusHint::PreviousPage:
-			if (a_layout.previousPageIndex >= 0) {
-				return a_layout.previousPageIndex;
-			}
-			if (a_layout.nextPageIndex >= 0) {
+		case UnifiedFocusHint::PreviousPage:
+			if (hasItem(a_layout.nextPageIndex)) {
 				return a_layout.nextPageIndex;
 			}
-			break;
-		case BrowserFocusHint::NextPage:
-			if (a_layout.nextPageIndex >= 0) {
-				return a_layout.nextPageIndex;
+			if (hasItem(a_layout.lastPositionIndex)) {
+				return a_layout.lastPositionIndex;
 			}
-			if (a_layout.previousPageIndex >= 0) {
+			break;
+		case UnifiedFocusHint::NextPage:
+			if (hasItem(a_layout.firstPositionIndex)) {
+				return a_layout.firstPositionIndex;
+			}
+			if (hasItem(a_layout.previousPageIndex)) {
 				return a_layout.previousPageIndex;
 			}
 			break;
-		case BrowserFocusHint::None:
+		case UnifiedFocusHint::None:
 		default:
 			break;
 		}
-
-		return a_layout.defaultFocusIndex;
+		return -1;
 	}
 
-	bool EnsureControlWheel()
+	bool EnsureControlWheel(UnifiedFocusHint a_focusHint, std::string_view a_reason)
 	{
-		if (!EnsureManagedWheel(kControlWheelTag, static_cast<std::uint32_t>(kControlLayout.size()))) {
-			return false;
-		}
-		PopulateWheel(kControlWheelTag, BuildControlWheelItems(), -1, IsActiveWheelTagged(kControlWheelTag));
-		return true;
-	}
-
-	bool EnsureBrowserWheel(BrowserFocusHint a_focusHint, bool a_refreshRoot)
-	{
-		if (a_refreshRoot) {
-			EnsureRootBrowserLevel(true);
-		}
-
-		auto* level = GetCurrentBrowserLevel();
-		if (!level || !HasBrowserEntries(*level)) {
+		const auto snapshot = OStimStateTracker::GetSnapshot();
+		if (!snapshot.sceneInfo || !snapshot.sceneInfo->active) {
 			return false;
 		}
 
-		level->page = ClampBrowserPage(level->page, level->positions);
-		const auto layout = BuildBrowserWheelLayout(*level);
-		const std::string tag = BuildBrowserWheelTag(level->page);
-		int preservedFocusIndex = level->focusIndex;
-		if (IsActiveWheelTagged(tag)) {
-			if (auto hoveredIndex = GetWheelHoveredEntryIndex(tag); hoveredIndex.has_value()) {
+		const auto physical = OStimUnifiedWheel::BuildPhysicalLayout(
+			Config::OStimIntegration::MaxPositionsPerPage);
+		if (!EnsureManagedWheel(kControlWheelTag, static_cast<std::uint32_t>(physical.entryCount))) {
+			return false;
+		}
+		++s_state.unifiedLayoutRevision;
+		const auto layout = BuildUnifiedWheelLayout(snapshot, s_state.unifiedLayoutRevision);
+		const bool resized = s_state.lastUnifiedEntryCount != 0 &&
+			s_state.lastUnifiedEntryCount != layout.items.size();
+		s_state.browserPage = layout.page;
+		int preservedFocusIndex = s_state.browserFocusIndex;
+		if (IsActiveWheelTagged(kControlWheelTag)) {
+			if (auto hoveredIndex = GetWheelHoveredEntryIndex(kControlWheelTag); hoveredIndex.has_value()) {
 				preservedFocusIndex = *hoveredIndex;
 			}
 		}
-		const int focusIndex = ResolveBrowserFocusIndex(layout, a_focusHint, preservedFocusIndex);
-		if (!EnsureManagedWheel(tag, static_cast<std::uint32_t>((std::max<std::size_t>)(1, layout.items.size())))) {
-			return false;
+		const int focusIndex = ResolveUnifiedFocusIndex(
+			layout,
+			resized ? UnifiedFocusHint::None : a_focusHint,
+			resized ? -1 : preservedFocusIndex);
+		PopulateWheel(kControlWheelTag, layout.items, focusIndex, false);
+		s_state.browserFocusIndex = focusIndex;
+		s_state.lastUnifiedEntryCount = layout.items.size();
+		if (resized && IsActiveWheelTagged(kControlWheelTag)) {
+			if (const auto controlIdx = FindWheelIndexByTag(kControlWheelTag); controlIdx.has_value()) {
+				Wheeler::SetWheelHoveredEntryIndex(*controlIdx, -1, Wheeler::IsWheelerOpen());
+			}
 		}
-		PopulateWheel(tag, layout.items, focusIndex, false);
-		level->focusIndex = focusIndex;
+		DebugLog(
+			"[OStimDiag] UNIFIED_WHEEL_REBUILD reason={} trackerRev={} layoutRev={} sceneID='{}' navigation={} page={} dynamicCapacity={} entries={} resized={}",
+			a_reason,
+			snapshot.revision,
+			s_state.unifiedLayoutRevision,
+			snapshot.sceneInfo->sceneID,
+			snapshot.positions.size(),
+			s_state.browserPage,
+			physical.dynamicCapacity,
+			layout.items.size(),
+			Bool01(resized));
 		return true;
 	}
 
 	bool OpenControlWheel(int a_focusIndex = -1)
 	{
-		if (!EnsureControlWheel()) {
+		if (!EnsureControlWheel(UnifiedFocusHint::PreserveCurrent, "OpenControlWheel")) {
 			return false;
 		}
 
@@ -910,285 +997,262 @@ namespace
 		if (!controlIdx.has_value() || !SwitchOrSetActiveWheel(*controlIdx)) {
 			return false;
 		}
-		if (a_focusIndex >= 0) {
-			Wheeler::SetWheelHoveredEntryIndex(*controlIdx, a_focusIndex, Wheeler::IsWheelerOpen());
+		const int focusIndex = a_focusIndex >= 0 ? a_focusIndex : s_state.browserFocusIndex;
+		if (focusIndex >= 0) {
+			Wheeler::SetWheelHoveredEntryIndex(*controlIdx, focusIndex, Wheeler::IsWheelerOpen());
 		}
 		return true;
 	}
 
-	bool OpenCurrentBrowserLevel(BrowserFocusHint a_focusHint, bool a_refreshRoot)
+	bool OpenBrowserPage(std::uint32_t a_page)
 	{
-		if (!EnsureBrowserWheel(a_focusHint, a_refreshRoot)) {
+		const auto previousPage = s_state.browserPage;
+		s_state.browserPage = a_page;
+		const UnifiedFocusHint focusHint = s_state.browserPage > previousPage ?
+			UnifiedFocusHint::NextPage :
+			(s_state.browserPage < previousPage ?
+				UnifiedFocusHint::PreviousPage :
+				UnifiedFocusHint::PreserveCurrent);
+		if (!EnsureControlWheel(focusHint, "ChangeUnifiedPage")) {
 			return false;
 		}
 
-		auto browserIdx = FindWheelIndexByTag(BuildBrowserWheelTag(0));
-		if (!browserIdx.has_value() || !SwitchOrSetActiveWheel(*browserIdx)) {
+		auto controlIdx = FindWheelIndexByTag(kControlWheelTag);
+		if (!controlIdx.has_value() || !SwitchOrSetActiveWheel(*controlIdx)) {
 			return false;
 		}
-
-		if (const auto* level = GetCurrentBrowserLevel();
-			level && level->focusIndex >= 0) {
-			Wheeler::SetWheelHoveredEntryIndex(*browserIdx, level->focusIndex, Wheeler::IsWheelerOpen());
+		if (s_state.browserFocusIndex >= 0) {
+			Wheeler::SetWheelHoveredEntryIndex(
+				*controlIdx,
+				s_state.browserFocusIndex,
+				Wheeler::IsWheelerOpen());
 		}
 		return true;
 	}
 
-	bool OpenBrowserPage(std::uint32_t a_page, bool a_forceRoot)
-	{
-		const bool alreadyBrowsing = IsActiveWheelTagged(kBrowserWheelTag);
-		if (a_forceRoot || !alreadyBrowsing) {
-			CollapseBrowserToRoot(true);
-		} else if (s_state.browserStack.empty()) {
-			EnsureRootBrowserLevel(true);
-		}
-
-		auto* level = GetCurrentBrowserLevel();
-		if (!level) {
-			return false;
-		}
-
-		const auto previousPage = level->page;
-		level->page = ClampBrowserPage(a_page, level->positions);
-		const BrowserFocusHint focusHint = alreadyBrowsing ?
-			(level->page > previousPage ? BrowserFocusHint::NextPage :
-			(level->page < previousPage ? BrowserFocusHint::PreviousPage :
-				BrowserFocusHint::PreserveCurrent)) :
-			BrowserFocusHint::None;
-		return OpenCurrentBrowserLevel(focusHint, false);
-	}
-
-	bool OpenPositionSubmenu(const OStimActionPayload& a_payload)
-	{
-		if (a_payload.sceneID.empty()) {
-			return false;
-		}
-
-		if (s_state.browserStack.empty()) {
-			EnsureRootBrowserLevel(true);
-		}
-		auto* currentLevel = GetCurrentBrowserLevel();
-		if (!currentLevel) {
-			return false;
-		}
-
-		if (SceneKeysEqual(currentLevel->sceneID, a_payload.sceneID)) {
-			DebugLog(
-				"[OStimIntegration] submenu duplicate ignored scene='{}' depth={}",
-				a_payload.sceneID,
-				s_state.browserStack.size());
-			return OpenCurrentBrowserLevel(BrowserFocusHint::PreserveCurrent, false);
-		}
-
-		if (IsActiveWheelTagged(kBrowserWheelTag)) {
-			if (auto hoveredIndex = GetWheelHoveredEntryIndex(kBrowserWheelTag); hoveredIndex.has_value()) {
-				currentLevel->focusIndex = *hoveredIndex;
-			}
-		}
-		if (a_payload.browserFocusIndex >= 0) {
-			currentLevel->focusIndex = a_payload.browserFocusIndex;
-		}
-
-		if (auto existingLevelIndex = FindBrowserLevelIndexByScene(a_payload.sceneID); existingLevelIndex.has_value()) {
-			DebugLog(
-				"[OStimIntegration] submenu collapse scene='{}' fromDepth={} toDepth={}",
-				a_payload.sceneID,
-				s_state.browserStack.size(),
-				*existingLevelIndex + 1);
-			CollapseBrowserToLevel(*existingLevelIndex);
-			return OpenCurrentBrowserLevel(BrowserFocusHint::PreserveCurrent, false);
-		}
-
-		auto childPositions = OStimPreviewResolver::GetSceneNavigationChildren(
-			a_payload.sceneID,
-			a_payload.sourceSceneID);
-		HydratePositionDisplayNames(childPositions);
-		if (childPositions.empty()) {
-			DebugLog(
-				"[OStimIntegration] submenu missing children scene='{}' parent='{}'",
-				a_payload.sceneID,
-				currentLevel->sceneID);
-			return false;
-		}
-
-		IntegrationState::BrowserContextLevel submenu{};
-		submenu.sceneID = a_payload.sceneID;
-		submenu.parentSceneID = a_payload.sourceSceneID;
-		submenu.displayName = a_payload.displayName.empty() ?
-			HumanizeBrowserLabel(a_payload.sceneID) :
-			a_payload.displayName;
-		submenu.previewPath = a_payload.previewPath;
-		submenu.iconPath = a_payload.iconPath;
-		submenu.category = a_payload.category;
-		submenu.subcategory = a_payload.subcategory;
-		submenu.positions = std::move(childPositions);
-		submenu.parentReturnFocusIndex = currentLevel->focusIndex;
-		submenu.allowDirectSelection = true;
-
-		DebugLog(
-			"[OStimIntegration] submenu push scene='{}' parent='{}' depth={} entries={} returnFocus={}",
-			submenu.sceneID,
-			currentLevel->sceneID,
-			s_state.browserStack.size() + 1,
-			submenu.positions.size(),
-			submenu.parentReturnFocusIndex);
-		s_state.browserStack.push_back(std::move(submenu));
-		return OpenCurrentBrowserLevel(BrowserFocusHint::None, false);
-	}
-
-	bool ReturnToParentBrowser()
-	{
-		if (s_state.browserStack.size() <= 1) {
-			return false;
-		}
-
-		const auto childLevel = std::move(s_state.browserStack.back());
-		s_state.browserStack.pop_back();
-		int restoredFocusIndex = childLevel.parentReturnFocusIndex;
-		const std::string childSceneID = childLevel.sceneID;
-
-		while (s_state.browserStack.size() > 1) {
-			auto* duplicateLevel = GetCurrentBrowserLevel();
-			if (!duplicateLevel || !SceneKeysEqual(duplicateLevel->sceneID, childSceneID)) {
-				break;
-			}
-
-			if (duplicateLevel->parentReturnFocusIndex >= 0) {
-				restoredFocusIndex = duplicateLevel->parentReturnFocusIndex;
-			}
-
-			DebugLog(
-				"[OStimIntegration] browser back skipping duplicate scene='{}' depth={}",
-				duplicateLevel->sceneID,
-				s_state.browserStack.size());
-			s_state.browserStack.pop_back();
-		}
-
-		auto* parentLevel = GetCurrentBrowserLevel();
-		if (!parentLevel) {
-			return false;
-		}
-
-		if (restoredFocusIndex >= 0) {
-			parentLevel->focusIndex = restoredFocusIndex;
-		}
-
-		DebugLog(
-			"[OStimIntegration] browser back child='{}' depth={} focus={}",
-			childSceneID,
-			s_state.browserStack.size(),
-			parentLevel->focusIndex);
-		return OpenCurrentBrowserLevel(BrowserFocusHint::PreserveCurrent, false);
-	}
-
-	bool QueueWheelNavigationTask(OStimActionKind a_kind, OStimActionPayload a_payload)
+	bool QueueWheelNavigationTask(
+		OStimActionKind a_kind,
+		OStimActionPayload a_payload,
+		std::uint64_t a_actionID)
 	{
 		auto* taskInterface = SKSE::GetTaskInterface();
 		if (!taskInterface) {
 			DebugLog("[OStimIntegration] navigation action={} skipped because task interface is unavailable", static_cast<std::uint32_t>(a_kind));
+			ActionDispatchResult result{};
+			result.path = "TaskInterfaceUnavailable";
+			LogActionEnd(a_actionID, a_kind, result, s_state.browserPage, s_state.browserPage);
 			return false;
 		}
 
-		taskInterface->AddTask([kind = a_kind, payload = std::move(a_payload)]() {
-			if (!OStimIntegration::CanExecuteAction(kind, &payload)) {
-				DebugLog("[OStimIntegration] navigation action={} failed guards before queued execution", static_cast<std::uint32_t>(kind));
-				return;
-			}
+		const auto intentEpoch = Wheeler::GetTransientRestorationEpoch();
+		taskInterface->AddTask([kind = a_kind, payload = std::move(a_payload), intentEpoch, actionID = a_actionID]() {
+			const std::uint32_t pageBefore = s_state.browserPage;
+			const bool authorized = Wheeler::ExecuteTransientGameplayIfCurrent(intentEpoch, [kind, payload, actionID, pageBefore]() {
+				if (!OStimIntegration::CanExecuteAction(kind, &payload)) {
+					DebugLog("[OStimIntegration] navigation action={} failed guards before queued execution", static_cast<std::uint32_t>(kind));
+					ActionDispatchResult result{};
+					result.path = "QueuedGuardRejected";
+					LogActionEnd(actionID, kind, result, pageBefore, s_state.browserPage);
+					return;
+				}
 
-			switch (kind) {
-			case OStimActionKind::OpenControlWheel:
-				OpenControlWheel(payload.browserFocusIndex);
-				break;
-			case OStimActionKind::OpenPositionSubmenu:
-				OpenPositionSubmenu(payload);
-				break;
-			case OStimActionKind::ReturnToPositionBrowserParent:
-				ReturnToParentBrowser();
-				break;
-			case OStimActionKind::ReturnToControlWheel:
-				InvalidateBrowserState();
-				OpenControlWheel(payload.browserFocusIndex >= 0 ?
-					payload.browserFocusIndex :
-					GetControlWheelEntryIndex(OStimActionKind::OpenPositionBrowser).value_or(-1));
-				break;
-			case OStimActionKind::OpenPositionBrowser:
-				OpenBrowserPage(payload.browserPage, !IsActiveWheelTagged(kBrowserWheelTag));
-				break;
-			default:
-				break;
+				ActionDispatchResult result{};
+				result.backend = "WheelerUI";
+				switch (kind) {
+				case OStimActionKind::OpenControlWheel:
+					result.path = "OpenControlWheel";
+					result.result = OpenControlWheel(payload.browserFocusIndex);
+					break;
+				case OStimActionKind::ReturnToControlWheel:
+					result.path = "ReturnToControlWheel";
+					InvalidateBrowserState();
+					result.result = OpenControlWheel(payload.browserFocusIndex);
+					break;
+				case OStimActionKind::OpenPositionBrowser:
+					result.path = "ChangeUnifiedPage";
+					result.result = OpenBrowserPage(payload.browserPage);
+					break;
+				default:
+					result.path = "NoDispatch";
+					result.backend = "None";
+					break;
+				}
+				LogActionEnd(actionID, kind, result, pageBefore, s_state.browserPage);
+			});
+			if (!authorized) {
+				ActionDispatchResult result{};
+				result.path = "TransientEpochRejected";
+				LogActionEnd(actionID, kind, result, pageBefore, s_state.browserPage);
 			}
 		});
 
 		return true;
 	}
 
-	std::optional<std::size_t> FindCurrentPositionIndex(
-		const std::vector<OStimPositionInfo>& a_positions,
-		const std::string& a_sceneID)
+	ActionDispatchResult RunActionNow(OStimActionKind a_kind, const OStimActionPayload* a_payload)
 	{
-		for (std::size_t i = 0; i < a_positions.size(); ++i) {
-			if (a_positions[i].id == a_sceneID || a_positions[i].destinationID == a_sceneID) {
-				return i;
-			}
+		ActionDispatchResult result{};
+		if (IsStaleManagedWheelPayload(a_payload)) {
+			result.path = "StaleWheelLayout";
+			result.backend = "WheelerUI";
+			return result;
 		}
-		return std::nullopt;
-	}
-
-	bool RunActionNow(OStimActionKind a_kind, const OStimActionPayload* a_payload)
-	{
 		if (IsSceneBlockedByMenus()) {
-			return false;
+			result.path = "MenuBlocked";
+			return result;
 		}
 		if (!RE::PlayerCharacter::GetSingleton() ||
 			!RE::PlayerCharacter::GetSingleton()->Is3DLoaded()) {
-			return false;
+			result.path = "PlayerUnavailable";
+			return result;
 		}
 
 		switch (a_kind) {
 		case OStimActionKind::StopScene:
-			return OStimBridge::CallAPIMethod("EndAnimation", true);
+			result.path = "EndAnimation";
+			result.backend = "Papyrus";
+			result.result = OStimBridge::CallAPIMethod("EndAnimation", true);
+			return result;
 		case OStimActionKind::IncreaseSpeed:
-			return OStimNGThreadAPI::AdjustSpeed(+1) || OStimBridge::CallAPIMethod("IncreaseAnimationSpeed");
 		case OStimActionKind::DecreaseSpeed:
-			return OStimNGThreadAPI::AdjustSpeed(-1) || OStimBridge::CallAPIMethod("DecreaseAnimationSpeed");
-		case OStimActionKind::SelectSpecificPosition:
-			return a_payload &&
-			       !a_payload->sceneID.empty() &&
-			       (OStimNGThreadAPI::NavigateToScene(a_payload->sceneID) ||
-			        OStimBridge::CallAPIMethod("TravelToAnimationIfPossible", a_payload->sceneID));
-		case OStimActionKind::NextPosition:
-		case OStimActionKind::PreviousPosition:
 		{
-			const auto scene = OStimBridge::GetCurrentSceneInfo();
-			if (!SceneAllowsDirectControls(scene)) {
-				return false;
+			result.path = "AdjustSpeed";
+			const int delta = a_kind == OStimActionKind::IncreaseSpeed ? +1 : -1;
+			result.target = delta > 0 ? "+1" : "-1";
+			if (OStimNGThreadAPI::AdjustSpeed(delta)) {
+				result.result = true;
+				result.backend = "NativeThreadAPI";
+				return result;
 			}
-
-			auto positions = GetActionPositions(*scene);
-			if (positions.empty()) {
-				return false;
-			}
-
-			std::size_t targetIndex = 0;
-			if (auto currentIndex = FindCurrentPositionIndex(positions, scene->sceneID); currentIndex.has_value()) {
-				const std::size_t delta = a_kind == OStimActionKind::NextPosition ? 1 : positions.size() - 1;
-				targetIndex = ((*currentIndex) + delta) % positions.size();
-			} else {
-				targetIndex = a_kind == OStimActionKind::NextPosition ? 0 : positions.size() - 1;
-			}
-
-			return NavigateToPosition(positions[targetIndex]);
+			result.backend = "PapyrusFallback";
+			result.result = OStimBridge::CallAPIMethod(
+				delta > 0 ? "IncreaseAnimationSpeed" : "DecreaseAnimationSpeed");
+			return result;
 		}
+		case OStimActionKind::ToggleAutoMode:
+		{
+			result.path = "AutoModeRejected";
+			result.backend = "NativeSceneAPI";
+			const auto snapshot = OStimStateTracker::GetSnapshot();
+			const bool sceneActive = snapshot.sceneInfo && snapshot.sceneInfo->active;
+			const bool currentAutoMode = snapshot.sceneInfo && snapshot.sceneInfo->autoMode;
+			const auto decision = BuildOStimAutoModeDecision(
+				sceneActive,
+				OStimNGSceneAPI::IsAvailable(),
+				currentAutoMode);
+			const std::uint32_t threadID = snapshot.sceneInfo ? snapshot.sceneInfo->threadID : 0;
+			result.target = decision.desiredAutoMode ? "1" : "0";
+			if (!decision.canDispatch) {
+				DebugLog(
+					"[OStimDiag] AUTO_MODE_RESULT thread={} desired={} result=0 backend=NativeSceneAPI reason='{}'",
+					threadID,
+					Bool01(decision.desiredAutoMode),
+					decision.rejectionReason);
+				return result;
+			}
+
+			DebugLog(
+				"[OStimDiag] AUTO_MODE_REQUEST thread={} current={} desired={} backend=NativeSceneAPI",
+				threadID,
+				Bool01(decision.currentAutoMode),
+				Bool01(decision.desiredAutoMode));
+			OStimNGSceneAPI::DispatchResult nativeResult = OStimNGSceneAPI::DispatchResult::Failed;
+			result.result = DispatchOStimAutoMode(
+				decision,
+				threadID,
+				[&](std::uint32_t a_threadID, bool a_autoMode) {
+					nativeResult = OStimNGSceneAPI::SetAutoMode(a_threadID, a_autoMode);
+					return nativeResult == OStimNGSceneAPI::DispatchResult::Success;
+				});
+			result.path = result.result ? "AutoModeDispatchAccepted" : "AutoModeDispatchFailed";
+			if (result.result) {
+				DebugLog(
+					"[OStimDiag] AUTO_MODE_RESULT thread={} desired={} result=1 backend=NativeSceneAPI",
+					threadID,
+					Bool01(decision.desiredAutoMode));
+			} else {
+				DebugLog(
+					"[OStimDiag] AUTO_MODE_RESULT thread={} desired={} result=0 backend=NativeSceneAPI reason='{}'",
+					threadID,
+					Bool01(decision.desiredAutoMode),
+					OStimNGSceneAPI::GetDispatchResultReason(nativeResult));
+			}
+			return result;
+		}
+		case OStimActionKind::SelectSpecificPosition:
+			result.path = "NavigationRejected";
+			if (!a_payload || a_payload->sceneID.empty()) {
+				return result;
+			}
+			result.target = a_payload->sceneID;
+			{
+				const auto snapshot = OStimStateTracker::GetSnapshot();
+				const auto validation = ValidateOStimNavigationSelection(
+					snapshot.sceneInfo,
+					snapshot.positions,
+					*a_payload);
+				if (validation != OStimNavigationSelectionStatus::Ready) {
+					const std::string currentSceneID = snapshot.sceneInfo ?
+						snapshot.sceneInfo->sceneID : std::string{};
+					DebugLog(
+						"[OStimDiag] NAV_STALE_REJECT payloadSceneID='{}' destinationID='{}' payloadSourceSceneID='{}' currentTrackerScene='{}' navigation={} reason={}",
+						a_payload->sceneID,
+						a_payload->positionID,
+						a_payload->sourceSceneID,
+						currentSceneID,
+						snapshot.positions.size(),
+						GetOStimNavigationSelectionStatusName(validation));
+					result.backend = "TrackerSnapshot";
+					OStimIntegration::RequestRefresh();
+					if (IsActiveWheelTagged(kControlWheelTag)) {
+						EnsureControlWheel(UnifiedFocusHint::PreserveCurrent, "NavigationRejected");
+					}
+					return result;
+				}
+
+				if (snapshot.availability.hasNativeThreadAPI) {
+					result.backend = "NativeThreadAPI";
+					if (OStimNGThreadAPI::NavigateToScene(
+							snapshot.sceneInfo->threadID,
+							a_payload->sceneID)) {
+						result.result = true;
+						result.path = "NavigationDispatchAccepted";
+						DebugLog(
+							"[OStimDiag] NAV_DISPATCH_ACCEPTED sceneID='{}' destinationID='{}' sourceSceneID='{}' trackerRev={}",
+							a_payload->sceneID,
+							a_payload->positionID,
+							a_payload->sourceSceneID,
+							snapshot.revision);
+					} else {
+						result.path = "NavigationDispatchNotAccepted";
+					}
+					return result;
+				}
+
+				result.backend = "LegacyPapyrus";
+				result.path = "LegacyNavigationDispatch";
+				result.result = OStimBridge::CallAPIMethod(
+					"TravelToAnimationIfPossible",
+					a_payload->sceneID);
+				return result;
+			}
 		default:
-			return false;
+			result.path = "NoDispatch";
+			return result;
 		}
 	}
 
-	bool QueuePapyrusAction(OStimActionKind a_kind, const OStimActionPayload* a_payload)
+	bool QueueSceneAction(
+		OStimActionKind a_kind,
+		const OStimActionPayload* a_payload,
+		std::uint64_t a_actionID)
 	{
 		auto* taskInterface = SKSE::GetTaskInterface();
 		if (!taskInterface) {
 			DebugLog("[OStimIntegration] action={} skipped because task interface is unavailable", static_cast<std::uint32_t>(a_kind));
+			ActionDispatchResult result{};
+			result.path = "TaskInterfaceUnavailable";
+			LogActionEnd(a_actionID, a_kind, result, s_state.browserPage, s_state.browserPage);
 			return false;
 		}
 
@@ -1198,22 +1262,93 @@ namespace
 		} else {
 			payload.kind = a_kind;
 		}
-	taskInterface->AddTask([payload]() {
-		if (RunActionNow(payload.kind, &payload)) {
-			if (payload.kind == OStimActionKind::StopScene) {
-				s_state.suppressManagedWheelsUntilSceneStops = true;
-				DeleteManagedWheels();
-				OStimIntegration::RequestRefresh();
+		const auto intentEpoch = Wheeler::GetTransientRestorationEpoch();
+		taskInterface->AddTask([payload, intentEpoch, actionID = a_actionID]() {
+			const std::uint32_t browserPage = s_state.browserPage;
+			const bool authorized = Wheeler::ExecuteTransientGameplayIfCurrent(intentEpoch, [payload, actionID, browserPage]() {
+				std::vector<OStimParticipantInfo> participants;
+				if (actionID != 0 && IsNavigationAction(payload.kind) && Config::OStimIntegration::DebugLog) {
+					const auto snapshot = GetDiagnosticSnapshot();
+					LogNavigationSnapshot(
+						snapshot.sceneInfo ? snapshot.sceneInfo->threadID : 0,
+						snapshot.positions);
+					if (snapshot.sceneInfo) {
+						participants = snapshot.sceneInfo->participants;
+					}
+					LogEquipmentSnapshot(
+						DiagnosticSequenceSource::Action,
+						actionID,
+						fmt::format("{}+before", OStimIntegration::GetActionLabel(payload.kind)),
+						participants);
+				}
+
+				const ActionDispatchResult result = RunActionNow(payload.kind, &payload);
+				LogActionEnd(actionID, payload.kind, result, browserPage, s_state.browserPage);
+				if (result.result) {
+					if (payload.kind == OStimActionKind::StopScene) {
+						s_state.suppressManagedWheelsUntilSceneStops = true;
+						DeleteManagedWheels();
+						OStimIntegration::RequestRefresh();
+					}
+					OStimStateTracker::MarkActionExecuted(payload.kind);
+					if (actionID != 0 && IsNavigationAction(payload.kind)) {
+						for (const auto delay : { 250, 1000 }) {
+							ScheduleEquipmentSnapshot(
+								DiagnosticSequenceSource::Action,
+								actionID,
+								fmt::format("{}+{}ms", OStimIntegration::GetActionLabel(payload.kind), delay),
+								delay,
+								participants);
+						}
+					}
+					if (payload.kind == OStimActionKind::SelectSpecificPosition) {
+						const auto policy = OStimSceneActionUI::Evaluate(
+							true,
+							Config::OStimIntegration::CloseWheelAfterSceneAction);
+						if (policy.resetNavigationPage) {
+							InvalidateBrowserState();
+						}
+						DebugLog(
+							"[OStimDiag] SCENE_ACTION_UI_POLICY sceneID='{}' closeAfterAction={} decision={}",
+							payload.sceneID,
+							Bool01(Config::OStimIntegration::CloseWheelAfterSceneAction),
+							policy.decision == OStimSceneActionUI::Decision::Close ? "Close" : "KeepOpen");
+						if (policy.decision == OStimSceneActionUI::Decision::Close) {
+							ClearAcceptedNavigationPending();
+							if (Wheeler::IsWheelerOpen()) {
+								Wheeler::CloseWheeler();
+							}
+						} else if (policy.decision == OStimSceneActionUI::Decision::KeepOpen) {
+							s_state.acceptedNavigationPending = true;
+							s_state.acceptedNavigationSourceSceneID = payload.sourceSceneID;
+							if (IsActiveWheelTagged(kControlWheelTag)) {
+								EnsureControlWheel(UnifiedFocusHint::None, "SceneActionKeepOpen");
+								if (auto controlIdx = FindWheelIndexByTag(kControlWheelTag); controlIdx.has_value()) {
+									Wheeler::SetWheelHoveredEntryIndex(
+										*controlIdx,
+										-1,
+										Wheeler::IsWheelerOpen());
+								}
+							}
+						}
+					}
+				} else {
+					DebugLog("[OStimIntegration] action={} failed guards or scene dispatch", static_cast<std::uint32_t>(payload.kind));
+				}
+			});
+			if (!authorized) {
+				ActionDispatchResult result{};
+				result.path = "TransientEpochRejected";
+				LogActionEnd(actionID, payload.kind, result, browserPage, s_state.browserPage);
 			}
-			OStimStateTracker::MarkActionExecuted(payload.kind);
-		} else {
-			DebugLog("[OStimIntegration] action={} failed guards or scene dispatch", static_cast<std::uint32_t>(payload.kind));
-		}
-	});
+		});
 		return true;
 	}
 
-	void RebuildManagedWheelsIfNeeded(std::uint64_t a_revision)
+	void RebuildManagedWheelsIfNeeded(
+		std::uint64_t a_revision,
+		UnifiedFocusHint a_focusHint,
+		std::string_view a_reason)
 	{
 		if (!Config::OStimIntegration::CreateManagedWheel) {
 			DeleteManagedWheels();
@@ -1221,36 +1356,7 @@ namespace
 			return;
 		}
 
-		if (Wheeler::IsWheelerOpen()) {
-			if (auto activeIdx = Wheeler::GetActiveWheelIndex();
-				OStimIntegration::IsManagedWheelIndex(activeIdx)) {
-				std::shared_lock<std::shared_mutex> lock(Wheeler::GetWheelDataLock());
-				if (Wheel* wheel = Wheeler::GetWheelByIndex(activeIdx)) {
-					DebugLog(
-						"[OStimIntegration] deferred live refresh revision={} tag='{}' depth={}",
-						a_revision,
-						wheel->GetClientTag(),
-						s_state.browserStack.size());
-					s_state.lastAppliedRevision = a_revision;
-					return;
-				}
-			}
-		}
-
-		EnsureControlWheel();
-		if (auto activeIdx = Wheeler::GetActiveWheelIndex();
-			OStimIntegration::IsManagedWheelIndex(activeIdx)) {
-			std::shared_lock<std::shared_mutex> lock(Wheeler::GetWheelDataLock());
-			if (Wheel* wheel = Wheeler::GetWheelByIndex(activeIdx)) {
-				if (IsBrowserWheelTag(wheel->GetClientTag())) {
-					lock.unlock();
-					DebugLog(
-						"[OStimIntegration] browser refresh requested while not open revision={} depth={}",
-						a_revision,
-						s_state.browserStack.size());
-				}
-			}
-		}
+		EnsureControlWheel(a_focusHint, a_reason);
 
 		s_state.lastAppliedRevision = a_revision;
 	}
@@ -1258,26 +1364,64 @@ namespace
 
 void OStimIntegration::Init()
 {
+	DeleteManagedWheels();
 	s_state = IntegrationState{};
+	s_nextActionID.store(0, std::memory_order_release);
+	s_state.diagnosticsEnabled = Config::OStimIntegration::DebugLog;
+	OStimNGThreadAPI::SetDiagnosticsEnabled(s_state.diagnosticsEnabled);
 	OStimStateTracker::Reset();
+	OStimUndressVisualRefresh::Reset();
 	RequestRefresh();
 }
 
 void OStimIntegration::Reset()
 {
+	DebugLog("[OStimDiag] RESET_BEGIN");
+	// Called from Wheeler::ClearWheelData while the wheel-data lock may already
+	// be exclusively held. Do not enumerate, create, delete, or switch wheels here.
 	s_state = IntegrationState{};
+	s_nextActionID.store(0, std::memory_order_release);
+	s_state.diagnosticsEnabled = Config::OStimIntegration::DebugLog;
+	OStimNGThreadAPI::SetDiagnosticsEnabled(s_state.diagnosticsEnabled);
+	DebugLog("[OStimDiag] RESET_TRACKER_BEGIN");
+	OStimUndressVisualRefresh::Reset();
 	OStimStateTracker::Reset();
+	DebugLog("[OStimDiag] RESET_TRACKER_END");
+	DebugLog("[OStimDiag] RESET_END");
 }
 
 void OStimIntegration::Update()
 {
+	const bool diagnosticsEnabled = Config::OStimIntegration::DebugLog;
+	if (diagnosticsEnabled && !s_state.diagnosticsEnabled) {
+		s_state.lastDiagnosticNativeRevision = OStimNGThreadAPI::GetEventRevision();
+	}
+	OStimNGThreadAPI::SetDiagnosticsEnabled(diagnosticsEnabled);
+	s_state.diagnosticsEnabled = diagnosticsEnabled;
+	if (!diagnosticsEnabled) {
+		s_state.pendingEquipmentSnapshots.clear();
+	}
+
 	if (Config::OStimIntegration::Enabled || Config::OStimIntegration::AutoDetect) {
 		OStimStateTracker::Update(s_state.refreshRequested);
 	}
 	s_state.refreshRequested = false;
+	const bool wheelRebuildRequested = s_state.wheelRebuildRequested;
+	s_state.wheelRebuildRequested = false;
+	if (diagnosticsEnabled) {
+		ProcessNativeDiagnosticEvents();
+		ProcessPendingEquipmentSnapshots();
+	}
 
 	const auto availability = OStimStateTracker::GetAvailability();
 	const bool sceneActive = availability.available && OStimStateTracker::IsSceneActive();
+	OStimUndressVisualRefresh::Update(availability.available, sceneActive);
+	if (s_state.acceptedNavigationPending) {
+		const auto snapshot = OStimStateTracker::GetSnapshot();
+		if (!ShouldHoldAcceptedNavigation(snapshot)) {
+			ClearAcceptedNavigationPending();
+		}
+	}
 
 	if (availability.available != s_state.lastAvailable ||
 		availability.reason != s_state.lastAvailabilityReason) {
@@ -1323,8 +1467,11 @@ void OStimIntegration::Update()
 			RememberPreviousWheelIfNeeded();
 		}
 
-		if (revision != s_state.lastAppliedRevision || !s_state.lastSceneActive) {
-			RebuildManagedWheelsIfNeeded(revision);
+		if (wheelRebuildRequested || revision != s_state.lastAppliedRevision || !s_state.lastSceneActive) {
+			RebuildManagedWheelsIfNeeded(
+				revision,
+				wheelRebuildRequested ? UnifiedFocusHint::None : UnifiedFocusHint::PreserveCurrent,
+				wheelRebuildRequested ? "ConfigRefresh" : "TrackerRevision");
 		}
 
 		if (!s_state.lastSceneActive &&
@@ -1346,6 +1493,7 @@ void OStimIntegration::Update()
 void OStimIntegration::RequestRefresh()
 {
 	s_state.refreshRequested = true;
+	s_state.wheelRebuildRequested = true;
 	OStimStateTracker::Update(true);
 }
 
@@ -1366,16 +1514,13 @@ bool OStimIntegration::IsSceneActive()
 
 bool OStimIntegration::CanExecuteAction(OStimActionKind a_kind, const OStimActionPayload* a_payload)
 {
-	if (!IsEnabled()) {
+	if (!IsEnabled() || IsStaleManagedWheelPayload(a_payload)) {
 		return false;
 	}
 
-	const auto scene = OStimStateTracker::GetCurrentSceneInfo();
-	const bool sceneActive = scene && scene->active;
-	const bool sceneControllable = SceneAllowsDirectControls(scene);
-	const auto positions = OStimStateTracker::GetAvailablePositions();
-	const bool hasBrowserSnapshot = HasBrowserSnapshot();
-	const bool browsingManagedWheel = IsActiveWheelTagged(kBrowserWheelTag);
+	const auto snapshot = OStimStateTracker::GetSnapshot();
+	const bool sceneActive = snapshot.sceneInfo && snapshot.sceneInfo->active;
+	const bool sceneControllable = SceneAllowsDirectControls(snapshot.sceneInfo);
 
 	switch (a_kind) {
 	case OStimActionKind::OpenControlWheel:
@@ -1384,34 +1529,34 @@ bool OStimIntegration::CanExecuteAction(OStimActionKind a_kind, const OStimActio
 	case OStimActionKind::OpenPositionBrowser:
 		return Config::OStimIntegration::CreateManagedWheel &&
 		       Config::OStimIntegration::AllowPositionBrowsing &&
-		       ((sceneControllable && (!positions.empty() || hasBrowserSnapshot)) ||
-		        (browsingManagedWheel && hasBrowserSnapshot));
+		       sceneControllable &&
+		       !snapshot.positions.empty();
 	case OStimActionKind::OpenPositionSubmenu:
-		return Config::OStimIntegration::CreateManagedWheel &&
-		       Config::OStimIntegration::AllowPositionBrowsing &&
-		       a_payload &&
-		       !a_payload->sceneID.empty() &&
-		       ((sceneControllable && (!positions.empty() || hasBrowserSnapshot)) ||
-		        (browsingManagedWheel && hasBrowserSnapshot)) &&
-		       OStimPreviewResolver::HasBrowsableChildScenes(a_payload->sceneID, a_payload->sourceSceneID);
 	case OStimActionKind::ReturnToPositionBrowserParent:
-		return Config::OStimIntegration::CreateManagedWheel &&
-		       browsingManagedWheel &&
-		       s_state.browserStack.size() > 1;
+		return false;
 	case OStimActionKind::StopScene:
 		return sceneActive && OStimStateTracker::CanDispatchByCooldown(a_kind);
 	case OStimActionKind::IncreaseSpeed:
 	case OStimActionKind::DecreaseSpeed:
 		return sceneControllable && OStimStateTracker::CanDispatchByCooldown(a_kind);
+	case OStimActionKind::ToggleAutoMode:
+		return BuildOStimAutoModeDecision(
+			       sceneActive,
+			       OStimNGSceneAPI::IsAvailable(),
+			       snapshot.sceneInfo && snapshot.sceneInfo->autoMode)
+		           .canDispatch &&
+		       OStimStateTracker::CanDispatchByCooldown(a_kind);
 	case OStimActionKind::NextPosition:
 	case OStimActionKind::PreviousPosition:
-		return sceneControllable &&
-		       !positions.empty() &&
-		       OStimStateTracker::CanDispatchByCooldown(a_kind);
+		return false;
 	case OStimActionKind::SelectSpecificPosition:
-		return sceneControllable &&
-		       a_payload &&
+		return a_payload &&
+		       !ShouldHoldAcceptedNavigation(snapshot) &&
 		       !a_payload->sceneID.empty() &&
+		       ValidateOStimNavigationSelection(
+			       snapshot.sceneInfo,
+			       snapshot.positions,
+			       *a_payload) == OStimNavigationSelectionStatus::Ready &&
 		       OStimStateTracker::CanDispatchByCooldown(a_kind);
 	case OStimActionKind::NextStage:
 	case OStimActionKind::PreviousStage:
@@ -1425,7 +1570,60 @@ bool OStimIntegration::CanExecuteAction(OStimActionKind a_kind, const OStimActio
 
 bool OStimIntegration::ExecuteAction(OStimActionKind a_kind, const OStimActionPayload* a_payload)
 {
-	if (!CanExecuteAction(a_kind, a_payload)) {
+	const bool diagnosticsEnabled = Config::OStimIntegration::DebugLog;
+	const std::uint64_t actionID = diagnosticsEnabled ?
+		s_nextActionID.fetch_add(1, std::memory_order_acq_rel) + 1 :
+		0;
+	const bool canExecute = CanExecuteAction(a_kind, a_payload);
+	if (diagnosticsEnabled) {
+		const OStimActionPayload emptyPayload{};
+		const auto& payload = a_payload ? *a_payload : emptyPayload;
+		const auto snapshot = GetDiagnosticSnapshot();
+		const OStimSceneInfo emptyScene{};
+		const auto& sceneInfo = snapshot.sceneInfo ? *snapshot.sceneInfo : emptyScene;
+		const char* label = payload.displayName.empty() ?
+			GetActionLabel(a_kind) :
+			payload.displayName.c_str();
+		DebugLog(
+			"[OStimDiag] ACTION_BEGIN id={} kind={} kindValue={} label='{}' sceneID='{}' destinationID='{}' sourceSceneID='{}' requiresActiveScene={} canExecute={} currentScene='{}' node='{}' nav={} page={}",
+			actionID,
+			GetActionLabel(a_kind),
+			static_cast<std::uint32_t>(a_kind),
+			label,
+			payload.sceneID,
+			payload.positionID,
+			payload.sourceSceneID,
+			Bool01(payload.requiresActiveScene),
+			Bool01(canExecute),
+			sceneInfo.sceneID,
+			sceneInfo.animationName,
+			snapshot.positions.size(),
+			s_state.browserPage);
+		LogStateSnapshot(
+			fmt::format("Action:{}", GetActionLabel(a_kind)),
+			OStimNGThreadAPI::GetEventRevision(),
+			snapshot.sceneInfo,
+			snapshot.positions.size());
+		LogNavigationSnapshot(sceneInfo.threadID, snapshot.positions);
+	}
+
+	if (!canExecute) {
+		if (a_kind == OStimActionKind::SelectSpecificPosition &&
+			IsEnabled() &&
+			!IsStaleManagedWheelPayload(a_payload) &&
+			a_payload &&
+			!a_payload->sceneID.empty()) {
+			const auto snapshot = OStimStateTracker::GetSnapshot();
+			if (ValidateOStimNavigationSelection(
+					snapshot.sceneInfo,
+					snapshot.positions,
+					*a_payload) != OStimNavigationSelectionStatus::Ready) {
+				return QueueSceneAction(a_kind, a_payload, actionID);
+			}
+		}
+		ActionDispatchResult result{};
+		result.path = "CanExecuteRejected";
+		LogActionEnd(actionID, a_kind, result, s_state.browserPage, s_state.browserPage);
 		return false;
 	}
 
@@ -1434,35 +1632,33 @@ bool OStimIntegration::ExecuteAction(OStimActionKind a_kind, const OStimActionPa
 	{
 		OStimActionPayload payload = a_payload ? *a_payload : OStimActionPayload{};
 		payload.kind = a_kind;
-		return QueueWheelNavigationTask(a_kind, std::move(payload));
+		return QueueWheelNavigationTask(a_kind, std::move(payload), actionID);
 	}
-	case OStimActionKind::OpenPositionSubmenu:
-	case OStimActionKind::ReturnToPositionBrowserParent:
 	case OStimActionKind::ReturnToControlWheel:
 	{
 		OStimActionPayload payload = a_payload ? *a_payload : OStimActionPayload{};
 		payload.kind = a_kind;
-		if (a_kind == OStimActionKind::ReturnToControlWheel &&
-			payload.browserFocusIndex < 0) {
-			payload.browserFocusIndex = GetControlWheelEntryIndex(OStimActionKind::OpenPositionBrowser).value_or(-1);
-		}
-		return QueueWheelNavigationTask(a_kind, std::move(payload));
+		return QueueWheelNavigationTask(a_kind, std::move(payload), actionID);
 	}
 	case OStimActionKind::OpenPositionBrowser:
 	{
 		OStimActionPayload payload = a_payload ? *a_payload : OStimActionPayload{};
 		payload.kind = a_kind;
-		return QueueWheelNavigationTask(a_kind, std::move(payload));
+		return QueueWheelNavigationTask(a_kind, std::move(payload), actionID);
 	}
 	case OStimActionKind::StopScene:
 	case OStimActionKind::IncreaseSpeed:
 	case OStimActionKind::DecreaseSpeed:
-	case OStimActionKind::NextPosition:
-	case OStimActionKind::PreviousPosition:
+	case OStimActionKind::ToggleAutoMode:
 	case OStimActionKind::SelectSpecificPosition:
-		return QueuePapyrusAction(a_kind, a_payload);
+		return QueueSceneAction(a_kind, a_payload, actionID);
 	default:
+	{
+		ActionDispatchResult result{};
+		result.path = "NoDispatch";
+		LogActionEnd(actionID, a_kind, result, s_state.browserPage, s_state.browserPage);
 		return false;
+	}
 	}
 }
 
@@ -1499,7 +1695,7 @@ const char* OStimIntegration::GetActionLabel(OStimActionKind a_kind)
 	case OStimActionKind::OpenControlWheel:
 		return "OStim Controls";
 	case OStimActionKind::OpenPositionBrowser:
-		return "Browse Positions";
+		return "Change Page";
 	case OStimActionKind::OpenPositionSubmenu:
 		return "Open Submenu";
 	case OStimActionKind::ReturnToPositionBrowserParent:
@@ -1520,6 +1716,8 @@ const char* OStimIntegration::GetActionLabel(OStimActionKind a_kind)
 		return "Speed Up";
 	case OStimActionKind::DecreaseSpeed:
 		return "Speed Down";
+	case OStimActionKind::ToggleAutoMode:
+		return "Auto Progress";
 	case OStimActionKind::SwapPartner:
 		return "Swap Partner";
 	case OStimActionKind::ChangeVariant:

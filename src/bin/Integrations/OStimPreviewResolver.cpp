@@ -1,4 +1,5 @@
 #include "OStimPreviewResolver.h"
+#include "OStimSceneSemantic.h"
 
 #include "bin/Config.h"
 #include "bin/Rendering/TextureManager.h"
@@ -9,6 +10,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -51,6 +53,7 @@ namespace
 		std::vector<SceneNavigationMetadata> navigations;
 		std::vector<std::string> tags;
 		std::vector<std::string> actions;
+		OStimSceneSemanticMetadata semanticMetadata;
 		bool isTransition = false;
 		std::string transitionDestination;
 	};
@@ -65,6 +68,7 @@ namespace
 		std::unordered_map<std::string, std::string> iconByRelativePath;
 		std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> iconEntriesByDirectory;
 		std::vector<std::pair<std::string, std::string>> iconStemEntries;
+		std::unordered_set<std::string> semanticDiagnosticsLogged;
 	};
 
 	std::mutex s_cacheLock;
@@ -120,38 +124,6 @@ namespace
 	{
 		return IsReturnNavigationIcon(a_icon) ||
 		       IsPlaceholderNavigationIcon(a_icon);
-	}
-
-	bool IsReturnNavigationDescription(std::string_view a_description)
-	{
-		const std::string key = NormalizeKey(a_description);
-		return key.contains("ostim_nav_return") ||
-		       key.contains("return...") ||
-		       key == "return" ||
-		       key.contains("go back") ||
-		       key.contains("back...");
-	}
-
-	bool IsGenericNavigationDescription(std::string_view a_description)
-	{
-		const std::string key = NormalizeKey(a_description);
-		return key.empty() || key.contains("ostim_nav_return");
-	}
-
-	bool IsReturnNavigation(const SceneNavigationMetadata& a_navigation, std::string_view a_parentSceneID)
-	{
-		if (a_navigation.destination.empty()) {
-			return true;
-		}
-
-		if (IsReturnNavigationIcon(a_navigation.icon) ||
-		    IsReturnNavigationDescription(a_navigation.description)) {
-			return true;
-		}
-
-		const std::string normalizedParent = NormalizeKey(a_parentSceneID);
-		return !normalizedParent.empty() &&
-		       NormalizeKey(a_navigation.destination) == normalizedParent;
 	}
 
 	std::string TrimCopy(std::string_view a_value)
@@ -406,72 +378,6 @@ namespace
 		return score;
 	}
 
-	std::string HumanizeToken(std::string_view a_value)
-	{
-		std::string out = TrimCopy(a_value);
-		if (out.empty()) {
-			return out;
-		}
-
-		if (!out.empty() && out.front() == '$') {
-			out.erase(0, 1);
-		}
-
-		const std::string normalized = NormalizeKey(out);
-		if (normalized.starts_with("ostim_nav_")) {
-			out.erase(0, std::char_traits<char>::length("ostim_nav_"));
-		} else if (normalized.starts_with("ostim_")) {
-			out.erase(0, std::char_traits<char>::length("ostim_"));
-		}
-
-		std::string stripped;
-		stripped.reserve(out.size());
-		bool inBraces = false;
-		for (char c : out) {
-			if (c == '{') {
-				inBraces = true;
-				continue;
-			}
-			if (inBraces) {
-				if (c == '}') {
-					inBraces = false;
-				}
-				continue;
-			}
-
-			if (c == '_' || c == '-' || c == '/') {
-				stripped.push_back(' ');
-				continue;
-			}
-			if (std::isalnum(static_cast<unsigned char>(c)) || std::isspace(static_cast<unsigned char>(c))) {
-				stripped.push_back(c);
-			}
-		}
-
-		stripped = TrimCopy(stripped);
-		if (const auto split = stripped.find_last_of(' '); split != std::string::npos) {
-			const std::string suffix = NormalizeKey(stripped.substr(split + 1));
-			if (suffix.size() == 1 && std::isalpha(static_cast<unsigned char>(suffix.front()))) {
-				stripped.erase(split);
-			}
-		}
-
-		bool previousSpace = true;
-		for (char& c : stripped) {
-			if (std::isspace(static_cast<unsigned char>(c))) {
-				previousSpace = true;
-				continue;
-			}
-
-			c = static_cast<char>(previousSpace ?
-				std::toupper(static_cast<unsigned char>(c)) :
-				std::tolower(static_cast<unsigned char>(c)));
-			previousSpace = false;
-		}
-
-		return stripped;
-	}
-
 	std::size_t ComputeEditDistance(std::string_view a_lhs, std::string_view a_rhs)
 	{
 		const std::size_t lhsSize = a_lhs.size();
@@ -545,36 +451,6 @@ namespace
 		s_cache.writeTime = std::filesystem::last_write_time(kMappingPath, ec);
 		s_cache.loaded = true;
 		Texture::InvalidateExternalRasterCache();
-	}
-
-	void AddUniqueSearchRoot(
-		std::vector<std::filesystem::path>& a_roots,
-		std::unordered_set<std::string>& a_seen,
-		const std::filesystem::path& a_root)
-	{
-		if (a_root.empty()) {
-			return;
-		}
-
-		const std::string normalized = NormalizeKey(NormalizeSlashes(Utf8FromPath(a_root.lexically_normal())));
-		if (!a_seen.insert(normalized).second) {
-			return;
-		}
-
-		a_roots.push_back(a_root.lexically_normal());
-	}
-
-	std::vector<std::filesystem::path> CollectSearchRoots(
-		const std::filesystem::path& a_primaryRoot,
-		bool a_includePrimaryRoot)
-	{
-		std::vector<std::filesystem::path> roots;
-		std::unordered_set<std::string> seen;
-		if (a_includePrimaryRoot) {
-			AddUniqueSearchRoot(roots, seen, a_primaryRoot);
-		}
-
-		return roots;
 	}
 
 	void IndexIconRoot(const std::filesystem::path& a_iconRoot)
@@ -665,12 +541,14 @@ namespace
 				continue;
 			}
 
-			nlohmann::json json;
-			try {
-				input >> json;
-			} catch (...) {
+			const std::string jsonText(
+				std::istreambuf_iterator<char>{ input },
+				std::istreambuf_iterator<char>{});
+			const auto parsedJson = TryParseOStimSceneJson(jsonText);
+			if (!parsedJson.has_value()) {
 				continue;
 			}
+			const nlohmann::json& json = *parsedJson;
 
 			const std::string sceneID = Utf8FromPath(path.stem());
 			if (sceneID.empty()) {
@@ -683,6 +561,7 @@ namespace
 			}
 
 			SceneMetadata metadata{};
+			metadata.semanticMetadata = ClassifyOStimSceneMetadata(&json);
 			if (json.contains("name") && json["name"].is_string()) {
 				metadata.displayName = json["name"].get<std::string>();
 			}
@@ -753,16 +632,8 @@ namespace
 	{
 		s_sceneCache = SceneCache{};
 
-		for (const auto& iconRoot : CollectSearchRoots(
-			     kOStimIconRoot,
-			     true)) {
-			IndexIconRoot(iconRoot);
-		}
-		for (const auto& sceneRoot : CollectSearchRoots(
-			     kSceneRoot,
-			     true)) {
-			IndexSceneRoot(sceneRoot);
-		}
+		IndexIconRoot(kOStimIconRoot);
+		IndexSceneRoot(kSceneRoot);
 
 		s_sceneCache.loaded = true;
 	}
@@ -1118,6 +989,62 @@ namespace
 		return std::nullopt;
 	}
 
+	const SceneMetadata* ResolveSceneMetadataDirect(std::string_view a_sceneID)
+	{
+		if (a_sceneID.empty()) {
+			return nullptr;
+		}
+
+		const auto it = s_sceneCache.scenes.find(NormalizeKey(a_sceneID));
+		return it == s_sceneCache.scenes.end() ? nullptr : &it->second;
+	}
+
+	const SceneMetadata* ResolveSceneMetadataDirectWithFallback(std::string_view a_sceneID)
+	{
+		if (const SceneMetadata* metadata = ResolveSceneMetadataDirect(a_sceneID); metadata) {
+			return metadata;
+		}
+
+		if (!s_sceneCache.supplementalRootsLoaded) {
+			LoadSupplementalSceneCacheLocked();
+			return ResolveSceneMetadataDirect(a_sceneID);
+		}
+
+		return nullptr;
+	}
+
+	void ApplySceneSemanticMetadataLocked(OStimPositionInfo& a_position)
+	{
+		const std::string_view sceneID = !a_position.destinationID.empty() ?
+			a_position.destinationID : a_position.id;
+		const SceneMetadata* sceneMetadata = ResolveSceneMetadataDirectWithFallback(sceneID);
+		const OStimSceneSemanticMetadata baseSemantic = sceneMetadata ?
+			sceneMetadata->semanticMetadata : OStimSceneSemanticMetadata{};
+		const OStimSceneSemanticMetadata semantic = ClassifyOStimNavigationSemantic(
+			baseSemantic,
+			a_position.isTransition,
+			IsCanonicalOStimReturnIcon(a_position.iconPath));
+		a_position.semantic = semantic.semantic;
+
+		if (!Config::OStimIntegration::DebugLog) {
+			return;
+		}
+
+		std::string diagnosticKey = NormalizeKey(sceneID);
+		diagnosticKey += '|';
+		diagnosticKey += GetOStimSceneSemanticName(semantic.semantic);
+		diagnosticKey += '|';
+		diagnosticKey += GetOStimSceneSemanticReasonName(semantic.reason);
+		if (s_sceneCache.semanticDiagnosticsLogged.insert(std::move(diagnosticKey)).second) {
+			logger::info(
+				"[OStimDiag] SCENE_SEMANTIC sceneID='{}' semantic={} metadata={} reason={}",
+				sceneID,
+				GetOStimSceneSemanticName(semantic.semantic),
+				semantic.metadataFound ? 1 : 0,
+				GetOStimSceneSemanticReasonName(semantic.reason));
+		}
+	}
+
 	const SceneMetadata* ResolveSceneMetadata(std::string_view a_sceneID)
 	{
 		if (a_sceneID.empty()) {
@@ -1229,13 +1156,17 @@ namespace
 
 void OStimPreviewResolver::Apply(OStimPositionInfo& a_position)
 {
+	EnsureSceneCacheLoaded();
+	{
+		std::lock_guard lock(s_cacheLock);
+		ApplySceneSemanticMetadataLocked(a_position);
+	}
+
 	if (!Config::OStimIntegration::ShowPositionPreviews) {
 		a_position.previewPath.clear();
 		a_position.iconPath.clear();
 		return;
 	}
-
-	EnsureSceneCacheLoaded();
 
 	if (!a_position.previewPath.empty()) {
 		if (auto resolvedPreview = ResolveMetadataAssetPath(a_position.previewPath); resolvedPreview.has_value()) {
@@ -1261,8 +1192,7 @@ void OStimPreviewResolver::Apply(OStimPositionInfo& a_position)
 		}
 	}
 
-	if ((!Config::OStimIntegration::PreferMetadataPreviews || a_position.previewPath.empty()) &&
-		Config::OStimIntegration::UseResourcePreviewFallback) {
+	if (Config::OStimIntegration::UseResourcePreviewFallback) {
 		EnsureCacheLoaded();
 
 		std::lock_guard lock(s_cacheLock);
@@ -1300,96 +1230,4 @@ void OStimPreviewResolver::Apply(OStimPositionInfo& a_position)
 	if (a_position.previewPath.empty() && !a_position.iconPath.empty()) {
 		a_position.previewPath = a_position.iconPath;
 	}
-}
-
-std::vector<OStimPositionInfo> OStimPreviewResolver::GetSceneNavigationChildren(std::string_view a_sceneID, std::string_view a_parentSceneID)
-{
-	if (a_sceneID.empty()) {
-		return {};
-	}
-
-	EnsureSceneCacheLoaded();
-
-	std::vector<SceneNavigationMetadata> navigations;
-	{
-		std::lock_guard lock(s_cacheLock);
-		const SceneMetadata* metadata = ResolveSceneMetadataWithFallback(a_sceneID);
-		if (!metadata) {
-			return {};
-		}
-		navigations = metadata->navigations;
-	}
-
-	std::vector<OStimPositionInfo> positions;
-	positions.reserve(navigations.size());
-	std::unordered_set<std::string> seenDestinations;
-
-	for (const auto& navigation : navigations) {
-		if (IsReturnNavigation(navigation, a_parentSceneID)) {
-			continue;
-		}
-
-		const std::string normalizedDestination = NormalizeKey(navigation.destination);
-		if (!seenDestinations.insert(normalizedDestination).second) {
-			continue;
-		}
-
-		OStimPositionInfo position{};
-		position.id = navigation.destination;
-		position.destinationID = navigation.destination;
-		position.sourceSceneID = std::string(a_sceneID);
-		position.description = navigation.description;
-		position.displayName = IsGenericNavigationDescription(navigation.description) ?
-			std::string{} :
-			HumanizeToken(navigation.description);
-		if (position.displayName.empty()) {
-			std::lock_guard lock(s_cacheLock);
-			if (const SceneMetadata* childMetadata = ResolveSceneMetadataWithFallback(navigation.destination);
-			    childMetadata && !childMetadata->displayName.empty()) {
-				position.displayName = childMetadata->displayName;
-			}
-		}
-		if (position.displayName.empty()) {
-			position.displayName = HumanizeToken(navigation.destination);
-		}
-		if (position.displayName.empty()) {
-			position.displayName = navigation.destination;
-		}
-		position.iconPath = IsGenericNavigationIcon(navigation.icon) ?
-			std::string{} :
-			navigation.icon;
-		position.requiresActiveScene = true;
-		position.isValidNow = true;
-
-		Apply(position);
-		positions.push_back(std::move(position));
-	}
-
-	return positions;
-}
-
-bool OStimPreviewResolver::HasBrowsableChildScenes(std::string_view a_sceneID, std::string_view a_parentSceneID)
-{
-	if (a_sceneID.empty()) {
-		return false;
-	}
-
-	EnsureSceneCacheLoaded();
-
-	const std::string normalizedParent = NormalizeKey(a_parentSceneID);
-	std::lock_guard lock(s_cacheLock);
-	const SceneMetadata* metadata = ResolveSceneMetadataWithFallback(a_sceneID);
-	if (!metadata) {
-		return false;
-	}
-
-	for (const auto& navigation : metadata->navigations) {
-		if (IsReturnNavigation(navigation, normalizedParent)) {
-			continue;
-		}
-
-		return true;
-	}
-
-	return false;
 }

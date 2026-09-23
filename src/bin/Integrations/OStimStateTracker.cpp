@@ -6,11 +6,15 @@
 
 #include <SKSE/SKSE.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace
@@ -24,17 +28,15 @@ namespace
 		std::vector<OStimPositionInfo> positions{};
 		std::int64_t capturedAtMs = 0;
 		std::int64_t lastConfirmedActiveSceneAtMs = 0;
-		std::int64_t lastConfirmedPositionsAtMs = 0;
 		std::uint64_t nativeEventRevision = 0;
 		std::uint64_t nativeEndRevision = 0;
 	};
 
 	constexpr std::size_t kActionCooldownSlots = 32;
-	constexpr std::int64_t kPollMsActiveScene = 250;
+	constexpr std::int64_t kPollMsActiveScene = 1000;
 	constexpr std::int64_t kPollMsAvailableIdle = 1000;
 	constexpr std::int64_t kPollMsUnavailable = 2000;
 	constexpr std::int64_t kSceneDropGraceMs = 1250;
-	constexpr std::int64_t kPositionDropGraceMs = 900;
 
 	std::mutex s_snapshotLock;
 	Snapshot s_snapshot;
@@ -98,19 +100,33 @@ namespace
 			return snapshot;
 		}
 
+		if (snapshot.availability.hasNativeThreadAPI) {
+			snapshot.sceneInfo = OStimNGThreadAPI::GetCurrentSceneInfo();
+			if (snapshot.sceneInfo) {
+				snapshot.sceneInfo->apiVersion = snapshot.availability.apiVersion;
+			}
+			if (snapshot.sceneInfo && snapshot.sceneInfo->active) {
+				snapshot.lastConfirmedActiveSceneAtMs = snapshot.capturedAtMs;
+				if (Config::OStimIntegration::AllowPositionBrowsing &&
+					!snapshot.sceneInfo->inTransition &&
+					!snapshot.sceneInfo->inSequence &&
+					!snapshot.sceneInfo->playerControlDisabled) {
+					snapshot.positions = OStimNGThreadAPI::GetNavigationPositions(*snapshot.sceneInfo);
+				}
+			}
+			return snapshot;
+		}
+
 		snapshot.sceneInfo = OStimBridge::GetCurrentSceneInfo();
-		if (snapshot.sceneInfo &&
-			snapshot.sceneInfo->active &&
-			Config::OStimIntegration::AllowPositionBrowsing) {
+		if (snapshot.sceneInfo && snapshot.sceneInfo->active) {
 			snapshot.lastConfirmedActiveSceneAtMs = snapshot.capturedAtMs;
-			snapshot.positions = OStimBridge::GetCandidatePositions(
-				Config::OStimIntegration::PreferCurrentAnimationClass);
-		}
-		if (snapshot.sceneInfo && snapshot.sceneInfo->active && snapshot.lastConfirmedActiveSceneAtMs == 0) {
-			snapshot.lastConfirmedActiveSceneAtMs = snapshot.capturedAtMs;
-		}
-		if (!snapshot.positions.empty()) {
-			snapshot.lastConfirmedPositionsAtMs = snapshot.capturedAtMs;
+			if (Config::OStimIntegration::AllowPositionBrowsing &&
+				!snapshot.sceneInfo->inTransition &&
+				!snapshot.sceneInfo->inSequence &&
+				!snapshot.sceneInfo->playerControlDisabled) {
+				snapshot.positions = OStimBridge::GetCandidatePositions(
+					Config::OStimIntegration::PreferCurrentAnimationClass);
+			}
 		}
 
 		return snapshot;
@@ -127,10 +143,6 @@ namespace
 		const std::int64_t previousActiveSceneAtMs = previous.lastConfirmedActiveSceneAtMs > 0 ?
 			previous.lastConfirmedActiveSceneAtMs :
 			((previous.sceneInfo && previous.sceneInfo->active) ? previous.capturedAtMs : 0);
-		const std::int64_t previousPositionsAtMs = previous.lastConfirmedPositionsAtMs > 0 ?
-			previous.lastConfirmedPositionsAtMs :
-			(!previous.positions.empty() ? previous.capturedAtMs : 0);
-
 		const bool hadActiveScene = previous.sceneInfo && previous.sceneInfo->active;
 		const bool lostScene = (!a_snapshot.sceneInfo || !a_snapshot.sceneInfo->active) && hadActiveScene;
 		if (lostScene &&
@@ -139,46 +151,211 @@ namespace
 			(a_snapshot.capturedAtMs - previousActiveSceneAtMs) <= kSceneDropGraceMs &&
 			a_snapshot.nativeEndRevision == previous.nativeEndRevision) {
 			a_snapshot.sceneInfo = previous.sceneInfo;
-			if (a_snapshot.positions.empty()) {
-				a_snapshot.positions = previous.positions;
-			}
 			a_snapshot.lastConfirmedActiveSceneAtMs = previousActiveSceneAtMs;
-			if (!a_snapshot.positions.empty()) {
-				a_snapshot.lastConfirmedPositionsAtMs = previousPositionsAtMs;
-			}
-		}
-
-		const bool sameActiveScene = a_snapshot.sceneInfo &&
-			previous.sceneInfo &&
-			a_snapshot.sceneInfo->active &&
-			previous.sceneInfo->active &&
-			a_snapshot.sceneInfo->sceneID == previous.sceneInfo->sceneID;
-		if (sameActiveScene &&
-			a_snapshot.positions.empty() &&
-			!previous.positions.empty() &&
-			previousPositionsAtMs > 0 &&
-			(a_snapshot.capturedAtMs - previousPositionsAtMs) <= kPositionDropGraceMs) {
-			a_snapshot.positions = previous.positions;
-			a_snapshot.lastConfirmedPositionsAtMs = previousPositionsAtMs;
 		}
 
 		if (a_snapshot.sceneInfo && a_snapshot.sceneInfo->active && a_snapshot.lastConfirmedActiveSceneAtMs == 0) {
 			a_snapshot.lastConfirmedActiveSceneAtMs = a_snapshot.capturedAtMs;
 		}
-		if (!a_snapshot.positions.empty() && a_snapshot.lastConfirmedPositionsAtMs == 0) {
-			a_snapshot.lastConfirmedPositionsAtMs = a_snapshot.capturedAtMs;
-		}
-
 		return a_snapshot;
 	}
 
-	void PublishSnapshot(Snapshot&& a_snapshot)
+	bool ParticipantSemanticsEqual(
+		const std::vector<OStimParticipantInfo>& a_lhs,
+		const std::vector<OStimParticipantInfo>& a_rhs)
 	{
+		return a_lhs.size() == a_rhs.size() &&
+		       std::equal(a_lhs.begin(), a_lhs.end(), a_rhs.begin(), [](const auto& a_left, const auto& a_right) {
+			       return std::tie(a_left.formID, a_left.name, a_left.isPlayer) ==
+			              std::tie(a_right.formID, a_right.name, a_right.isPlayer);
+		       });
+	}
+
+	bool NavigationSemanticsEqual(
+		const std::vector<OStimPositionInfo>& a_lhs,
+		const std::vector<OStimPositionInfo>& a_rhs)
+	{
+		return a_lhs.size() == a_rhs.size() &&
+		       std::equal(a_lhs.begin(), a_lhs.end(), a_rhs.begin(), [](const auto& a_left, const auto& a_right) {
+			       return std::tie(
+					          a_left.id,
+					          a_left.displayName,
+					          a_left.category,
+					          a_left.subcategory,
+					          a_left.sourceSceneID,
+					          a_left.destinationID,
+					          a_left.description,
+					          a_left.previewPath,
+					          a_left.iconPath,
+					          a_left.isValidNow,
+					          a_left.requiresActiveScene,
+					          a_left.isTransition) ==
+			              std::tie(
+					          a_right.id,
+					          a_right.displayName,
+					          a_right.category,
+					          a_right.subcategory,
+					          a_right.sourceSceneID,
+					          a_right.destinationID,
+					          a_right.description,
+					          a_right.previewPath,
+					          a_right.iconPath,
+					          a_right.isValidNow,
+					          a_right.requiresActiveScene,
+					          a_right.isTransition);
+		       });
+	}
+
+	std::string DescribeSemanticChanges(const Snapshot& a_previous, const Snapshot& a_current)
+	{
+		std::string changed;
+		auto record = [&](bool a_changed, std::string_view a_name) {
+			if (!a_changed) {
+				return;
+			}
+			if (!changed.empty()) {
+				changed.push_back(',');
+			}
+			changed.append(a_name);
+		};
+
+		record(
+			std::tie(
+				a_previous.availability.available,
+				a_previous.availability.hasDatabase,
+				a_previous.availability.hasNativeThreadAPI,
+				a_previous.availability.apiVersion,
+				a_previous.availability.reason) !=
+				std::tie(
+					a_current.availability.available,
+					a_current.availability.hasDatabase,
+					a_current.availability.hasNativeThreadAPI,
+					a_current.availability.apiVersion,
+					a_current.availability.reason),
+			"availability");
+		record(a_previous.sceneInfo.has_value() != a_current.sceneInfo.has_value(), "scenePresence");
+
+		const OStimSceneInfo emptyScene{};
+		const auto& previousScene = a_previous.sceneInfo ? *a_previous.sceneInfo : emptyScene;
+		const auto& currentScene = a_current.sceneInfo ? *a_current.sceneInfo : emptyScene;
+		record(
+			std::tie(
+				previousScene.active,
+				previousScene.threadID,
+				previousScene.sceneID,
+				previousScene.animationID,
+				previousScene.animationName,
+				previousScene.animationClass,
+				previousScene.positionData,
+				previousScene.sourceModule,
+				previousScene.currentOID) !=
+				std::tie(
+					currentScene.active,
+					currentScene.threadID,
+					currentScene.sceneID,
+					currentScene.animationID,
+					currentScene.animationName,
+					currentScene.animationClass,
+					currentScene.positionData,
+					currentScene.sourceModule,
+					currentScene.currentOID),
+			"scene");
+		record(
+			std::tie(previousScene.currentSpeed, previousScene.maxSpeed) !=
+				std::tie(currentScene.currentSpeed, currentScene.maxSpeed),
+			"speed");
+		record(
+			std::tie(
+				previousScene.playerInvolved,
+				previousScene.aggressive,
+				previousScene.inTransition,
+				previousScene.inSequence,
+				previousScene.playerControlDisabled,
+				previousScene.autoMode) !=
+				std::tie(
+					currentScene.playerInvolved,
+					currentScene.aggressive,
+					currentScene.inTransition,
+					currentScene.inSequence,
+					currentScene.playerControlDisabled,
+					currentScene.autoMode),
+			"flags");
+		record(previousScene.metadata != currentScene.metadata, "metadata");
+		record(!ParticipantSemanticsEqual(previousScene.participants, currentScene.participants), "participants");
+		record(!NavigationSemanticsEqual(a_previous.positions, a_current.positions), "navigation");
+		return changed;
+	}
+
+	bool PublishSnapshotIfGenerationCurrent(
+		Snapshot&& a_snapshot,
+		std::uint64_t a_generation,
+		std::int64_t a_nextPollDelayMs)
+	{
+		const bool diagnosticsEnabled = Config::OStimIntegration::DebugLog;
+		std::string changed;
+		std::string sceneID;
+		std::string nodeName;
+		std::size_t navigationCount = 0;
+		std::uint64_t nativeRevision = 0;
+		std::uint64_t revision = 0;
+		std::string backend;
+		std::vector<OStimPositionInfo> publishedPositions;
+		bool semanticChanged = false;
 		{
 			std::lock_guard lock(s_snapshotLock);
+			if (a_generation != s_generation.load(std::memory_order_acquire)) {
+				return false;
+			}
+			changed = DescribeSemanticChanges(s_snapshot, a_snapshot);
+			semanticChanged = !changed.empty();
 			s_snapshot = std::move(a_snapshot);
+			if (semanticChanged) {
+				revision = s_revision.fetch_add(1, std::memory_order_release) + 1;
+			} else {
+				revision = s_revision.load(std::memory_order_acquire);
+			}
+			if (diagnosticsEnabled && semanticChanged) {
+				if (s_snapshot.sceneInfo) {
+					sceneID = s_snapshot.sceneInfo->sceneID;
+					nodeName = s_snapshot.sceneInfo->animationName;
+				}
+				navigationCount = s_snapshot.positions.size();
+				nativeRevision = s_snapshot.nativeEventRevision;
+				backend = s_snapshot.availability.hasNativeThreadAPI ? "NativeThreadAPI" : "LegacyPapyrus";
+				publishedPositions = s_snapshot.positions;
+			}
+			s_nextPollAtMs.store(NowMs() + a_nextPollDelayMs, std::memory_order_release);
 		}
-		s_revision.fetch_add(1, std::memory_order_release);
+
+		if (diagnosticsEnabled && semanticChanged) {
+			logger::info(
+				"[OStimDiag] TRACKER_PUBLISH rev={} eventRev={} backend={} scene='{}' node='{}' nav={} changed='{}'",
+				revision,
+				nativeRevision,
+				backend,
+				sceneID,
+				nodeName,
+				navigationCount,
+				changed);
+			logger::info(
+				"[OStimDiag] NAV_SNAPSHOT trackerRev={} eventRev={} backend={} sceneID='{}' count={}",
+				revision,
+				nativeRevision,
+				backend,
+				sceneID,
+				publishedPositions.size());
+			for (std::size_t index = 0; index < publishedPositions.size(); ++index) {
+				const auto& position = publishedPositions[index];
+				logger::info(
+					"[OStimDiag] NAV_SNAPSHOT_ITEM index={} sceneID='{}' destinationID='{}' sourceSceneID='{}' transition={}",
+					index,
+					position.id,
+					position.destinationID,
+					position.sourceSceneID,
+					position.isTransition ? 1 : 0);
+			}
+		}
+		return semanticChanged;
 	}
 }
 
@@ -235,11 +412,10 @@ void OStimStateTracker::Update(bool a_force)
 	taskInterface->AddTask([generation]() {
 		Snapshot snapshot = StabilizeSnapshot(BuildSnapshot());
 		const std::int64_t nextPollDelayMs = GetNextPollDelayMs(snapshot);
+		PublishSnapshotIfGenerationCurrent(std::move(snapshot), generation, nextPollDelayMs);
 		if (generation == s_generation.load(std::memory_order_acquire)) {
-			PublishSnapshot(std::move(snapshot));
-			s_nextPollAtMs.store(NowMs() + nextPollDelayMs, std::memory_order_release);
+			s_queryPending.store(false, std::memory_order_release);
 		}
-		s_queryPending.store(false, std::memory_order_release);
 	});
 }
 
@@ -269,6 +445,17 @@ bool OStimStateTracker::IsSceneActive()
 {
 	std::lock_guard lock(s_snapshotLock);
 	return s_snapshot.sceneInfo && s_snapshot.sceneInfo->active;
+}
+
+OStimTrackerSnapshot OStimStateTracker::GetSnapshot()
+{
+	std::lock_guard lock(s_snapshotLock);
+	OStimTrackerSnapshot snapshot{};
+	snapshot.availability = s_snapshot.availability;
+	snapshot.sceneInfo = s_snapshot.sceneInfo;
+	snapshot.positions = s_snapshot.positions;
+	snapshot.revision = s_revision.load(std::memory_order_acquire);
+	return snapshot;
 }
 
 std::optional<OStimSceneInfo> OStimStateTracker::GetCurrentSceneInfo()

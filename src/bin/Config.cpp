@@ -730,17 +730,15 @@ namespace
 		Config::OStimIntegration::CreateManagedWheel = true;
 		Config::OStimIntegration::AutoSwitchToSceneWheel = false;
 		Config::OStimIntegration::RestorePreviousWheelOnSceneEnd = true;
+		Config::OStimIntegration::CloseWheelAfterSceneAction = true;
+		Config::OStimIntegration::RefreshAppearanceAfterUndress = false;
 		Config::OStimIntegration::AllowPositionBrowsing = true;
-		Config::OStimIntegration::ShowOnlyValidPositions = true;
-		Config::OStimIntegration::ShowPositionNames = true;
 		Config::OStimIntegration::ShowPositionPreviews = true;
 		Config::OStimIntegration::RestrictRegularWheelActionsDuringScenes = false;
-		Config::OStimIntegration::HideInvalidActions = true;
-		Config::OStimIntegration::PreferMetadataPreviews = true;
 		Config::OStimIntegration::UseResourcePreviewFallback = true;
 		Config::OStimIntegration::PreferCurrentAnimationClass = true;
 		Config::OStimIntegration::DebugLog = false;
-		Config::OStimIntegration::MaxPositionsPerPage = 6;
+		Config::OStimIntegration::MaxPositionsPerPage = OStimConfigPolicy::kDefaultSceneActionsPerPage;
 		Config::OStimIntegration::SVGSlotScale = 1.0f;
 		Config::OStimIntegration::SVGSlotOffsetX = 0.0f;
 		Config::OStimIntegration::SVGSlotOffsetY = 0.0f;
@@ -5417,18 +5415,18 @@ void Config::ReadOStimIntegrationConfig()
 	GetBoolValue(
 		ini,
 		"OStimIntegration",
+		"CloseWheelAfterSceneAction",
+		Config::OStimIntegration::CloseWheelAfterSceneAction);
+	GetBoolValue(
+		ini,
+		"OStimIntegration",
+		"RefreshAppearanceAfterUndress",
+		Config::OStimIntegration::RefreshAppearanceAfterUndress);
+	GetBoolValue(
+		ini,
+		"OStimIntegration",
 		"AllowPositionBrowsing",
 		Config::OStimIntegration::AllowPositionBrowsing);
-	GetBoolValue(
-		ini,
-		"OStimIntegration",
-		"ShowOnlyValidPositions",
-		Config::OStimIntegration::ShowOnlyValidPositions);
-	GetBoolValue(
-		ini,
-		"OStimIntegration",
-		"ShowPositionNames",
-		Config::OStimIntegration::ShowPositionNames);
 	GetBoolValue(
 		ini,
 		"OStimIntegration",
@@ -5439,16 +5437,6 @@ void Config::ReadOStimIntegrationConfig()
 		"OStimIntegration",
 		"RestrictRegularWheelActionsDuringScenes",
 		Config::OStimIntegration::RestrictRegularWheelActionsDuringScenes);
-	GetBoolValue(
-		ini,
-		"OStimIntegration",
-		"HideInvalidActions",
-		Config::OStimIntegration::HideInvalidActions);
-	GetBoolValue(
-		ini,
-		"OStimIntegration",
-		"PreferMetadataPreviews",
-		Config::OStimIntegration::PreferMetadataPreviews);
 	GetBoolValue(
 		ini,
 		"OStimIntegration",
@@ -5478,8 +5466,8 @@ void Config::ReadOStimIntegrationConfig()
 	GetFloatValue(ini, "OStimIntegration", "DDSCenterOffsetX", Config::OStimIntegration::DDSCenterOffsetX);
 	GetFloatValue(ini, "OStimIntegration", "DDSCenterOffsetY", Config::OStimIntegration::DDSCenterOffsetY);
 
-	Config::OStimIntegration::MaxPositionsPerPage =
-		std::clamp(Config::OStimIntegration::MaxPositionsPerPage, 4u, 10u);
+	Config::OStimIntegration::MaxPositionsPerPage = OStimConfigPolicy::ClampSceneActionsPerPage(
+		Config::OStimIntegration::MaxPositionsPerPage);
 	Config::OStimIntegration::SVGSlotScale = std::clamp(Config::OStimIntegration::SVGSlotScale, 0.1f, 4.0f);
 	Config::OStimIntegration::SVGSlotOffsetX = std::clamp(Config::OStimIntegration::SVGSlotOffsetX, -500.0f, 500.0f);
 	Config::OStimIntegration::SVGSlotOffsetY = std::clamp(Config::OStimIntegration::SVGSlotOffsetY, -500.0f, 500.0f);
