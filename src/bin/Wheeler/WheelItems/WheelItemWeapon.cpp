@@ -1,6 +1,7 @@
 #include "WheelItemWeapon.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Utilities/Utils.h"
+#include "bin/Utilities/ActorVirtualCompat.h"
 #include "bin/Config.h"
 #include "bin/Wheeler/MainWheelDebug.h"
 #include "bin/Wheeler/TransformWheelManager.h"
@@ -1081,7 +1082,7 @@ void WheelItemWeapon::ActivateItemSecondary()
 			return;
 		}
 		if (Config::WheelBehavior::AutoDrawOnUse) {
-			pc->DrawWeaponMagicHands(true);  // draw whatever is in hands
+			ActorVirtualCompat::DrawWeaponMagicHands(pc, true);  // draw whatever is in hands
 		} else {
 			// Only sheathe if the player was NOT already in combat.
 			// If they were already drawn, maintain combat stance for smooth weapon swapping.
@@ -1146,9 +1147,9 @@ void WheelItemWeapon::ActivateItemPrimary()
 			if (Config::WheelBehavior::AutoDrawOnUse) {
 				pc->DrawWeaponMagicHands(true);
 			} else if (!wasAlreadyDrawn) {
-				pc->DrawWeaponMagicHands(false);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
 			} else {
-				pc->DrawWeaponMagicHands(true);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			}
 		}
 		return;
@@ -1163,15 +1164,15 @@ void WheelItemWeapon::ActivateItemPrimary()
 			return;
 		}
 		if (Config::WheelBehavior::AutoDrawOnUse) {
-			pc->DrawWeaponMagicHands(true);
+			ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 		} else {
 			// Only sheathe if the player was NOT already in combat.
 			// If they were already drawn, maintain combat stance for smooth weapon swapping.
 			if (!wasAlreadyDrawn) {
-				pc->DrawWeaponMagicHands(false);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
 			} else {
 				// Force re-draw to maintain combat flow during weapon swap
-				pc->DrawWeaponMagicHands(true);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			}
 		}
 	}

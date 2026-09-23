@@ -1,4 +1,5 @@
 #include "bin/Utilities/Utils.h"
+#include "bin/Utilities/ActorVirtualCompat.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Config.h"
 #include "bin/Wheeler/Wheeler.h"
@@ -269,15 +270,15 @@ void WheelItemSpell::ActivateItemSecondary()
 			bool wasAlreadyDrawn = pc->AsActorState()->IsWeaponDrawn();
 			aeMan->EquipSpell(pc, this->_spell, Utils::Slot::GetLeftHandSlot());
 			if (Config::WheelBehavior::AutoDrawOnUse) {
-				pc->DrawWeaponMagicHands(true);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			} else {
 				// Only sheathe if the player was NOT already in combat.
 				// If they were already drawn, maintain combat stance for smooth spell swapping.
 				if (!wasAlreadyDrawn) {
-					pc->DrawWeaponMagicHands(false);
+					ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
 				} else {
 					// Force re-draw to maintain combat flow during spell swap
-					pc->DrawWeaponMagicHands(true);
+					ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 				}
 			}
 		}
@@ -320,15 +321,15 @@ void WheelItemSpell::ActivateItemPrimary()
 			bool wasAlreadyDrawn = pc->AsActorState()->IsWeaponDrawn();
 			aeMan->EquipSpell(pc, this->_spell, Utils::Slot::GetRightHandSlot());
 			if (Config::WheelBehavior::AutoDrawOnUse) {
-				pc->DrawWeaponMagicHands(true);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			} else {
 				// Only sheathe if the player was NOT already in combat.
 				// If they were already drawn, maintain combat stance for smooth spell swapping.
 				if (!wasAlreadyDrawn) {
-					pc->DrawWeaponMagicHands(false);
+					ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
 				} else {
 					// Force re-draw to maintain combat flow during spell swap
-					pc->DrawWeaponMagicHands(true);
+					ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 				}
 			}
 		}
