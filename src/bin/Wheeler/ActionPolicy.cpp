@@ -1,4 +1,5 @@
 #include "ActionPolicy.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Utilities/Utils.h"
 #include "bin/Config.h"
 #include <mutex>
@@ -554,7 +555,7 @@ namespace ActionPolicy
 				// Check toggle behavior
 				if (IsEquippedInHand(ctx.form, true)) {
 					// Already equipped - unequip instead
-					aeMan->UnequipObject(pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1, 
+					InventorySnapshotCache::UnequipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1, 
 						Utils::Slot::GetRightHandSlot());
 					result = ActionResult::Success;
 					reason = "toggled_off";
@@ -562,14 +563,14 @@ namespace ActionPolicy
 					// Handle by category
 					switch (ctx.category) {
 					case ItemCategory::Spell:
-						aeMan->EquipSpell(pc, ctx.form->As<RE::SpellItem>(), Utils::Slot::GetRightHandSlot());
+						InventorySnapshotCache::EquipSpell(aeMan, pc, ctx.form->As<RE::SpellItem>(), Utils::Slot::GetRightHandSlot());
 						break;
 					case ItemCategory::Scroll:
-						aeMan->EquipObject(pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1, 
+						InventorySnapshotCache::EquipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1, 
 							Utils::Slot::GetRightHandSlot());
 						break;
 					default:
-						aeMan->EquipObject(pc, ctx.form->As<RE::TESBoundObject>());
+						InventorySnapshotCache::EquipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>());
 						break;
 					}
 					result = VerifyPostCondition(ctx, action);
@@ -581,23 +582,23 @@ namespace ActionPolicy
 			{
 				if (IsEquippedInHand(ctx.form, false)) {
 					// Already equipped - unequip instead
-					aeMan->UnequipObject(pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1,
+					InventorySnapshotCache::UnequipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1,
 						Utils::Slot::GetLeftHandSlot());
 					result = ActionResult::Success;
 					reason = "toggled_off";
 				} else {
 					switch (ctx.category) {
 					case ItemCategory::Spell:
-						aeMan->EquipSpell(pc, ctx.form->As<RE::SpellItem>(), Utils::Slot::GetLeftHandSlot());
+						InventorySnapshotCache::EquipSpell(aeMan, pc, ctx.form->As<RE::SpellItem>(), Utils::Slot::GetLeftHandSlot());
 						break;
 					case ItemCategory::Scroll:
 					case ItemCategory::Light:
 					case ItemCategory::Shield:
-						aeMan->EquipObject(pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1,
+						InventorySnapshotCache::EquipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1,
 							Utils::Slot::GetLeftHandSlot());
 						break;
 					default:
-						aeMan->EquipObject(pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1,
+						InventorySnapshotCache::EquipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>(), nullptr, 1,
 							Utils::Slot::GetLeftHandSlot());
 						break;
 					}
@@ -631,13 +632,13 @@ namespace ActionPolicy
 					if (ctx.category == ItemCategory::Shout) {
 						RE::TESShout* shout = ctx.form->As<RE::TESShout>();
 						if (shout) {
-							aeMan->EquipShout(pc, shout);
+							InventorySnapshotCache::EquipShout(aeMan, pc, shout);
 							result = VerifyPostCondition(ctx, action);
 						}
 					} else {
 						RE::SpellItem* spell = ctx.form->As<RE::SpellItem>();
 						if (spell) {
-							aeMan->EquipSpell(pc, spell, Utils::Slot::GetVoiceSlot());
+							InventorySnapshotCache::EquipSpell(aeMan, pc, spell, Utils::Slot::GetVoiceSlot());
 							result = VerifyPostCondition(ctx, action);
 						}
 					}
@@ -660,7 +661,7 @@ namespace ActionPolicy
 					result = ActionResult::NotInInventory;
 					reason = "count_zero";
 				} else {
-					aeMan->EquipObject(pc, ctx.form->As<RE::TESBoundObject>());
+					InventorySnapshotCache::EquipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>());
 					result = ActionResult::Success;
 				}
 			}
@@ -695,7 +696,7 @@ namespace ActionPolicy
 			case Action::Activate:
 			{
 				// Generic activation - use EquipObject which triggers Papyrus scripts
-				aeMan->EquipObject(pc, ctx.form->As<RE::TESBoundObject>());
+				InventorySnapshotCache::EquipObject(aeMan, pc, ctx.form->As<RE::TESBoundObject>());
 				result = ActionResult::Success;
 			}
 			break;
@@ -797,7 +798,6 @@ namespace ActionPolicy
 			logger::warn("[ActionPolicy] ExecuteEntry called with null form");
 			return false;
 		}
-		
 		ExecutionContext ctx;
 		ctx.form = form;
 		ctx.formID = form->GetFormID();

@@ -1,11 +1,53 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include "bin/Rendering/TextureManager.h"
 #include "bin/Config.h"
 #include "nlohmann/json.hpp"
 class ImVec2;
+class WheelItem;
+
+enum class WheelItemActivationKind : std::uint8_t
+{
+	Primary,
+	Secondary,
+	Special
+};
+
+enum class WheelItemActivationResult : std::uint8_t
+{
+	Succeeded,
+	AlreadyPoisoned,
+	UnsafeResolution,
+	InvalidTarget,
+	Rejected
+};
+
+[[nodiscard]] constexpr bool IsSuccessfulActivation(WheelItemActivationResult a_result) noexcept
+{
+	return a_result == WheelItemActivationResult::Succeeded;
+}
+
+const char* WheelItemActivationResultName(WheelItemActivationResult a_result) noexcept;
+
+// Synchronous-local handoff from the locked wheel hierarchy to Wheeler.  The
+// indices are telemetry/API metadata only; selectedItem is the sole gameplay
+// target and is never stored in a deferred queue.
+struct PreparedWheelItemActivation
+{
+	std::shared_ptr<WheelItem> selectedItem;
+	WheelItemActivationKind kind = WheelItemActivationKind::Primary;
+	std::uint64_t transientEpoch = 0;
+	RE::FormID formID = 0;
+	std::int32_t wheelIndex = -1;
+	std::int32_t entryIndex = -1;
+	std::int32_t itemIndex = -1;
+	bool executeAfterContainerUnlock = false;
+	bool isPrimaryForAPI = true;
+	bool accepted = false;
+};
 
 enum class MissingCategory : std::uint8_t
 {
@@ -57,6 +99,13 @@ public:
 	virtual void ActivateItemPrimary();
 	virtual void ActivateItemSecondary();
 	virtual void ActivateItemSpecial();
+	// Result-aware synchronous dispatch used by the prepared activation boundary.
+	// Existing item implementations retain their void entry points; the default
+	// adapter reports success after invoking the selected entry point.
+	virtual WheelItemActivationResult ActivateItemWithResult(WheelItemActivationKind a_kind);
+	// Activation implementations that synchronously enqueue Wheeler-owned
+	// transient gameplay work must run after WheelEntry releases its lock.
+	virtual bool MayQueueTransientGameplayAction() const { return false; }
 
 	// Cooldown overlay support (visual only).
 	virtual bool HasCooldown() const { return false; }

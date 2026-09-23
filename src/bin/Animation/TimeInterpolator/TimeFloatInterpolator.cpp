@@ -42,15 +42,17 @@ bool TimeFloatInterpolator::Update(double dt)
 		float t = min(elapsedTime / duration, 1.0f);
 		value = value + (target - value) * t;
 		if (elapsedTime >= duration) { // we're done
-			for (auto& callback : this->_callbacks) {
-				// we use jthread here because without it, the callback could try to call this's InterpolateTo(), which leads to a lock race in TimeFloatInterpolatorManager.
-				std::jthread t = std::jthread(callback); 
-				t.detach();
-			}
 			return true;
 		}
 	}
 	return false;
+}
+
+void TimeFloatInterpolator::InvokeCallbacks()
+{
+	for (auto& callback : _callbacks) {
+		callback();
+	}
 }
 
 double TimeFloatInterpolator::GetValue() const
@@ -63,10 +65,7 @@ void TimeFloatInterpolator::ForceFinish(bool wantCallback)
 	this->elapsedTime.store(this->duration);
 	this->value.store(this->target);
 	if (wantCallback) {
-		for (auto& callback : this->_callbacks) {
-			std::jthread t = std::jthread(callback);
-			t.detach();
-		}
+		InvokeCallbacks();
 	}
 	TimeFloatInterpolatorManager::UnregisterInterpolator(this);
 }

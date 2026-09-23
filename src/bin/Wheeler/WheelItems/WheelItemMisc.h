@@ -12,6 +12,7 @@ public:
 	virtual bool IsAvailable(RE::TESObjectREFR::InventoryItemMap& a_inv) override;
 	virtual void ActivateItemSecondary() override;
 	virtual void ActivateItemPrimary() override;
+	virtual bool MayQueueTransientGameplayAction() const override { return true; }
 
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
 	virtual RE::FormID GetFormID() const override { return _miscItem ? _miscItem->GetFormID() : 0; }

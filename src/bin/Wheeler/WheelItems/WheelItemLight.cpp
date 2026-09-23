@@ -1,4 +1,5 @@
 #include "WheelItemLight.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Rendering/TextureManager.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Utilities/Utils.h"
@@ -106,9 +107,9 @@ void WheelItemLight::toggleEquip()
 	
 	if (this->IsActive(invMap)) {
 		logger::info("[Light] toggleEquip: UNEQUIP '{}' formID={:08X}", itemName, formID);
-		aeMan->UnequipObject(pc, this->_light, nullptr, 1, leftSlot);
+		InventorySnapshotCache::UnequipObject(aeMan, pc, this->_light, nullptr, 1, leftSlot);
 	} else {
 		logger::info("[Light] toggleEquip: EQUIP '{}' formID={:08X}", itemName, formID);
-		aeMan->EquipObject(pc, this->_light, nullptr, 1, leftSlot);
+		InventorySnapshotCache::EquipObject(aeMan, pc, this->_light, nullptr, 1, leftSlot);
 	}
 }

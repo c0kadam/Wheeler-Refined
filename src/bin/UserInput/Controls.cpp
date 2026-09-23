@@ -7,6 +7,7 @@
 #include <dinput.h>
 #include <array>
 #include <chrono>
+#include <optional>
 #include <Windows.h>
 #include <unordered_set>
 
@@ -271,6 +272,9 @@ bool Controls::ToggleBindingsAllowNormalFallback(const std::vector<ToggleBinding
 void Controls::BindAllInputsFromConfig()
 {
 	std::lock_guard lock(_lock);
+	if (++_bindingGeneration == 0) {
+		_bindingGeneration = 1;
+	}
 	bool skipLTBinding = false;
 	if (ShouldLogRebindDebug()) {
 		logger::info(
@@ -720,11 +724,13 @@ bool Controls::IsKeyExclusivelyBound(KeyId key)
 
 bool Controls::IsMkbKeyHeld(KeyId key)
 {
+	std::lock_guard lock(_lock);
 	return s_heldMkbKeys.contains(key);
 }
 
 bool Controls::IsGamepadKeyHeld(KeyId key)
 {
+	std::lock_guard lock(_lock);
 	return s_heldGamepadButtons.contains(key);
 }
 
@@ -740,6 +746,7 @@ void Controls::TrackKeyState(KeyId key, bool isDown, bool isGamePad)
 
 	{
 		std::lock_guard lock(_lock);
+		bool stateChanged = false;
 
 		// Track key state for modifier detection (called for ALL keys, not just bound ones)
 		if (isGamePad) {
@@ -750,6 +757,7 @@ void Controls::TrackKeyState(KeyId key, bool isDown, bool isGamePad)
 				s_heldGamepadButtons.erase(key);
 			}
 			nowHeld = s_heldGamepadButtons.contains(key);
+			stateChanged = wasHeld != nowHeld;
 			if (Config::Debug::InputSpy && wasHeld != nowHeld) {
 				shouldLogGamepadEdge = true;
 				heldGamepadCount = s_heldGamepadButtons.size();
@@ -758,11 +766,17 @@ void Controls::TrackKeyState(KeyId key, bool isDown, bool isGamePad)
 				hasUpBinding = _keyFunctionMapUpGamepad.contains(key);
 			}
 		} else {
+			wasHeld = s_heldMkbKeys.contains(key);
 			if (isDown) {
 				s_heldMkbKeys.insert(key);
 			} else {
 				s_heldMkbKeys.erase(key);
 			}
+			nowHeld = s_heldMkbKeys.contains(key);
+			stateChanged = wasHeld != nowHeld;
+		}
+		if (stateChanged) {
+			++_keyStateGenerations[ArmedToggleKey{ key, isGamePad }];
 		}
 	}
 
@@ -789,12 +803,16 @@ Controls::DispatchResult Controls::Dispatch(KeyId key, bool isDown, bool isGameP
 		GetInputDebugMenuFlags(debugDmenuOpen, debugTrackedMenuOpen);
 	}
 
-	std::lock_guard lock(_lock);
+	std::unique_lock lock(_lock);
 	const ArmedToggleKey dispatchKey{ key, isGamePad };
-	const auto& toggleMap = isGamePad ? _toggleBindingsGamepad : _toggleBindingsMkb;
-	const auto debugToggleIt = toggleMap.find(key);
-	const std::size_t debugToggleCandidateCount =
-		debugToggleIt != toggleMap.end() ? debugToggleIt->second.size() : 0;
+	std::size_t debugToggleCandidateCount = 0;
+	if (isGamePad) {
+		const auto it = _toggleBindingsGamepad.find(key);
+		debugToggleCandidateCount = it != _toggleBindingsGamepad.end() ? it->second.size() : 0;
+	} else {
+		const auto it = _toggleBindingsMkb.find(key);
+		debugToggleCandidateCount = it != _toggleBindingsMkb.end() ? it->second.size() : 0;
+	}
 
 	if (logGamepadDispatch) {
 		logger::info(
@@ -814,48 +832,72 @@ Controls::DispatchResult Controls::Dispatch(KeyId key, bool isDown, bool isGameP
 	}
 
 	if (!isDown) {
-		auto armedIt = _armedToggleBindings.find(dispatchKey);
-		if (armedIt != _armedToggleBindings.end()) {
-			const ArmedToggleState armed = armedIt->second;
-			_armedToggleBindings.erase(armedIt);
+		std::optional<ArmedToggleState> armed;
+		{
+			const auto it = _armedToggleBindings.find(dispatchKey);
+			if (it != _armedToggleBindings.end()) {
+				armed = it->second;
+				_armedToggleBindings.erase(it);
+			}
+		}
+		if (armed) {
 			if (logGamepadDispatch) {
-				const bool modifierHeld = armed.requiredModifier == 0 || IsModifierHeld(armed.requiredModifier, isGamePad);
+				const bool modifierHeld = armed->requiredModifier == 0 || IsModifierHeld(armed->requiredModifier, isGamePad);
 				logger::info(
 					"[InputDebug] toggle candidate action={} key={} requiredModifier={} modifierHeld={} onDown={} onUp={}",
-					ActionToString(armed.action),
-					armed.baseKey != 0 ? armed.baseKey : key,
-					armed.requiredModifier,
+					ActionToString(armed->action),
+					armed->baseKey != 0 ? armed->baseKey : key,
+					armed->requiredModifier,
 					modifierHeld,
 					false,
-					armed.onUp != nullptr);
+					armed->onUp != nullptr);
 				logger::info(
 					"[InputDebug] executing toggle action={} key={} phase=up",
-					ActionToString(armed.action),
-					armed.baseKey != 0 ? armed.baseKey : key);
+					ActionToString(armed->action),
+					armed->baseKey != 0 ? armed->baseKey : key);
 			}
-			if (armed.onUp) {
-				armed.onUp();
+			lock.unlock();
+			if (armed->onUp) {
+				armed->onUp();
 			}
-			return armed.releaseResult;
+			return armed->releaseResult;
 		}
 
-		const auto& map = isGamePad ? _keyFunctionMapUpGamepad : _keyFunctionMapUp;
-		auto it = map.find(key);
-		if (it == map.end()) {
+		FunctionPtr callback = nullptr;
+		Action action = Action::None;
+		if (isGamePad) {
+			const auto it = _keyFunctionMapUpGamepad.find(key);
+			if (it != _keyFunctionMapUpGamepad.end()) {
+				callback = it->second;
+			}
+			const auto actionIt = _keyActionMapUpGamepad.find(key);
+			if (actionIt != _keyActionMapUpGamepad.end()) {
+				action = actionIt->second;
+			}
+		} else {
+			const auto it = _keyFunctionMapUp.find(key);
+			if (it != _keyFunctionMapUp.end()) {
+				callback = it->second;
+			}
+			const auto actionIt = _keyActionMapUp.find(key);
+			if (actionIt != _keyActionMapUp.end()) {
+				action = actionIt->second;
+			}
+		}
+		if (!callback) {
 			if (logGamepadDispatch) {
 				logger::info("[InputDebug] no gamepad binding matched key={} down={}", key, isDown);
 			}
 			return DispatchResult::NotHandled;
 		}
 		if (logGamepadDispatch) {
-			const auto& actionMap = isGamePad ? _keyActionMapUpGamepad : _keyActionMapUp;
-			const auto actionIt = actionMap.find(key);
 			logger::info(
 				"[InputDebug] executing direct binding action={} key={} phase=up",
-				actionIt != actionMap.end() ? ActionToString(actionIt->second) : "None",
+				ActionToString(action),
 				key);
 		}
-		it->second();
+		lock.unlock();
+		callback();
 		return DispatchResult::HandledPassThrough;
 	}
 
@@ -871,19 +913,58 @@ Controls::DispatchResult Controls::Dispatch(KeyId key, bool isDown, bool isGameP
 		return armedIt->second.releaseResult;
 	}
 
-	auto toggleIt = toggleMap.find(key);
-	if (toggleIt != toggleMap.end()) {
-		const auto& toggleCandidates = toggleIt->second;
+	struct ToggleDispatchCandidate
+	{
+		ToggleBindingCandidate binding;
+		KeyId releaseTriggerKey = 0;
+		std::uint64_t keyStateGeneration = 0;
+		bool modifierHeld = false;
+	};
+	std::vector<ToggleDispatchCandidate> toggleCandidates;
+	const std::uint64_t capturedBindingGeneration = _bindingGeneration;
+	bool hasToggleBinding = false;
+	std::vector<ToggleBindingCandidate> capturedBindings;
+	if (isGamePad) {
+		const auto it = _toggleBindingsGamepad.find(key);
+		if (it != _toggleBindingsGamepad.end()) {
+			hasToggleBinding = true;
+			capturedBindings = it->second;
+		}
+	} else {
+		const auto it = _toggleBindingsMkb.find(key);
+		if (it != _toggleBindingsMkb.end()) {
+			hasToggleBinding = true;
+			capturedBindings = it->second;
+		}
+	}
+	if (hasToggleBinding) {
+		toggleCandidates.reserve(capturedBindings.size());
+		for (const ToggleBindingCandidate& binding : capturedBindings) {
+			const bool chorded = binding.requiredModifier != 0;
+			const bool selfChord = chorded && binding.requiredModifier == key;
+			const KeyId releaseTriggerKey =
+				(chorded && isGamePad && binding.requiredModifier != 0) ? binding.requiredModifier : key;
+			const ArmedToggleKey releaseKey{ releaseTriggerKey, isGamePad };
+			const auto generationIt = _keyStateGenerations.find(releaseKey);
+			toggleCandidates.push_back(ToggleDispatchCandidate{
+				binding,
+				releaseTriggerKey,
+				generationIt != _keyStateGenerations.end() ? generationIt->second : 0,
+				!chorded || (!selfChord && IsModifierHeld(binding.requiredModifier, isGamePad))
+			});
+		}
+		lock.unlock();
 
 		for (int priority = 1; priority >= 0; --priority) {
-			for (const auto& candidate : toggleCandidates) {
+			for (const ToggleDispatchCandidate& captured : toggleCandidates) {
+				const ToggleBindingCandidate& candidate = captured.binding;
 				const bool chorded = candidate.requiredModifier != 0;
 				const int candidatePriority = chorded ? 1 : 0;
 				if (candidatePriority != priority) {
 					continue;
 				}
 				const bool selfChord = chorded && candidate.requiredModifier == key;
-				const bool modifierHeld = !chorded || (!selfChord && IsModifierHeld(candidate.requiredModifier, isGamePad));
+				const bool modifierHeld = captured.modifierHeld;
 				if (logGamepadDispatch) {
 					logger::info(
 						"[InputDebug] toggle candidate action={} key={} requiredModifier={} modifierHeld={} onDown={} onUp={}",
@@ -950,21 +1031,36 @@ Controls::DispatchResult Controls::Dispatch(KeyId key, bool isDown, bool isGameP
 				const DispatchResult releaseResult = chorded ? DispatchResult::Consumed : DispatchResult::HandledPassThrough;
 				// For gamepad chords, release callback is bound to the modifier key so base-key release
 				// does not immediately close the wheel.
-				const KeyId releaseTriggerKey =
-					(chorded && isGamePad && candidate.requiredModifier != 0) ? candidate.requiredModifier : key;
+				const KeyId releaseTriggerKey = captured.releaseTriggerKey;
 				const ArmedToggleKey releaseKey{ releaseTriggerKey, isGamePad };
-				if (candidate.onUp) {
-					_armedToggleBindings[releaseKey] = ArmedToggleState{
-						candidate.onUp,
-						releaseResult,
-						candidate.action,
-						key,
-						candidate.requiredModifier
-					};
-				} else {
-					_armedToggleBindings.erase(releaseKey);
+				FunctionPtr releaseDuringCallback = nullptr;
+				lock.lock();
+				{
+					const auto currentGenerationIt = _keyStateGenerations.find(releaseKey);
+					const std::uint64_t currentKeyGeneration =
+						currentGenerationIt != _keyStateGenerations.end() ? currentGenerationIt->second : 0;
+					const bool generationCurrent =
+						capturedBindingGeneration == _bindingGeneration &&
+						captured.keyStateGeneration == currentKeyGeneration;
+					const bool releaseKeyStillHeld = IsModifierHeld(releaseTriggerKey, isGamePad);
+					if (candidate.onUp && generationCurrent && releaseKeyStillHeld) {
+						_armedToggleBindings[releaseKey] = ArmedToggleState{
+							candidate.onUp,
+							releaseResult,
+							candidate.action,
+							key,
+							candidate.requiredModifier
+						};
+					} else if (candidate.onUp) {
+						releaseDuringCallback = candidate.onUp;
+					} else if (generationCurrent) {
+						_armedToggleBindings.erase(releaseKey);
+					}
 				}
-
+				lock.unlock();
+				if (releaseDuringCallback) {
+					releaseDuringCallback();
+				}
 				return releaseResult;
 			}
 		}
@@ -973,54 +1069,94 @@ Controls::DispatchResult Controls::Dispatch(KeyId key, bool isDown, bool isGameP
 		if (logGamepadDispatch) {
 			logger::info("[InputDebug] no toggle candidate changed state key={} down={}", key, isDown);
 		}
+		lock.lock();
 	}
 
-	const auto& modifiedMap = isGamePad ? _modifiedBindingsGamepad : _modifiedBindingsMkb;
-	auto modifiedIt = modifiedMap.find(key);
-	if (modifiedIt != modifiedMap.end()) {
-		for (const auto& candidate : modifiedIt->second) {
-			if (!candidate.onDown || !IsModifierHeld(candidate.requiredModifier, isGamePad)) {
-				continue;
+	FunctionPtr modifiedCallback = nullptr;
+	{
+		const auto& modifiedMap = isGamePad ? _modifiedBindingsGamepad : _modifiedBindingsMkb;
+		const auto modifiedIt = modifiedMap.find(key);
+		if (modifiedIt != modifiedMap.end()) {
+			for (const auto& candidate : modifiedIt->second) {
+				if (!candidate.onDown || !IsModifierHeld(candidate.requiredModifier, isGamePad)) {
+					continue;
+				}
+				modifiedCallback = candidate.onDown;
+				break;
 			}
-			candidate.onDown();
-			return DispatchResult::HandledPassThrough;
 		}
 	}
+	if (modifiedCallback) {
+		lock.unlock();
+		modifiedCallback();
+		return DispatchResult::HandledPassThrough;
+	}
 
-	const auto& bridgeMap = isGamePad ? _bridgeWheelBindingsGamepad : _bridgeWheelBindingsMkb;
-	auto bridgeIt = bridgeMap.find(key);
-	if (bridgeIt != bridgeMap.end()) {
-		for (const auto& candidate : bridgeIt->second) {
-			if (candidate.requiredModifier != 0 && !IsModifierHeld(candidate.requiredModifier, isGamePad)) {
-				continue;
+	std::vector<std::uint32_t> eligibleWheels;
+	{
+		const auto& bridgeMap = isGamePad ? _bridgeWheelBindingsGamepad : _bridgeWheelBindingsMkb;
+		const auto bridgeIt = bridgeMap.find(key);
+		if (bridgeIt != bridgeMap.end()) {
+			for (const auto& candidate : bridgeIt->second) {
+				if (candidate.requiredModifier != 0 && !IsModifierHeld(candidate.requiredModifier, isGamePad)) {
+					continue;
+				}
+				eligibleWheels.push_back(candidate.wheelNumber);
 			}
-			if (ActionHotkeysBridge::JumpToWheel(candidate.wheelNumber)) {
+		}
+	}
+	if (!eligibleWheels.empty()) {
+		lock.unlock();
+		for (const std::uint32_t wheelNumber : eligibleWheels) {
+			if (ActionHotkeysBridge::JumpToWheel(wheelNumber)) {
 				return DispatchResult::Consumed;
 			}
 		}
+		lock.lock();
 	}
 
-	const auto& map = isGamePad ? _keyFunctionMapDownGamepad : _keyFunctionMapDown;
-	auto it = map.find(key);
-	if (it == map.end()) {
+	FunctionPtr callback = nullptr;
+	Action action = Action::None;
+	bool hasAction = false;
+	if (isGamePad) {
+		const auto callbackIt = _keyFunctionMapDownGamepad.find(key);
+		if (callbackIt != _keyFunctionMapDownGamepad.end()) {
+			callback = callbackIt->second;
+		}
+		const auto actionIt = _keyActionMapDownGamepad.find(key);
+		if (actionIt != _keyActionMapDownGamepad.end()) {
+			action = actionIt->second;
+			hasAction = true;
+		}
+	} else {
+		const auto callbackIt = _keyFunctionMapDown.find(key);
+		if (callbackIt != _keyFunctionMapDown.end()) {
+			callback = callbackIt->second;
+		}
+		const auto actionIt = _keyActionMapDown.find(key);
+		if (actionIt != _keyActionMapDown.end()) {
+			action = actionIt->second;
+			hasAction = true;
+		}
+	}
+	if (!callback) {
 		if (logGamepadDispatch) {
 			logger::info("[InputDebug] no gamepad binding matched key={} down={}", key, isDown);
 		}
 		return DispatchResult::NotHandled;
 	}
-	const auto& actionMap = isGamePad ? _keyActionMapDownGamepad : _keyActionMapDown;
-	auto actionIt = actionMap.find(key);
-	if (actionIt == actionMap.end()) {
+	if (!hasAction) {
 		if (logGamepadDispatch) {
 			logger::info("[InputDebug] no gamepad binding matched key={} down={} reason=missingAction", key, isDown);
 		}
 		return DispatchResult::NotHandled;
 	}
-	if (IsEditModeOnlyAction(actionIt->second) && !Wheeler::IsInEditMode()) {
+	lock.unlock();
+	if (IsEditModeOnlyAction(action) && !Wheeler::IsInEditMode()) {
 		if (logGamepadDispatch) {
 			logger::info(
 				"[InputDebug] skip direct binding action={} key={} reason=editModeOnly editMode={}",
-				ActionToString(actionIt->second),
+				ActionToString(action),
 				key,
 				Wheeler::IsInEditMode());
 		}
@@ -1029,10 +1165,10 @@ Controls::DispatchResult Controls::Dispatch(KeyId key, bool isDown, bool isGameP
 	if (logGamepadDispatch) {
 		logger::info(
 			"[InputDebug] executing direct binding action={} key={} phase=down",
-			ActionToString(actionIt->second),
+			ActionToString(action),
 			key);
 	}
-	it->second();
+	callback();
 	return DispatchResult::HandledPassThrough;
 }
 

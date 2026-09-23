@@ -33,6 +33,7 @@ public:
 	// Update the interpolator's value based on a delta. Only TimeFloatInterpolatorManager may call it.
 	// returns whether the interpolator reaches its target value, which signals that it should be removed from the manager
 	bool Update(double dt);
+	void InvokeCallbacks();
 
 	double GetValue() const;
 

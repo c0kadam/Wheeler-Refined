@@ -15,6 +15,7 @@ public:
 	virtual void ActivateItemPrimary() override;
 	virtual void ActivateItemSecondary() override;
 	virtual void ActivateItemSpecial() override;
+	virtual bool MayQueueTransientGameplayAction() const override { return true; }
 
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
 

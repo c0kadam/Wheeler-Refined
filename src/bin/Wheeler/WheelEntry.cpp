@@ -399,33 +399,44 @@ bool WheelEntry::IsAvailable(RE::TESObjectREFR::InventoryItemMap& a_inv)
 	return _items[_selectedItem]->IsAvailable(a_inv);
 }
 
-void WheelEntry::ActivateItemSecondary(bool editMode)
+PreparedWheelItemActivation WheelEntry::ActivateItemSecondary(bool editMode)
 {
 	std::unique_lock<std::shared_mutex> lock(this->_lock);
 
 	if (_items.size() == 0) {
-		return;
+		return {};
 	}
 	if (!editMode) {
 		// Check if the selected item is missing - don't try to activate missing items
-		const std::shared_ptr<WheelItem>& item = _items[_selectedItem];
-		if (item) {
-			// Block WheelItemMissing placeholders
-			if (dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
-				// Sound feedback removed for compatibility with newer CommonLibSSE-NG
-				return;
-			}
-			// Block inventory-backed items not in player inventory
-			if (item->IsInventoryBacked() && !item->IsInPlayerInventory()) {
-				// Sound feedback removed for compatibility with newer CommonLibSSE-NG
-				return;
-			}
-			if (OStimIntegration::ShouldBlockRegularWheelActivation(item->GetItemTypeName())) {
-				return;
-			}
+		const std::shared_ptr<WheelItem> item = _items[_selectedItem];
+		if (!item || dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
+			return {};
 		}
-		_items[_selectedItem]->ActivateItemSecondary();
+		// Block inventory-backed items not in player inventory
+		if (item->IsInventoryBacked() && !item->IsInPlayerInventory()) {
+			// Sound feedback removed for compatibility with newer CommonLibSSE-NG
+			return {};
+		}
+		if (OStimIntegration::ShouldBlockRegularWheelActivation(item->GetItemTypeName())) {
+			return {};
+		}
+
+		PreparedWheelItemActivation prepared{
+			.selectedItem = item,
+			.kind = WheelItemActivationKind::Secondary,
+			.formID = item->GetFormID(),
+			.itemIndex = _selectedItem,
+			.executeAfterContainerUnlock = item->MayQueueTransientGameplayAction(),
+			.isPrimaryForAPI = false,
+			.accepted = true
+		};
+		if (prepared.executeAfterContainerUnlock) {
+			_arcRadiusBounceInterpolator.InterpolateTo(Config::Animation::EntryInputBumpScale * (Config::Styling::Wheel::OuterCircleRadius - Config::Styling::Wheel::InnerCircleRadius), Config::Animation::EntryInputBumpTime);
+			return prepared;
+		}
+		item->ActivateItemSecondary();
 		_arcRadiusBounceInterpolator.InterpolateTo(Config::Animation::EntryInputBumpScale * (Config::Styling::Wheel::OuterCircleRadius - Config::Styling::Wheel::InnerCircleRadius), Config::Animation::EntryInputBumpTime);
+		return prepared;
 	} else {
 		// remove selected item
 		std::shared_ptr<WheelItem> itemToDelete = _items[_selectedItem];
@@ -435,35 +446,48 @@ void WheelEntry::ActivateItemSecondary(bool editMode)
 			_selectedItem--;
 		}
 	}
+	return {};
 }
 
-void WheelEntry::ActivateItemPrimary(bool editMode)
+PreparedWheelItemActivation WheelEntry::ActivateItemPrimary(bool editMode)
 {
 	std::unique_lock<std::shared_mutex> lock(this->_lock);
 
 	if (!editMode) { 
 		if (_items.size() == 0) {
-			return;  // nothing to do
+			return {};  // nothing to do
 		}
 		// Check if the selected item is missing - don't try to activate missing items
-		const std::shared_ptr<WheelItem>& item = _items[_selectedItem];
-		if (item) {
-			// Block WheelItemMissing placeholders
-			if (dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
-				// Sound feedback removed for compatibility with newer CommonLibSSE-NG
-				return;
-			}
-			// Block inventory-backed items not in player inventory
-			if (item->IsInventoryBacked() && !item->IsInPlayerInventory()) {
-				// Sound feedback removed for compatibility with newer CommonLibSSE-NG
-				return;
-			}
-			if (OStimIntegration::ShouldBlockRegularWheelActivation(item->GetItemTypeName())) {
-				return;
-			}
+		const std::shared_ptr<WheelItem> item = _items[_selectedItem];
+		if (!item || dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
+			return {};
 		}
-		_items[_selectedItem]->ActivateItemPrimary();
+		// Block inventory-backed items not in player inventory
+		const bool inventoryBacked = item->IsInventoryBacked();
+		const bool inInventory = !inventoryBacked || item->IsInPlayerInventory();
+		if (inventoryBacked && !inInventory) {
+			// Sound feedback removed for compatibility with newer CommonLibSSE-NG
+			return {};
+		}
+		if (OStimIntegration::ShouldBlockRegularWheelActivation(item->GetItemTypeName())) {
+			return {};
+		}
+		PreparedWheelItemActivation prepared{
+			.selectedItem = item,
+			.kind = WheelItemActivationKind::Primary,
+			.formID = item->GetFormID(),
+			.itemIndex = _selectedItem,
+			.executeAfterContainerUnlock = item->MayQueueTransientGameplayAction(),
+			.isPrimaryForAPI = true,
+			.accepted = true
+		};
+		if (prepared.executeAfterContainerUnlock) {
+			_arcRadiusBounceInterpolator.InterpolateTo(Config::Animation::EntryInputBumpScale * (Config::Styling::Wheel::OuterCircleRadius - Config::Styling::Wheel::InnerCircleRadius), Config::Animation::EntryInputBumpTime);
+			return prepared;
+		}
+		item->ActivateItemPrimary();
 		_arcRadiusBounceInterpolator.InterpolateTo(Config::Animation::EntryInputBumpScale * (Config::Styling::Wheel::OuterCircleRadius - Config::Styling::Wheel::InnerCircleRadius), Config::Animation::EntryInputBumpTime);
+		return prepared;
 	} else {// append item to after _selectedItem index
 		MainWheelDebug::Log(MainWheelDebug::Category::Input, 
 			"BindAttempt: editMode=1 slotIdx={} currentItems={}", 
@@ -494,32 +518,42 @@ void WheelEntry::ActivateItemPrimary(bool editMode)
 				"BindResult: FAILED factory returned nullptr");
 		}
 	}
+	return {};
 }
 
-void WheelEntry::ActivateItemSpecial(bool editMode)
+PreparedWheelItemActivation WheelEntry::ActivateItemSpecial(bool editMode)
 {
 	std::unique_lock<std::shared_mutex> lock(this->_lock);
 	if (editMode || _items.size() == 0) {
-		return; // nothing to do
+		return {}; // nothing to do
 	}
 	// Check if the selected item is missing - don't try to activate missing items
-	const std::shared_ptr<WheelItem>& item = _items[_selectedItem];
-	if (item) {
-		// Block WheelItemMissing placeholders
-		if (dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
-			// Sound feedback removed for compatibility with newer CommonLibSSE-NG
-			return;
-		}
-		// Block inventory-backed items not in player inventory
-		if (item->IsInventoryBacked() && !item->IsInPlayerInventory()) {
-			// Sound feedback removed for compatibility with newer CommonLibSSE-NG
-			return;
-		}
-		if (OStimIntegration::ShouldBlockRegularWheelActivation(item->GetItemTypeName())) {
-			return;
-		}
+	const std::shared_ptr<WheelItem> item = _items[_selectedItem];
+	if (!item || dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
+		return {};
 	}
-	_items[_selectedItem]->ActivateItemSpecial();
+	// Block inventory-backed items not in player inventory
+	if (item->IsInventoryBacked() && !item->IsInPlayerInventory()) {
+		// Sound feedback removed for compatibility with newer CommonLibSSE-NG
+		return {};
+	}
+	if (OStimIntegration::ShouldBlockRegularWheelActivation(item->GetItemTypeName())) {
+		return {};
+	}
+	PreparedWheelItemActivation prepared{
+		.selectedItem = item,
+		.kind = WheelItemActivationKind::Special,
+		.formID = item->GetFormID(),
+		.itemIndex = _selectedItem,
+		.executeAfterContainerUnlock = item->MayQueueTransientGameplayAction(),
+		.isPrimaryForAPI = true,
+		.accepted = true
+	};
+	if (prepared.executeAfterContainerUnlock) {
+		return prepared;
+	}
+	item->ActivateItemSpecial();
+	return prepared;
 }
 
 void WheelEntry::PrevItem()

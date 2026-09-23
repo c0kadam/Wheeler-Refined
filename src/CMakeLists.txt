@@ -6,6 +6,8 @@ file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "${SOURCE_DIR}/*.cpp" "${SOURCE
 # Exclude the bundled imgui_freetype implementation; it targets older
 # ImGui internals and is not needed when we use the built-in font rasterizer.
 list(FILTER SOURCE_FILES EXCLUDE REGEX "imgui_freetype\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/TransientGameplayLifecycleVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HoverActivationSnapshotVerification\\.cpp$")
 
 # Explicitly include newly added capability helpers (guards against stale glob caches).
 list(APPEND SOURCE_FILES
@@ -15,6 +17,7 @@ list(APPEND SOURCE_FILES
 	"${SOURCE_DIR}/bin/Integrations/ExternalFavWheelState.h"
 	"${SOURCE_DIR}/bin/Wheeler/SlotHandIndicators.cpp"
 	"${SOURCE_DIR}/bin/Wheeler/SlotHandIndicators.h"
+	"${SOURCE_DIR}/bin/Wheeler/RestorationLifecyclePolicy.h"
 	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemExternalHotkey.cpp"
 	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemExternalHotkey.h"
 	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemIngredient.cpp"
@@ -36,7 +39,7 @@ list(APPEND SOURCE_FILES
 	"${SOURCE_DIR}/bin/Integrations/OStimTypes.h"
 )
 
-# 对 SourceFile 变量里面的所有文件分类(保留资源管理器的目录结构)
+# ? SourceFile ???????????(????????????)
 foreach(fileItem ${SOURCE_FILES})       
     # Get the directory of the source file
     get_filename_component(PARENT_DIR "${fileItem}" DIRECTORY)
@@ -147,6 +150,32 @@ target_link_libraries(
 		windowscodecs
 )
 
+add_executable(
+	wheeler_transient_lifecycle_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/TransientGameplayLifecycleVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/RestorationLifecyclePolicy.h"
+)
+target_compile_features(wheeler_transient_lifecycle_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_transient_lifecycle_verification PRIVATE WHEELER_TRANSIENT_LIFECYCLE_VERIFICATION_MAIN)
+target_include_directories(wheeler_transient_lifecycle_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_transient_lifecycle_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_hover_activation_snapshot_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/HoverActivationSnapshotVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/HoverActivationSnapshotPolicy.h"
+)
+target_compile_features(wheeler_hover_activation_snapshot_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_hover_activation_snapshot_verification PRIVATE WHEELER_HOVER_ACTIVATION_SNAPSHOT_VERIFICATION_MAIN)
+target_include_directories(wheeler_hover_activation_snapshot_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_hover_activation_snapshot_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
 target_precompile_headers(
 	"${PROJECT_NAME}"
 	PRIVATE
@@ -200,3 +229,4 @@ if("${COPY_OUTPUT}")
 		VERBATIM
 	)
 endif()
+

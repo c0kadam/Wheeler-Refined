@@ -1,4 +1,5 @@
 #include "WheelItemAmmo.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Rendering/TextureManager.h"
 #include "bin/Utilities/ItemCapabilities.h"
@@ -88,9 +89,9 @@ void WheelItemAmmo::toggleEquip()
 	RE::TESObjectREFR::InventoryItemMap invMap = pc->GetInventory();
 	if (this->IsAvailable(invMap)) {
 		if (this->IsActive(invMap)) {
-			aeMan->UnequipObject(pc, this->_ammo);
+			InventorySnapshotCache::UnequipObject(aeMan, pc, this->_ammo);
 		} else {
-			aeMan->EquipObject(pc, this->_ammo);
+			InventorySnapshotCache::EquipObject(aeMan, pc, this->_ammo);
 		}
 	}
 }

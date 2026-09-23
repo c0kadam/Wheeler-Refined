@@ -7,6 +7,7 @@
 #include "bin/Texts.h"
 
 #include "WheelItemSpell.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include <fmt/format.h>
 #include <cmath>
 #include <sstream>
@@ -256,7 +257,7 @@ void WheelItemSpell::ActivateItemSecondary()
 			pc->GetActorRuntimeData().selectedPower = nullptr;
 		} else {
 			// Not equipped - equip it
-			aeMan->EquipSpell(pc, this->_spell, Utils::Slot::GetVoiceSlot());
+			InventorySnapshotCache::EquipSpell(aeMan, pc, this->_spell, Utils::Slot::GetVoiceSlot());
 		}
 	} else {
 		// Regular spells go to left hand
@@ -268,7 +269,7 @@ void WheelItemSpell::ActivateItemSecondary()
 			// Not equipped - equip it
 			// Check if player was already in combat (weapon/magic drawn) BEFORE equipping
 			bool wasAlreadyDrawn = pc->AsActorState()->IsWeaponDrawn();
-			aeMan->EquipSpell(pc, this->_spell, Utils::Slot::GetLeftHandSlot());
+			InventorySnapshotCache::EquipSpell(aeMan, pc, this->_spell, Utils::Slot::GetLeftHandSlot());
 			if (Config::WheelBehavior::AutoDrawOnUse) {
 				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			} else {
@@ -307,7 +308,7 @@ void WheelItemSpell::ActivateItemPrimary()
 			pc->GetActorRuntimeData().selectedPower = nullptr;
 		} else {
 			// Not equipped - equip it
-			aeMan->EquipSpell(pc, this->_spell, Utils::Slot::GetVoiceSlot());
+			InventorySnapshotCache::EquipSpell(aeMan, pc, this->_spell, Utils::Slot::GetVoiceSlot());
 		}
 	} else {
 		// Regular spells go to right hand
@@ -319,7 +320,7 @@ void WheelItemSpell::ActivateItemPrimary()
 			// Not equipped - equip it
 			// Check if player was already in combat (weapon/magic drawn) BEFORE equipping
 			bool wasAlreadyDrawn = pc->AsActorState()->IsWeaponDrawn();
-			aeMan->EquipSpell(pc, this->_spell, Utils::Slot::GetRightHandSlot());
+			InventorySnapshotCache::EquipSpell(aeMan, pc, this->_spell, Utils::Slot::GetRightHandSlot());
 			if (Config::WheelBehavior::AutoDrawOnUse) {
 				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			} else {

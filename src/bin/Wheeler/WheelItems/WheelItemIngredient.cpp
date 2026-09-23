@@ -3,6 +3,7 @@
 #include "bin/Wheeler/Wheeler.h"
 #include "bin/Config.h"
 #include "WheelItemIngredient.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 
 namespace
 {
@@ -136,12 +137,10 @@ RE::IngredientItem* WheelItemIngredient::ResolveIngredientItem()
 
 	RE::IngredientItem* ingredient = RE::TESForm::LookupByID<RE::IngredientItem>(_formID);
 	if (!ingredient) {
-		_ingredient = nullptr;
 		return nullptr;
 	}
 
-	_ingredient = ingredient;
-	return _ingredient;
+	return ingredient;
 }
 
 void WheelItemIngredient::useIngredient()
@@ -184,7 +183,7 @@ void WheelItemIngredient::useIngredient()
 			countBefore);
 	}
 
-	aeMan->EquipObject(pc, ingredient);
+	InventorySnapshotCache::EquipObject(aeMan, pc, ingredient);
 
 	if (Config::WheelBehavior::ClearDepletedConsumables &&
 		countBefore <= 1 &&
