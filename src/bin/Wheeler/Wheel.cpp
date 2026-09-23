@@ -322,7 +322,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 				const float effectiveScale = WheelBackgroundTextureScale * normalize;
 				static float lastLoggedGameHeight = 0.0f;
 				if (std::fabs(gameHeight - lastLoggedGameHeight) > 0.5f) {
-					logger::info("[ResolutionFix] Wheel background scale: cfg={:.3f}, normalize={:.3f}, effective={:.3f}, gameH={:.0f}",
+					logger::debug("[ResolutionFix] Wheel background scale: cfg={:.3f}, normalize={:.3f}, effective={:.3f}, gameH={:.0f}",
 						WheelBackgroundTextureScale, normalize, effectiveScale, gameHeight);
 					lastLoggedGameHeight = gameHeight;
 				}
@@ -508,7 +508,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 				effectiveAngle * (180.0f / IM_PI));
 		}
 
-		// Phase A: Find candidate index from angle (raw or motion-hinted)
+		// Find the candidate index from raw or motion-hinted angle data.
 		int candidateIdx = -1;
 		if (cursorInsideWheel) {
 			for (int i = 0; i < numEntries; ++i) {
@@ -533,7 +533,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 		}
 		const bool haveCandidate = candidateIdx >= 0;
 		
-		// Phase B: Apply gamepad hysteresis or mouse guard rails, then commit final index
+		// Apply gamepad hysteresis or mouse guard rails, then commit the final index.
 		int finalIdx = lastIdx;
 		const char* guardReason = "KEEP_PREV";
 		int deltaSlots = -1;

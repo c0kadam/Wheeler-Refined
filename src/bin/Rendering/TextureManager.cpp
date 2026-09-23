@@ -934,9 +934,6 @@ Texture::Image Texture::GetSlotBackgroundMaskImage()
 	return GetIconImage(icon_image_type::slot_background);
 }
 
-// Core texture loading is derived from LamasTinyHUD revision
-// dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited through
-// original Wheeler and subsequently adapted for Wheeler Refined.
 bool Texture::load_texture_from_file(const char* filename, ID3D11ShaderResourceView** out_srv, int& out_width, int& out_height, std::vector<ImVec2>* out_outline, ID3D11ShaderResourceView** out_mask_srv)
 {
 	if (!device_) {
@@ -1281,10 +1278,10 @@ void Texture::load_custom_icon_images()
 			if (!form) {
 				// Only log first few failures to avoid spam
 				if (lookupFailures < 10) {
-					logger::warn("Texture::load_custom_icon_images: LookupForm failed for {}:0x{:X} (from '{}') - plugin may not be loaded",
+					logger::debug("Texture::load_custom_icon_images: LookupForm failed for {}:0x{:X} (from '{}') - plugin may not be loaded",
 						pluginName, formId, entry.path().filename().string());
 				} else if (lookupFailures == 10) {
-					logger::warn("Texture::load_custom_icon_images: (suppressing further LookupForm failure warnings)");
+					logger::debug("Texture::load_custom_icon_images: (suppressing further LookupForm failure warnings)");
 				}
 				++lookupFailures;
 				continue;  // DO NOT register - this is the key fix

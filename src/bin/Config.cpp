@@ -6053,7 +6053,7 @@ void Config::ReadAmmoWheelConfig()
 		ini.SaveFile(AMMOWHEELSETTINGS_PATH);
 	}
 
-	// [Debug] - Phase 0: Debug logging toggles
+	// [Debug] logging toggles
 	GetBoolValue(ini, "Debug", "LogConfigApply", Config::AmmoWheel::Debug::LogConfigApply);
 	GetBoolValue(ini, "Debug", "LogInput", Config::AmmoWheel::Debug::LogInput);
 	GetBoolValue(ini, "Debug", "LogSorting", Config::AmmoWheel::Debug::LogSorting);
@@ -6064,7 +6064,7 @@ void Config::ReadAmmoWheelConfig()
 	GetBoolValue(ini, "Debug", "LogPresetResolution", Config::AmmoWheel::Debug::LogPresetResolution);
 	GetBoolValue(ini, "Debug", "LogAssetLoading", Config::AmmoWheel::Debug::LogAssetLoading);
 	
-	// [Sort] - Multi-criteria sorting system
+	// [Sort] multi-criteria sorting settings
 	{
 		uint32_t val = static_cast<uint32_t>(Config::AmmoWheel::Sort::Primary);
 		if (GetUInt32Value(ini, "Sort", "Primary", val)) {
@@ -6109,7 +6109,7 @@ void Config::ReadAmmoWheelConfig()
 	}
 
 
-	// [Navigation] - mouse, gamepad and selection behavior (TASK 1)
+	// [Navigation] - mouse, gamepad and selection behavior
 	GetFloatValue(ini, "Navigation", "MouseDeadzone", Config::AmmoWheel::MouseDeadzone);
 	GetFloatValue(ini, "Navigation", "MouseSmoothingSpeed", Config::AmmoWheel::MouseSmoothingSpeed);
 	GetFloatValue(ini, "Navigation", "MouseMaxAngularSpeed", Config::AmmoWheel::MouseMaxAngularSpeed);
@@ -6157,7 +6157,7 @@ void Config::ReadAmmoWheelConfig()
 	GetFloatValue(ini, "Navigation", "GamepadHoverHysteresisDeg", Config::AmmoWheel::GamepadHoverHysteresisDeg);
 	Config::AmmoWheel::GamepadHoverHysteresisDeg = std::clamp(Config::AmmoWheel::GamepadHoverHysteresisDeg, 0.0f, 20.0f);
 	
-	// Clamp navigation values to safe ranges and log if clamped
+	// Clamp navigation values to safe ranges and log when clamped.
 	float origMouseDz = Config::AmmoWheel::MouseDeadzone;
 	float origMouseSmooth = Config::AmmoWheel::MouseSmoothingSpeed;
 	float origGamepadDz = Config::AmmoWheel::GamepadDeadzone;
@@ -6238,7 +6238,7 @@ void Config::ReadAmmoWheelConfig()
 	GetFloatValue(ini, "Center", "PaddingPx", Config::AmmoWheel::CenterPaddingPx);
 	GetFloatValue(ini, "Center", "MaxWidthRatio", Config::AmmoWheel::CenterMaxWidthRatio);
 	GetFloatValue(ini, "Center", "LineSpacingPx", Config::AmmoWheel::CenterLineSpacingPx);
-	// TASK 2: Center panel positioning
+	// Center panel positioning
 	GetFloatValue(ini, "Center", "PanelInsetRatio", Config::AmmoWheel::CenterPanelInsetRatio);
 	GetFloatValue(ini, "Center", "SafeMargin", Config::AmmoWheel::CenterPanelSafeMargin);
 
@@ -6265,7 +6265,7 @@ void Config::ReadAmmoWheelConfig()
 	GetBoolValue(ini, "Popup", "UseCustomColor", Config::AmmoWheel::PopupUseCustomColor);  // Legacy fallback
 	GetUInt32Value(ini, "Popup", "PopupBackgroundColor", Config::AmmoWheel::PopupBackgroundColor);
 	GetUInt32Value(ini, "Popup", "BackgroundColor", Config::AmmoWheel::PopupBackgroundColor);  // Legacy fallback
-	// TASK 5: Circular bubble popup
+	// Circular bubble popup
 	GetFloatValue(ini, "Popup", "BubbleRadius", Config::AmmoWheel::PopupBubbleRadius);
 	GetBoolValue(ini, "Popup", "Circular", Config::AmmoWheel::PopupCircular);
 	{
@@ -6291,7 +6291,7 @@ void Config::ReadAmmoWheelConfig()
 	Config::AmmoWheel::PopupBlobPointCount = std::clamp(Config::AmmoWheel::PopupBlobPointCount, 8, 48);
 	Config::AmmoWheel::PopupSunDragonTone = std::clamp(Config::AmmoWheel::PopupSunDragonTone, 0.0f, 2.0f);
 	
-	// [Popup.Animation] - Enhanced popup animation
+	// [Popup.Animation] settings
 	GetBoolValue(ini, "Popup.Animation", "Enabled", Config::AmmoWheel::PopupAnim::Enabled);
 	GetFloatValue(ini, "Popup.Animation", "HoverInMs", Config::AmmoWheel::PopupAnim::HoverInMs);
 	GetFloatValue(ini, "Popup.Animation", "HoverOutMs", Config::AmmoWheel::PopupAnim::HoverOutMs);
@@ -6337,7 +6337,7 @@ void Config::ReadAmmoWheelConfig()
 	}
 	GetBoolValue(ini, "Labels", "LabelAbbreviate", Config::AmmoWheel::LabelAbbreviate);
 	GetBoolValue(ini, "Labels", "Abbreviate", Config::AmmoWheel::LabelAbbreviate);  // Legacy fallback
-	// TASK 3: Multi-line text stacking
+	// Multi-line text stacking
 	GetBoolValue(ini, "Labels", "MultiLine", Config::AmmoWheel::LabelMultiLine);
 	GetFloatValue(ini, "Labels", "MaxSlotArcRatio", Config::AmmoWheel::LabelMaxSlotArcRatio);
 	
@@ -6385,7 +6385,7 @@ void Config::ReadAmmoWheelConfig()
 	// Debug visualization
 	GetBoolValue(ini, "Labels", "DebugDrawTextRects", Config::AmmoWheel::DebugDrawTextRects);
 
-	// [InputBlocking] - TASK 1: Block attack when wheel is open
+	// [InputBlocking] - block attack when the wheel is open
 	GetBoolValue(ini, "InputBlocking", "BlockAttackWhenOpen", Config::AmmoWheel::BlockAttackWhenOpen);
 	GetBoolValue(ini, "InputBlocking", "ConsumeLMBWhenOpen", Config::AmmoWheel::ConsumeLMBWhenOpen);
 	GetBoolValue(ini, "InputBlocking", "ConsumeRMBWhenOpen", Config::AmmoWheel::ConsumeRMBWhenOpen);
@@ -6394,7 +6394,7 @@ void Config::ReadAmmoWheelConfig()
 	GetBoolValue(ini, "InputBlocking", "AllowRMBUnequip", Config::AmmoWheel::AllowRMBUnequip);
 	GetBoolValue(ini, "InputBlocking", "AllowChordFallback", Config::AmmoWheel::AllowChordFallback);
 
-	// [CenterPanel] - TASK 2: Shape and positioning
+	// [CenterPanel] - shape and positioning
 	{
 		uint32_t val = static_cast<uint32_t>(Config::AmmoWheel::CenterPanelShapeIndex);
 		if (GetUInt32Value(ini, "CenterPanel", "ShapeType", val)) {
@@ -6414,7 +6414,7 @@ void Config::ReadAmmoWheelConfig()
 	GetFloatValue(ini, "CenterPanel", "OffsetX", Config::AmmoWheel::CenterPanelOffsetX);
 	GetFloatValue(ini, "CenterPanel", "OffsetY", Config::AmmoWheel::CenterPanelOffsetY);
 
-	// [CenterPanel.Text] - TASK 2: Text layout
+	// [CenterPanel.Text] - text layout
 	GetBoolValue(ini, "CenterPanel.Text", "Enabled", Config::AmmoWheel::CenterTextEnabled);
 	GetFloatValue(ini, "CenterPanel.Text", "MinFontSize", Config::AmmoWheel::CenterTextMinFontSize);
 	GetFloatValue(ini, "CenterPanel.Text", "MaxFontSize", Config::AmmoWheel::CenterTextMaxFontSize);
@@ -6436,7 +6436,7 @@ void Config::ReadAmmoWheelConfig()
 	GetFloatValue(ini, "CenterPanel.Text", "OffsetX", Config::AmmoWheel::CenterTextOffsetX);
 	GetFloatValue(ini, "CenterPanel.Text", "OffsetY", Config::AmmoWheel::CenterTextOffsetY);
 	
-	// [CenterPanel.Text] - Word wrapping for long ammo names
+	// [CenterPanel.Text] word-wrapping settings for long ammo names
 	GetBoolValue(ini, "CenterPanel.Text", "EnableWordWrap", Config::AmmoWheel::EnableWordWrap);
 	GetBoolValue(ini, "CenterPanel.Text", "WrapAtWordBoundary", Config::AmmoWheel::WrapAtWordBoundary);
 	GetFloatValue(ini, "CenterPanel.Text", "WrapMaxLineWidthRatio", Config::AmmoWheel::WrapMaxLineWidthRatio);
@@ -6480,7 +6480,7 @@ void Config::ReadAmmoWheelConfig()
 			std::clamp(a, 0u, 255u));
 	}
 
-	// [CenterPanel.Fields] - Center panel field toggles
+	// [CenterPanel.Fields] visibility toggles
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowName", Config::AmmoWheel::CenterFields::ShowName);
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowDamage", Config::AmmoWheel::CenterFields::ShowDamage);
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowPoison", Config::AmmoWheel::CenterFields::ShowPoison);
@@ -6521,7 +6521,7 @@ void Config::ReadAmmoWheelConfig()
 		);
 	}
 	
-	// [CenterPanel.Skin] - SVG skin support
+	// [CenterPanel.Skin] SVG skin settings
 	GetBoolValue(ini, "CenterPanel.Skin", "UseSVG", Config::AmmoWheel::CenterSkin::UseSVG);
 	GetStringValue(ini, "CenterPanel.Skin", "SVGPath", Config::AmmoWheel::CenterSkin::SVGPath);
 	GetFloatValue(ini, "CenterPanel.Skin", "Opacity", Config::AmmoWheel::CenterSkin::Opacity);
@@ -6807,7 +6807,7 @@ void Config::ReadAmmoWheelConfig()
 		Config::AmmoWheel::HoverHighlightColor = toImU32(r, g, b, Config::AmmoWheel::HoverOpacity);
 	}
 
-	// ========== TASK 1: COLOR OVERRIDE SYSTEM ==========
+	// ========== COLOR OVERRIDE SYSTEM ==========
 	// [ColorOverrides] - Slot label text color override
 	GetBoolValue(ini, "ColorOverrides", "SlotLabelColorOverrideEnabled", Config::AmmoWheel::SlotLabelColorOverrideEnabled);
 	GetUInt32Value(ini, "ColorOverrides", "SlotLabelColorPreset", Config::AmmoWheel::SlotLabelColorPreset);
@@ -6904,7 +6904,7 @@ void Config::ReadAmmoWheelConfig()
 		Config::AmmoWheel::CenterLabelColorComputed = toImU32(r, g, b, a);
 	}
 	
-	// ========== TASK 2: BOLD LABEL FORMATTING ==========
+	// ========== BOLD LABEL FORMATTING ==========
 	GetBoolValue(ini, "Labels", "NameBoldEnabled", Config::AmmoWheel::NameBoldEnabled);
 	{
 		uint32_t mode = static_cast<uint32_t>(Config::AmmoWheel::NameBoldMode);
@@ -6914,7 +6914,7 @@ void Config::ReadAmmoWheelConfig()
 	GetFloatValue(ini, "Labels", "NameBoldStrengthPx", Config::AmmoWheel::NameBoldStrengthPx);
 	Config::AmmoWheel::NameBoldStrengthPx = std::clamp(Config::AmmoWheel::NameBoldStrengthPx, 0.3f, 3.0f);
 	
-	// ========== TASK 3: INDICATOR REDESIGN ==========
+	// ========== INDICATOR REDESIGN ==========
 	GetBoolValue(ini, "Indicators", "HoverBrightnessEnabled", Config::AmmoWheel::HoverBrightnessEnabled);
 	GetFloatValue(ini, "Indicators", "HoverBrightnessStrength", Config::AmmoWheel::HoverBrightnessStrength);
 	Config::AmmoWheel::HoverBrightnessStrength = std::clamp(Config::AmmoWheel::HoverBrightnessStrength, 1.0f, 2.0f);
@@ -6948,7 +6948,7 @@ void Config::ReadAmmoWheelConfig()
 	GetFloatValue(ini, "Indicators", "SelectedSlotBlinkStrength", Config::AmmoWheel::SelectedSlotBlinkStrength);
 	Config::AmmoWheel::SelectedSlotBlinkStrength = std::clamp(Config::AmmoWheel::SelectedSlotBlinkStrength, 0.0f, 1.0f);
 	
-	// ========== TASK 4: POPUP FLIPBOOK TOGGLE ==========
+	// ========== POPUP FLIPBOOK TOGGLE ==========
 	GetBoolValue(ini, "Popup", "PopupFlipbookEnabled", Config::AmmoWheel::PopupFlipbookEnabled);
 
 	// [VisualPolish] - background, border, shadows, text effects
@@ -7388,7 +7388,7 @@ void Config::OffsetAmmoWheelSizingToViewport()
 	static float lastLoggedDisplayH = 0.0f;
 	static float lastLoggedGameH = 0.0f;
 	if (layoutState.MismatchActive && (layoutState.DisplayH != lastLoggedDisplayH || layoutState.GameH != lastLoggedGameH)) {
-		logger::info("[ResolutionFix] AmmoWheel scaling applied at Config::OffsetAmmoWheelSizingToViewport (displayH={:.0f}, gameH={:.0f}, scaleX={:.3f}, scaleY={:.3f}, uniform={:.3f})",
+		logger::debug("[ResolutionFix] AmmoWheel scaling applied at Config::OffsetAmmoWheelSizingToViewport (displayH={:.0f}, gameH={:.0f}, scaleX={:.3f}, scaleY={:.3f}, uniform={:.3f})",
 			layoutState.DisplayH, layoutState.GameH, layoutState.Msx, layoutState.Msy, layoutState.Msu);
 		lastLoggedDisplayH = layoutState.DisplayH;
 		lastLoggedGameH = layoutState.GameH;
