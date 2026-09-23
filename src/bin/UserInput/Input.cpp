@@ -24,6 +24,13 @@
 #include "bin/Wheeler/Wheeler.h"
 #include "Controls.h"
 
+class CharEvent : public RE::InputEvent
+{
+public:
+	uint32_t keyCode;  // 18 (ascii code)
+};
+
+
 static enum : std::uint32_t
 {
 	kInvalid = static_cast<std::uint32_t>(-1),
@@ -563,6 +570,8 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 	Controls::PollRebindInput();
 	InputBroker::RefreshConfigFromSettings();
 	InputBroker::RefreshWheelerReservations();
+	const bool wheelerInputSuspendedByOwner =
+		InputBroker::IsBlockedByActiveOwner(InputBroker::kWheelerRefinedPluginId);
 
 	const bool mainWheelWasOpenAtDispatchStart = Wheeler::IsWheelerOpen();
 	bool mainWheelOpenedDuringThisDispatch = false;
@@ -633,9 +642,10 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 		const char* spyWinner = "Vanilla";
 		const char* spyResult = "PassThrough";
 		Controls::DispatchResult spyDispatchResult = Controls::DispatchResult::NotHandled;
-		const bool brokerOwnerBlocked = InputBroker::IsBlockedByActiveOwner(InputBroker::kWheelerRefinedPluginId);
+		const bool brokerOwnerBlocked = wheelerInputSuspendedByOwner;
 		const bool mainWheelOpenBeforeEvent = Wheeler::IsWheelerOpen();
 		bool passthroughThisEvent = false;
+		bool cooperativeOpeningGranted = false;
 
 		if (event->eventType == RE::INPUT_EVENT_TYPE::kMouseMove) {
 			const bool wheelerOpen = Wheeler::IsWheelerOpen();
@@ -703,19 +713,23 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 				using DeviceType = RE::INPUT_DEVICE;
 				bool isGamePad = false;
 				bool isMouse = false;
+				bool cooperativeDeviceSupported = false;
 				const RE::INPUT_DEVICE device = button->device.get();
 				spyDevice = device;
 				switch (device) {
 				case DeviceType::kMouse:
 					input += kMouseOffset;
 					isMouse = true;
+					cooperativeDeviceSupported = true;
 					break;
 				case DeviceType::kKeyboard:
 					input += kKeyboardOffset;
+					cooperativeDeviceSupported = true;
 					break;
 				case DeviceType::kGamepad:
 					input = GetGamepadIndex(static_cast<RE::BSWin32GamepadDevice::Key>(input));
 					isGamePad = true;
+					cooperativeDeviceSupported = true;
 					break;
 				default:
 					break;
@@ -733,27 +747,51 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 				spyIsUp = isUp;
 				spyAnalogValue = analogValue;
 
-				std::string userEventName;
-				if (input != kInvalid) {
-					RE::ControlMap* ctrlMap = RE::ControlMap::GetSingleton();
-					if (ctrlMap) {
-						const auto userEvent = ctrlMap->GetUserEventName(input, device);
-						if (!userEvent.empty()) {
-							userEventName = userEvent;
-						}
-					}
-				}
-
-				RE::UI* ui = RE::UI::GetSingleton();
-				if (isGamePad && input != kInvalid && (isDown || isUp)) {
-					LogInventoryGamepadUserEventTrace(ui, userEventName, spyRawInput, input, isDown, isUp);
-				}
-
 				if (input != kInvalid && (isDown || isUp)) {
 					Controls::TrackKeyState(input, isDown, isGamePad);
 				}
 
-				if (!consumeEvent &&
+				if (cooperativeDeviceSupported && input != kInvalid) {
+					const bool mainWheelExclusiveContext =
+						mainWheelWasOpenAtDispatchStart ||
+						mainWheelOpenedDuringThisDispatch ||
+						Wheeler::IsWheelerOpen();
+					const auto cooperativeGrant = InputBroker::TryGrantCooperativeOpening(
+						reinterpret_cast<std::uintptr_t>(event),
+						isGamePad ? InputBroker::DeviceType::kGamepad : InputBroker::DeviceType::kMKB,
+						input,
+						isDown && isDownEdge,
+						mainWheelExclusiveContext);
+					if (cooperativeGrant.granted) {
+						cooperativeOpeningGranted = true;
+						passthroughThisEvent = true;
+						spyCandidates = "CooperativeOpening";
+						spyWinner = "External";
+						spyResult = "GrantedPassThrough";
+					}
+				}
+
+				std::string userEventName;
+				RE::UI* ui = nullptr;
+				if (!cooperativeOpeningGranted) {
+					if (input != kInvalid) {
+						RE::ControlMap* ctrlMap = RE::ControlMap::GetSingleton();
+						if (ctrlMap) {
+							const auto userEvent = ctrlMap->GetUserEventName(input, device);
+							if (!userEvent.empty()) {
+								userEventName = userEvent;
+							}
+						}
+					}
+
+					ui = RE::UI::GetSingleton();
+					if (isGamePad && input != kInvalid && (isDown || isUp)) {
+						LogInventoryGamepadUserEventTrace(ui, userEventName, spyRawInput, input, isDown, isUp);
+					}
+				}
+
+				if (!cooperativeOpeningGranted && !consumeEvent &&
+				    !brokerOwnerBlocked &&
 				    isGamePad &&
 				    ConsumeSuppressedAmmoWheelGamepadInput(
 					    input,
@@ -764,7 +802,8 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 					    spyResult)) {
 					consumeEvent = true;
 				}
-				if (!consumeEvent &&
+				if (!cooperativeOpeningGranted && !consumeEvent &&
+				    !brokerOwnerBlocked &&
 				    isGamePad &&
 				    consumeAmmoWheelDispatchTailSuppression(
 					    input,
@@ -777,8 +816,8 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 					consumeEvent = true;
 				}
 
-				bool brokerAllowsWheelProcessing = true;
-				if (!consumeEvent && input != kInvalid && (isDown || isUp)) {
+				bool brokerAllowsWheelProcessing = !brokerOwnerBlocked;
+				if (!cooperativeOpeningGranted && brokerAllowsWheelProcessing && !consumeEvent && input != kInvalid && (isDown || isUp)) {
 					std::uint32_t brokerContextFlags = InputBroker::ContextFlag::None;
 					if (isDown) {
 						brokerContextFlags |= InputBroker::ContextFlag::IsDown;
@@ -800,8 +839,10 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 						brokerContextFlags);
 				}
 
-				const auto mainWheelAction = (input != kInvalid) ? Wheeler::ResolveMainWheelInputAction(input, isGamePad) : Wheeler::InputAction::None;
-				if (!consumeEvent && mainWheelAction != Wheeler::InputAction::None && (isDown || isUp)) {
+				const auto mainWheelAction = (!cooperativeOpeningGranted && input != kInvalid) ?
+				                                 Wheeler::ResolveMainWheelInputAction(input, isGamePad) :
+				                                 Wheeler::InputAction::None;
+				if (!cooperativeOpeningGranted && !consumeEvent && !brokerOwnerBlocked && mainWheelAction != Wheeler::InputAction::None && (isDown || isUp)) {
 					Wheeler::RecordMainWheelInputEvent(
 						mainWheelAction,
 						device,
@@ -811,7 +852,8 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 						isUp);
 				}
 
-				if (!consumeEvent &&
+				if (!cooperativeOpeningGranted && !consumeEvent &&
+				    !brokerOwnerBlocked &&
 				    IsInputSpyEnabled() &&
 				    Config::Debug::InputSpyDumpHotkey != 0 &&
 				    input == Config::Debug::InputSpyDumpHotkey &&
@@ -823,7 +865,8 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 					spyResult = "DumpTriggered";
 				}
 
-				if (!consumeEvent && input != kInvalid) {
+				if (!cooperativeOpeningGranted && !consumeEvent && input != kInvalid &&
+				    (!brokerOwnerBlocked || Controls::IsRebindActive())) {
 					const bool consumedRebind = Controls::HandleRebindInput(input, isGamePad, isMouse);
 					if (consumedRebind) {
 						if (mainWheelAction != Wheeler::InputAction::None) {
@@ -837,7 +880,7 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 					}
 				}
 
-				if (!consumeEvent && input != kInvalid && !brokerAllowsWheelProcessing) {
+				if (!cooperativeOpeningGranted && !consumeEvent && input != kInvalid && !brokerAllowsWheelProcessing) {
 					spyCandidates = "InputBroker";
 					spyWinner = "InputBroker";
 					spyResult = "Blocked";
@@ -845,7 +888,7 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 
 				Controls::Action resolvedAction = Controls::Action::None;
 				bool suppressRepeatedActivationDown = false;
-				if (!consumeEvent && input != kInvalid && brokerAllowsWheelProcessing) {
+				if (!cooperativeOpeningGranted && !consumeEvent && input != kInvalid && brokerAllowsWheelProcessing) {
 					resolvedAction = Controls::ResolveAction(input, isDown, isGamePad);
 					suppressRepeatedActivationDown =
 						isDown &&
@@ -872,7 +915,7 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 					}
 				}
 
-				if (!consumeEvent && input != kInvalid && brokerAllowsWheelProcessing) {
+				if (!cooperativeOpeningGranted && !consumeEvent && input != kInvalid && brokerAllowsWheelProcessing) {
 					const bool isAmmoToggleKey = IsAmmoToggleKey(input, isGamePad, isMouse);
 					const bool wheelerOpen = Wheeler::IsWheelerOpen();
 					const bool ammoWheelOpen = Wheeler::IsAmmoWheelOpen();
@@ -1063,7 +1106,7 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 			}
 		}
 
-		if (Wheeler::IsWheelerOpen() && !passthroughThisEvent && !consumeEvent) {
+		if (!cooperativeOpeningGranted && Wheeler::IsWheelerOpen() && !brokerOwnerBlocked && !passthroughThisEvent && !consumeEvent) {
 			consumeEvent = true;
 			spyCandidates = "MainWheelInputLock";
 			spyWinner = "MainWheel";
@@ -1120,7 +1163,7 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 	const bool dispatchExclusive =
 		dispatchExclusiveRequested &&
 		!suppressExclusiveForPassthrough &&
-		!InputBroker::IsBlockedByActiveOwner(InputBroker::kWheelerRefinedPluginId);
+		!wheelerInputSuspendedByOwner;
 	if (dispatchExclusive) {
 		*a_event = nullptr;
 	}
@@ -1132,6 +1175,7 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 	static bool s_lastMainWheelClosedDuringDispatch = false;
 	static bool s_lastMainWheelKeptPassthrough = false;
 	static bool s_lastMainWheelSawPause = false;
+	static bool s_lastMainWheelBlockedByOwner = false;
 	if (dispatchExclusiveRequested &&
 	    (!s_hasLoggedMainWheelExclusiveState ||
 	     dispatchExclusive != s_lastMainWheelDispatchExclusive ||
@@ -1139,9 +1183,12 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 	     mainWheelOpenedDuringThisDispatch != s_lastMainWheelOpenedDuringDispatch ||
 	     mainWheelClosedDuringThisDispatch != s_lastMainWheelClosedDuringDispatch ||
 	     keptPassthroughEvent != s_lastMainWheelKeptPassthrough ||
-	     sawPauseThisDispatch != s_lastMainWheelSawPause)) {
+	     sawPauseThisDispatch != s_lastMainWheelSawPause ||
+	     wheelerInputSuspendedByOwner != s_lastMainWheelBlockedByOwner)) {
 		logger::info(
-			"[MainWheel.InputLock] dispatchExclusive={} openedDuring={} closedDuring={} keptPassthrough={} pausePassthrough={}",
+			"[MainWheel.InputLock] requested={} blockedByOwner={} dispatchExclusive={} openedDuring={} closedDuring={} keptPassthrough={} pausePassthrough={}",
+			dispatchExclusiveRequested ? 1 : 0,
+			wheelerInputSuspendedByOwner ? 1 : 0,
 			dispatchExclusive ? 1 : 0,
 			mainWheelOpenedDuringThisDispatch ? 1 : 0,
 			mainWheelClosedDuringThisDispatch ? 1 : 0,
@@ -1154,5 +1201,6 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 		s_lastMainWheelClosedDuringDispatch = mainWheelClosedDuringThisDispatch;
 		s_lastMainWheelKeptPassthrough = keptPassthroughEvent;
 		s_lastMainWheelSawPause = sawPauseThisDispatch;
+		s_lastMainWheelBlockedByOwner = wheelerInputSuspendedByOwner;
 	}
 }

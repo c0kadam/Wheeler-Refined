@@ -235,17 +235,40 @@ namespace
 		return ExternalFavWheelState::Query(ExternalFavWheelState::ProbeOwner::AmmoWheel).open;
 	}
 
-	bool TryGetExternalWheelBlockingReason(std::string_view& outReason)
+	bool IsDMenuActuallyOpen()
 	{
-		if (InputBroker::IsBlockedByActiveOwner(InputBroker::kWheelerRefinedPluginId)) {
-			outReason = "InputBrokerActiveOwner";
-			return true;
+		using DMenuIsMenuOpenFn = bool (*)();
+		static DMenuIsMenuOpenFn isMenuOpen = nullptr;
+		if (!isMenuOpen) {
+			auto* module = ::GetModuleHandleW(L"dmenu.dll");
+			if (!module) {
+				return false;
+			}
+
+			isMenuOpen = reinterpret_cast<DMenuIsMenuOpenFn>(::GetProcAddress(module, "dMenu_IsMenuOpen"));
+			if (!isMenuOpen) {
+				return false;
+			}
 		}
+
+		return isMenuOpen();
+	}
+
+	bool TryGetExternalWheelBlockingReason(std::string_view& outReason, bool a_allowDMenuOwner)
+	{
 		if (IsExternalFavWheelOpen()) {
 			outReason = "FavWheelOpen";
 			return true;
 		}
-		return false;
+		if (!InputBroker::IsBlockedByActiveOwner(InputBroker::kWheelerRefinedPluginId)) {
+			return false;
+		}
+		if (a_allowDMenuOwner && InputBroker::GetActiveOwner() == InputBroker::kDMenuInputOwnerId) {
+			return false;
+		}
+
+		outReason = "InputBrokerActiveOwner";
+		return true;
 	}
 
 	constexpr std::array<std::string_view, 8> kAmmoWheelPassiveOverlayMenus{
@@ -263,6 +286,18 @@ namespace
 	bool ContainsMenuName(const std::array<std::string_view, N>& menuNames, std::string_view menuName)
 	{
 		return std::find(menuNames.begin(), menuNames.end(), menuName) != menuNames.end();
+	}
+
+	constexpr std::array<std::string_view, 4> kAmmoWheelLegacyDMenuNames{
+		"dmenu",
+		"dmenu_Main",
+		"dMenu",
+		"dMenu_Main"
+	};
+
+	bool IsAmmoWheelLegacyDMenuName(std::string_view menuName)
+	{
+		return ContainsMenuName(kAmmoWheelLegacyDMenuNames, menuName);
 	}
 
 	bool HasMenuMovie(const RE::IMenu* menu)
@@ -298,7 +333,7 @@ namespace
 		return menu->AlwaysOpen() && !HasActiveInteractionFlags(menu);
 	}
 
-	bool TryGetGenericBlockingMenu(RE::UI* ui, std::string_view& outMenuName)
+	bool TryGetGenericBlockingMenu(RE::UI* ui, std::string_view& outMenuName, bool a_ignoreLegacyDMenuEntries = false)
 	{
 		if (!ui) {
 			return false;
@@ -314,6 +349,9 @@ namespace
 			const std::string_view menuName =
 				(rawName && rawName[0] != '\0') ? std::string_view(rawName) : std::string_view("<unnamed>");
 
+			if (a_ignoreLegacyDMenuEntries && IsAmmoWheelLegacyDMenuName(menuName)) {
+				continue;
+			}
 			if (ContainsMenuName(kAmmoWheelPassiveOverlayMenus, menuName)) {
 				continue;
 			}
@@ -1458,7 +1496,7 @@ void AmmoWheel::Update(float a_deltaTime)
 
 	// Update weapon state each frame
 	UpdateWeaponState();
-	if ((_state == WheelState::Opened || _state == WheelState::Opening) && !CanOpen()) {
+	if ((_state == WheelState::Opened || _state == WheelState::Opening) && !CanOpen(true)) {
 		logger::info("AmmoWheel: CLOSE (gameplay context lost)");
 		ForceClose();
 		return;
@@ -1708,7 +1746,7 @@ void AmmoWheel::SetEnabled(bool a_enabled)
 		_currentWeaponType == WeaponType::Crossbow ? "Crossbow" : "None");
 }
 
-bool AmmoWheel::CanOpen() const
+bool AmmoWheel::CanOpen(bool a_allowDMenuOverlay) const
 {
 	// Check player exists and is loaded
 	auto player = RE::PlayerCharacter::GetSingleton();
@@ -1724,8 +1762,9 @@ bool AmmoWheel::CanOpen() const
 		return false;
 	}
 
+	const bool dMenuOverlayOpen = a_allowDMenuOverlay && IsDMenuActuallyOpen();
 	std::string_view externalWheelReason;
-	if (TryGetExternalWheelBlockingReason(externalWheelReason)) {
+	if (TryGetExternalWheelBlockingReason(externalWheelReason, dMenuOverlayOpen)) {
 		logger::debug("AmmoWheel::CanOpen rejected: external wheel is active ({})", externalWheelReason);
 		return false;
 	}
@@ -1773,6 +1812,9 @@ bool AmmoWheel::CanOpen() const
 
 	for (std::string_view menuName : conflictingMenus) {
 		if (ui->IsMenuOpen(menuName)) {
+			if (dMenuOverlayOpen && IsAmmoWheelLegacyDMenuName(menuName)) {
+				continue;
+			}
 			logger::debug("AmmoWheel::CanOpen rejected: menu '{}' is open", menuName);
 			return false;
 		}
@@ -1786,7 +1828,7 @@ bool AmmoWheel::CanOpen() const
 	}
 
 	std::string_view genericBlockedMenu;
-	if (TryGetGenericBlockingMenu(ui, genericBlockedMenu)) {
+	if (TryGetGenericBlockingMenu(ui, genericBlockedMenu, dMenuOverlayOpen)) {
 		logger::debug("AmmoWheel::CanOpen rejected: active menu '{}' is open", genericBlockedMenu);
 		return false;
 	}

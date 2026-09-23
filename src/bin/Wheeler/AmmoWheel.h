@@ -231,7 +231,7 @@ public:
 	/// Check if the wheel can be opened (game state, menus, player control).
 	/// Returns true if opening is allowed, false otherwise.
 	/// </summary>
-	bool CanOpen() const;
+	bool CanOpen(bool a_allowDMenuOverlay = false) const;
 
 	/// <summary>
 	/// Set enabled state at runtime. Handles state transitions safely.

@@ -1,8 +1,10 @@
 #include "WheelerAPI.h"
 
 #include <atomic>
+#include <cstddef>
 #include <mutex>
 #include <shared_mutex>
+#include <type_traits>
 #include <unordered_map>
 
 // Include Wheeler classes for full implementation
@@ -783,6 +785,44 @@ namespace WheelerAPI
 		return InputBroker::ShouldProcessKey(pluginIdSelf, brokerDevice, key, contextFlags);
 	}
 
+	static CooperativeOpeningReplaceResult API_ReplaceCooperativeOpeningBindings(
+		const CooperativeOpeningBindingSet* bindingSet)
+	{
+		return InputBroker::ReplaceCooperativeOpeningBindings(bindingSet);
+	}
+
+	static uint64_t API_BeginCooperativeOpeningConsumerScope(
+		uint64_t ownerId,
+		uint64_t expectedBindingGeneration)
+	{
+		return InputBroker::BeginCooperativeOpeningConsumerScope(ownerId, expectedBindingGeneration);
+	}
+
+	static CooperativeOpeningAttestation API_ObserveAndClaimCooperativeOpeningEvent(
+		const CooperativeOpeningEventObservation* observation,
+		CooperativeOpeningEventDisposition* disposition)
+	{
+		return InputBroker::ObserveAndClaimCooperativeOpeningEvent(observation, disposition);
+	}
+
+	static CooperativeOpeningAttestation API_GetCooperativeOpeningEventDisposition(
+		uint64_t consumerScopeToken,
+		uintptr_t eventIdentity,
+		uint64_t ownerId,
+		CooperativeOpeningEventDisposition* disposition)
+	{
+		return InputBroker::GetCooperativeOpeningEventDisposition(
+			consumerScopeToken,
+			eventIdentity,
+			ownerId,
+			disposition);
+	}
+
+	static void API_EndCooperativeOpeningConsumerScope(uint64_t consumerScopeToken)
+	{
+		InputBroker::EndCooperativeOpeningConsumerScope(consumerScopeToken);
+	}
+
 	// ============================================================================
 	// API Interface Instance
 	// ============================================================================
@@ -831,6 +871,34 @@ namespace WheelerAPI
 		.ShouldProcessKey = API_BrokerShouldProcessKey,
 	};
 
+	static_assert(std::is_standard_layout_v<WheelerInputBrokerAPI>);
+	static_assert(std::is_trivially_copyable_v<WheelerInputBrokerAPI>);
+	static_assert(sizeof(WheelerInputBrokerAPI) == 56);
+	static_assert(offsetof(WheelerInputBrokerAPI, apiVersion) == 0);
+	static_assert(offsetof(WheelerInputBrokerAPI, RegisterReservation) == 8);
+	static_assert(offsetof(WheelerInputBrokerAPI, ShouldProcessKey) == 48);
+
+	static_assert(std::is_standard_layout_v<CooperativeOpeningBinding>);
+	static_assert(std::is_trivially_copyable_v<CooperativeOpeningBinding>);
+	static_assert(std::is_standard_layout_v<CooperativeOpeningBindingSet>);
+	static_assert(std::is_trivially_copyable_v<CooperativeOpeningBindingSet>);
+	static_assert(std::is_standard_layout_v<CooperativeOpeningEventObservation>);
+	static_assert(std::is_trivially_copyable_v<CooperativeOpeningEventObservation>);
+	static_assert(std::is_standard_layout_v<CooperativeOpeningEventDisposition>);
+	static_assert(std::is_trivially_copyable_v<CooperativeOpeningEventDisposition>);
+	static_assert(std::is_standard_layout_v<CooperativeOpeningAPI>);
+	static_assert(std::is_trivially_copyable_v<CooperativeOpeningAPI>);
+
+	static CooperativeOpeningAPI s_cooperativeOpeningApi = {
+		.apiVersion = COOPERATIVE_OPENING_API_VERSION,
+		.structSize = sizeof(CooperativeOpeningAPI),
+		.ReplaceCooperativeOpeningBindings = API_ReplaceCooperativeOpeningBindings,
+		.BeginCooperativeOpeningConsumerScope = API_BeginCooperativeOpeningConsumerScope,
+		.ObserveAndClaimCooperativeOpeningEvent = API_ObserveAndClaimCooperativeOpeningEvent,
+		.GetCooperativeOpeningEventDisposition = API_GetCooperativeOpeningEventDisposition,
+		.EndCooperativeOpeningConsumerScope = API_EndCooperativeOpeningConsumerScope,
+	};
+
 }  // namespace WheelerAPI
 
 // ============================================================================
@@ -850,4 +918,15 @@ extern "C" WHEELER_API const WheelerAPI::WheelerInputBrokerAPI* GetInputBrokerAP
 	}
 	logger::debug("[WheelerAPI] GetInputBrokerAPI called, returning broker API v{}", WheelerAPI::INPUT_BROKER_API_VERSION);
 	return &WheelerAPI::s_inputBrokerApi;
+}
+
+extern "C" WHEELER_API const WheelerAPI::CooperativeOpeningAPI* GetCooperativeOpeningAPI(uint32_t requestedVersion)
+{
+	if (requestedVersion != WheelerAPI::COOPERATIVE_OPENING_API_VERSION) {
+		return nullptr;
+	}
+	logger::debug(
+		"[WheelerAPI] GetCooperativeOpeningAPI called, returning cooperative API v{}",
+		WheelerAPI::COOPERATIVE_OPENING_API_VERSION);
+	return &WheelerAPI::s_cooperativeOpeningApi;
 }

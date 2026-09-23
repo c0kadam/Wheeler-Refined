@@ -57,7 +57,7 @@
                                          "control":  {
                                                          "failAction":  "disable"
                                                      },
-                                         "default":  true,
+                                         "default":  false,
                                          "ini":  {
                                                      "id":  "BlockGameInputInEditMode",
                                                      "section":  "Control.Wheel"
@@ -539,7 +539,7 @@
                                                                                  "control":  {
                                                                                                  "failAction":  "disable"
                                                                                              },
-                                                                                 "default":  274,
+                                                                                 "default":  0,
                                                                                  "ini":  {
                                                                                              "id":  "toggleWheelModifier",
                                                                                              "section":  "InputBindings.GamePad"
