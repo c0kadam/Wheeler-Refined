@@ -323,8 +323,10 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 		break;
 	case SKSE::MessagingInterface::kNewGame:
 		Wheeler::SetupDefaultWheels();
-		[[fallthrough]];
+		UniqueIDHandler::QueuePostLoadInventoryRepair(GetMessageTypeName(a_msg->type));
+		break;
 	case SKSE::MessagingInterface::kPostLoadGame:
+		Wheeler::DiscardTransientGameplayStateForWorldTransition("kPostLoadGame");
 		UniqueIDHandler::QueuePostLoadInventoryRepair(GetMessageTypeName(a_msg->type));
 		break;
 	default:

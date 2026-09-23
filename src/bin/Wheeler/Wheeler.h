@@ -1,8 +1,11 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <mutex>
 #include <shared_mutex>
+#include <string_view>
 #include <optional>
 #include <memory>
 #include <unordered_set>
@@ -12,6 +15,8 @@
 #include "bin/Config.h"
 #include "bin/API/WheelerAPI.h"
 #include "bin/Integrations/ExternalFavWheelState.h"
+#include "RestorationLifecyclePolicy.h"
+#include "WheelItems/LegacyWeaponRestore.h"
 #include "Wheel.h"
 #include "AmmoWheel.h"
 class WheelItem;
@@ -38,6 +43,31 @@ public:
 	/// must be called prior to reloading the wheels.
 	/// </summary>
 	static void Clear();
+	// World disposal invalidates and drops all Wheeler-owned deferred gameplay
+	// intent without mutating the outgoing player/world.
+	static void DiscardTransientGameplayStateForWorldTransition(const char* a_reason);
+	// Compatibility entry point retained for the existing lifecycle call sites.
+	static void ResetTransientRestorationState(const char* a_reason);
+	// The dMenu Reset All Wheels event can arrive outside the renderer update.
+	// It requests current-world rollback and wheel reconstruction on Update's
+	// serialized execution context.
+	static void RequestResetAllWheelsInCurrentWorld();
+	[[nodiscard]] static RestorationLifecycle::Epoch GetTransientRestorationEpoch() noexcept;
+	[[nodiscard]] static bool IsTransientRestorationEpochCurrent(
+		RestorationLifecycle::Epoch a_epoch) noexcept;
+	static bool ExecuteTransientGameplayIfCurrent(
+		RestorationLifecycle::Epoch a_epoch,
+		const std::function<void()>& a_action);
+	// Diagnostic-only observation. This never consumes, delays, replays, or
+	// otherwise modifies the input event.
+	static void ObserveHandMemoryAttackInput(
+		std::uint32_t a_device,
+		std::uint32_t a_rawInput,
+		std::uint32_t a_mappedInput,
+		std::string_view a_userEvent,
+		bool a_isDown,
+		bool a_isUp,
+		bool a_consumed);
 
 	static void UpdateCursorPosMouse(float a_deltaX, float a_deltaY);
 	static void UpdateCursorPosGamepad(float a_x, float a_y);
@@ -166,7 +196,8 @@ public:
 	static bool TryGetTrackedPersistentRestoreTargetForHandMemory(
 		bool a_isLeftHand,
 		RE::FormID a_currentFormID,
-		RE::FormID& a_outRestoreFormID);
+		RE::FormID& a_outRestoreFormID,
+		LegacyWeaponRestoreToken& a_outWeaponToken);
 	static void QueueDepletedConsumablesCleanup();
 	static void QueueBookRead(RE::FormID a_bookFormID);
 
@@ -472,6 +503,7 @@ private:
 
 	struct PendingSpellActivation
 	{
+		RestorationLifecycle::Epoch restorationEpoch = 0;
 		RE::FormID formID = 0;
 		TargetHand hand = TargetHand::Right;
 		TargetHand requestedHand = TargetHand::Right;
@@ -482,10 +514,14 @@ private:
 		bool preCastHandsCaptured = false;
 		RE::FormID preCastLeftFormID = 0;
 		RE::FormID preCastRightFormID = 0;
+		LegacyWeaponRestoreToken preCastLeftWeapon;
+		LegacyWeaponRestoreToken preCastRightWeapon;
 		bool restoreOverrideLeftHand = false;
 		RE::FormID restoreOverrideLeftFormID = 0;
+		LegacyWeaponRestoreToken restoreOverrideLeftWeapon;
 		bool restoreOverrideRightHand = false;
 		RE::FormID restoreOverrideRightFormID = 0;
+		LegacyWeaponRestoreToken restoreOverrideRightWeapon;
 		bool preCastHadTwoHandedWeapon = false;
 		// Single-hand direct-cast helper:
 		// when both hands already have the same spell, temporarily clear opposite hand
@@ -493,6 +529,7 @@ private:
 		bool singleHandIsolationApplied = false;
 		bool singleHandIsolationOppositeWasLeft = false;
 		RE::FormID singleHandIsolationRestoreFormID = 0;
+		LegacyWeaponRestoreToken singleHandIsolationRestoreWeapon;
 	};
 
 	struct EditModeGameplayInputBlocker
@@ -538,8 +575,10 @@ private:
 		std::uint32_t a_secondIdCode = 0,
 		bool a_restoreLeftHand = false,
 		RE::FormID a_restoreLeftFormID = 0,
+		LegacyWeaponRestoreToken a_restoreLeftWeapon = {},
 		bool a_restoreRightHand = false,
 		RE::FormID a_restoreRightFormID = 0,
+		LegacyWeaponRestoreToken a_restoreRightWeapon = {},
 		bool a_enableStartAssistTap = false,
 		bool a_startAssistUseLeftAttack = false,
 		RE::INPUT_DEVICE a_startAssistDevice = RE::INPUT_DEVICE::kKeyboard,
@@ -558,10 +597,21 @@ private:
 		bool a_trackSecondaryLeft,
 		bool a_restoreLeftHand,
 		RE::FormID a_restoreLeftFormID,
+		LegacyWeaponRestoreToken a_restoreLeftWeapon,
 		bool a_restoreRightHand,
 		RE::FormID a_restoreRightFormID,
+		LegacyWeaponRestoreToken a_restoreRightWeapon,
 		float a_minDelaySeconds,
 		float a_maxWaitSeconds);
+	static void CancelTransientGameplayStateInCurrentWorld(const char* a_reason);
+	static void CancelOwnedSyntheticInputInCurrentWorld();
+	static void RollbackPendingSpellTransactionInCurrentWorld();
+	static void RollbackPostCastTransactionInCurrentWorld();
+	static void RollbackHandMemoryInCurrentWorld();
+	static void RollbackTemporaryPowerSelectionInCurrentWorld();
+	static void ProcessRequestedCurrentWorldWheelReset();
+	static void ClearWheelData();
+	static void PopulateDefaultWheels();
 	static void ClearPostCastRestore();
 	static void QueueShoutPostCastRestore(RE::FormID a_shoutFormID);
 	static void TryRestoreQueuedShoutSelection(const char* a_reason);
@@ -640,10 +690,21 @@ private:
 	static inline std::uint16_t _lastMiscDispatchUniqueID = 0;
 	static inline std::optional<RE::FormID> _pendingSGTInstrumentSpellFormID = std::nullopt;
 	static inline std::optional<RE::FormID> _pendingShoutFormID = std::nullopt;
+	static inline RestorationLifecycle::SerializedEpochDomain _transientGameplayDomain{};
+	static inline RestorationLifecycle::DeferredIntentLedger _transientIntentLedger{};
+	static inline std::atomic_bool _currentWorldResetAllWheelsRequested{ false };
 	static inline std::optional<PendingSpellActivation> _pendingSpellActivation = std::nullopt;
 	static inline std::optional<RE::FormID> _pendingPowerFormID = std::nullopt;
 	static inline bool _pendingPowerRestorePending = false;
 	static inline RE::FormID _pendingPowerRestoreFormID = 0;
+	struct TemporaryPowerSelectionOwnership
+	{
+		bool active = false;
+		RestorationLifecycle::Epoch epoch = 0;
+		RE::FormID temporaryFormID = 0;
+		RE::FormID restoreFormID = 0;
+	};
+	static inline TemporaryPowerSelectionOwnership _temporaryPowerSelection{};
 	static inline std::optional<RE::FormID> _pendingBookReadFormID = std::nullopt;
 	static inline std::optional<float> _pendingShoutHoverTime = std::nullopt;
 
@@ -694,6 +755,7 @@ private:
 
 	// Spell hold state for vanilla direct-cast concentration spells (attack down -> delayed attack up).
 	static inline bool _spellHoldActive = false;
+	static inline RestorationLifecycle::Epoch _spellHoldRestorationEpoch = 0;
 	static inline double _spellHoldStartTime = 0.0;
 	static inline double _spellHoldWaitStartTime = 0.0;
 	static inline float _spellHoldDuration = 0.0f;
@@ -724,16 +786,21 @@ private:
 	static inline bool _spellHoldRestoreRightHand = false;
 	static inline RE::FormID _spellHoldRestoreLeftFormID = 0;
 	static inline RE::FormID _spellHoldRestoreRightFormID = 0;
+	static inline LegacyWeaponRestoreToken _spellHoldRestoreLeftWeapon;
+	static inline LegacyWeaponRestoreToken _spellHoldRestoreRightWeapon;
 	static inline bool _spellPostCastRestorePending = false;
 	static inline bool _spellPostCastRestoreLeftHand = false;
 	static inline bool _spellPostCastRestoreRightHand = false;
 	static inline RE::FormID _spellPostCastRestoreLeftFormID = 0;
 	static inline RE::FormID _spellPostCastRestoreRightFormID = 0;
+	static inline LegacyWeaponRestoreToken _spellPostCastRestoreLeftWeapon;
+	static inline LegacyWeaponRestoreToken _spellPostCastRestoreRightWeapon;
 	static inline RE::FormID _spellPostCastRestoreSpellFormID = 0;
 	static inline RE::MagicSystem::CastingSource _spellPostCastRestorePreferredSource = RE::MagicSystem::CastingSource::kRightHand;
 	static inline bool _spellPostCastRestoreTrackPrimaryLeft = false;
 	static inline bool _spellPostCastRestoreTrackSecondary = false;
 	static inline bool _spellPostCastRestoreTrackSecondaryLeft = false;
+	static inline RestorationLifecycle::PostCastContext _spellPostCastRestoreContext{};
 	static inline double _spellPostCastRestoreNoEarlierThan = 0.0;
 	static inline double _spellPostCastRestoreForceAt = 0.0;
 	static inline double _spellPostCastRestoreLastWaitLogTime = 0.0;
@@ -746,6 +813,10 @@ private:
 	
 	static inline bool _forceCloseRequested = false;
 	static inline bool _pendingDepletedConsumablesCleanup = false;
+	// Independent ingress from entry-locked draw/activation paths. Update promotes
+	// only a request from the current lifecycle epoch while holding the domain.
+	static inline std::mutex _depletedConsumablesCleanupRequestLock;
+	static inline RestorationLifecycle::Epoch _requestedDepletedConsumablesCleanupEpoch = 0;
 	static inline std::array<bool, 3> _lootMenusMovieHiddenForOverride{ false, false, false };
 	static inline std::array<bool, 3> _lootMenusClosedForOverride{ false, false, false };
 	static inline bool _lootMenuRestorePending = false;
@@ -798,6 +869,7 @@ private:
 	static inline ConcentrationStopRequest _concentrationStopLeft{};
 	static inline ConcentrationStopRequest _concentrationStopRight{};
 	static inline bool _concentrationStopPending = false;
+	static inline RestorationLifecycle::Epoch _concentrationStopEpoch = 0;
 	static inline RE::FormID _concentrationStopSpellFormID = 0;
 	static inline RE::MagicSystem::CastingSource _concentrationStopCastingSource = RE::MagicSystem::CastingSource::kRightHand;
 	static inline double _concentrationStopAtTime = 0.0;
@@ -812,6 +884,7 @@ private:
 		float delayMs = 150.0f;
 	};
 	static inline std::optional<InstantCastRefundCheck> _instantCastRefundCheck = std::nullopt;
+	static inline RestorationLifecycle::Epoch _instantCastRefundEpoch = 0;
 
 	// RTU Hand Override: RMB latches Left-hand equip for selected entry
 	static inline bool _handOverrideActive = false;
