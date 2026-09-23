@@ -6475,6 +6475,7 @@ void Config::ReadAmmoWheelConfig()
 	// [CenterPanel.Fields] - Center panel field toggles
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowName", Config::AmmoWheel::CenterFields::ShowName);
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowDamage", Config::AmmoWheel::CenterFields::ShowDamage);
+	GetBoolValue(ini, "CenterPanel.Fields", "ShowPoison", Config::AmmoWheel::CenterFields::ShowPoison);
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowType", Config::AmmoWheel::CenterFields::ShowType);
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowCount", Config::AmmoWheel::CenterFields::ShowCount);
 	GetBoolValue(ini, "CenterPanel.Fields", "ShowSource", Config::AmmoWheel::CenterFields::ShowSource);

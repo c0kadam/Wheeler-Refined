@@ -257,7 +257,7 @@ public:
 	bool ProcessInput();
 	
 	/// <summary>
-	/// Handle mouse button input for fixed-open mode (TASK 4).
+	/// Handle mouse button input for fixed-open mode.
 	/// Returns true if input was consumed (game should not process attack).
 	/// </summary>
 	/// @param button 0=LMB, 1=RMB
@@ -307,6 +307,7 @@ private:
 		RE::FormID ammoID = 0;
 		uint32_t configRevision = 0;
 		uint32_t damageRevision = 0;
+		uint32_t rangedWeaponPoisonRevision = 0;
 		ImVec2 viewport = { 0, 0 };
 		ImVec2 panelCenter = { 0, 0 };
 		ImVec2 wheelCenterAtBuild = { 0, 0 };
@@ -324,6 +325,21 @@ private:
 		std::vector<std::pair<std::string, float>> textLines;
 		std::vector<bool> isDamageLine;
 		std::vector<std::string> descriptionLines;
+	};
+
+	struct RangedWeaponPoisonPresentation
+	{
+		bool targetResolved = false;
+		RE::FormID weaponFormID = 0;
+		RE::FormID poisonFormID = 0;
+		std::string poisonName;
+
+		[[nodiscard]] bool HasActivePoison() const
+		{
+			return targetResolved && poisonFormID != 0 && !poisonName.empty();
+		}
+
+		bool operator==(const RangedWeaponPoisonPresentation&) const = default;
 	};
 	
 	// Load/cache icon texture for an ammo entry (with reskin priority search)
@@ -369,22 +385,30 @@ private:
 	bool RebuildDamageCache(const RE::TESObjectREFR::InventoryItemMap& a_imap);
 	bool RebuildLabelLayouts(ImVec2 a_wheelCenter, float a_startAngle, float a_slotAngle);
 	bool RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs a_drawArgs);
+	RangedWeaponPoisonPresentation ResolveRangedWeaponPoisonPresentation(
+		RE::PlayerCharacter* a_player,
+		const RE::TESObjectREFR::InventoryItemMap& a_inventory) const;
+	void UpdateRangedWeaponPoisonPresentation(
+		RE::PlayerCharacter* a_player,
+		const RE::TESObjectREFR::InventoryItemMap& a_inventory,
+		bool a_inventoryReadable,
+		bool a_refreshDue);
 	
-	// Multi-line text wrapping for slot labels (TASK 3)
+	// Multi-line text wrapping for slot labels
 	TextLayout wrapTextForSlot(const char* text, float maxWidth, float fontSize, int maxLines);
 	
-	// Edge-aware word wrapping for center panel text
+	// Edge-aware word wrapping for center panel text.
 	TextLayout wrapTextForCenterPanel(const char* text, float fontSize, ImVec2 panelCenter, int maxLinesOverride = 0) const;
 	
-	// Calculate adaptive center panel position based on arc geometry (TASK 2)
+	// Calculate adaptive center panel position based on arc geometry
 	ImVec2 calculateCenterPanelPosition(ImVec2 a_wheelCenter) const;
 	
-	// Clamp cursor angle to arc bounds for half-wheel mode
+	// Clamp cursor angle to arc bounds for half-wheel mode.
 	float clampAngleToArc(float angle) const;
 	float getCursorMaxRadius() const;
 	void syncGamepadFilterToCursor();
 	
-	// Reset navigation filters
+	// Reset navigation filters.
 	void ResetNavigationFilters();
 
 	// Lifecycle helpers
@@ -481,7 +505,7 @@ private:
 
 	ImVec2 _cursorPos = { 0, 0 };
 	
-	// Cursor input filters (TASK 1: unified deadzone + smoothing)
+	// Cursor input filters for unified deadzone and smoothing
 	CursorFilter _mouseFilter;
 	CursorFilter _gamepadFilter;
 	int _pendingCloseOnReleaseButton = -1;
@@ -513,6 +537,8 @@ private:
 
 	// Cached center panel layout.
 	CenterPanelCache _centerPanelCache;
+	RangedWeaponPoisonPresentation _rangedWeaponPoisonPresentation;
+	uint32_t _rangedWeaponPoisonRevision = 0;
 	// Sticky panel size used to avoid width/height jitter between ammo names.
 	float _centerPanelStableWidth = 0.0f;
 	float _centerPanelStableHeight = 0.0f;
@@ -533,7 +559,7 @@ private:
 	float _cachedTextRadius = 0.f;
 	float _cachedIconRadius = 0.f;
 	float _cachedCountRadius = 0.f;  // Separate radius for ammo count positioning
-	float _cachedIconSize = 48.f;  // Cached icon size from IconSizePx/IconSize
+	float _cachedIconSize = 48.f;  // Cached icon size from IconSizePx/IconSize.
 	ImVec2 _cachedScreenPos = { 0, 0 };
 	ImVec2 _lastViewportSize = { 0, 0 };
 

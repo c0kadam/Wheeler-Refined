@@ -1769,11 +1769,12 @@ namespace Config
 		namespace CenterFields {
 			inline bool ShowName = true;
 			inline bool ShowDamage = true;
+			inline bool ShowPoison = true;
 			inline bool ShowType = true;
 			inline bool ShowCount = true;
 			inline bool ShowSource = true;  // Vanilla vs Modded
 			// Field order: comma-separated list of field names
-			inline std::string Order = "Name,Damage,Type,Count,Source";
+			inline std::string Order = "Name,Damage,Poison,Type,Count,Source";
 			
 			// Damage highlight colors
 			inline ImU32 MaxDamageColor = IM_COL32(255, 200, 100, 255);  // Gold for highest damage

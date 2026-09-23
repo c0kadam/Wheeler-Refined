@@ -43,6 +43,7 @@ public:
 		InsufficientMagickaForInstantCast,
 		PoisonAlreadyApplied,
 		PoisonSafeResolutionFailed,
+		AmmoWheelWeaponPoisonLabel,
 		
 		Total
 	};
@@ -94,6 +95,6 @@ private:
 		MAP_ENTRY(InsufficientMagickaForInstantCast, "Not enough magicka for instant cast."),
 		MAP_ENTRY(PoisonAlreadyApplied, "The current weapon is already poisoned."),
 		MAP_ENTRY(PoisonSafeResolutionFailed, "Wheeler: Unable to safely apply poison to the equipped weapon."),
-		MAP_ENTRY(PoisonSafeResolutionFailed, "Wheeler: Unable to safely apply poison to the equipped weapon.")
+		MAP_ENTRY(AmmoWheelWeaponPoisonLabel, "Poison")
 	};
 };
