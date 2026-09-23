@@ -32,6 +32,10 @@ namespace WheelerAPI
 	// API version - bump on breaking changes
 	constexpr uint32_t API_VERSION = 2;
 	constexpr uint32_t INPUT_BROKER_API_VERSION = 1;
+	constexpr uint32_t COOPERATIVE_OPENING_API_VERSION = 1;
+	constexpr uint32_t COOPERATIVE_OPENING_BINDING_SET_VERSION = 1;
+	constexpr uint32_t COOPERATIVE_OPENING_BINDING_VERSION = 1;
+	constexpr uint32_t COOPERATIVE_OPENING_EVENT_VERSION = 1;
 
 	enum class InputBrokerDevice : uint32_t
 	{
@@ -221,6 +225,131 @@ namespace WheelerAPI
 		bool (*ShouldProcessKey)(uint64_t pluginIdSelf, InputBrokerDevice device, uint32_t key, uint32_t contextFlags);
 	};
 
+	// Separate optional extension. WheelerInputBrokerAPI v1 is frozen and is
+	// deliberately not enlarged by cooperative opening support.
+	enum class CooperativeOpeningDevice : uint32_t
+	{
+		kMKB = 0,
+		kGamepad = 1
+	};
+
+	enum class CooperativeOpeningTriggerEdge : uint32_t
+	{
+		kUnknown = 0,
+		kPrimaryDown = 1,
+		kPrimaryUp = 2
+	};
+
+	namespace CooperativeOpeningSemanticFlag
+	{
+		inline constexpr uint32_t kNone = 0;
+		inline constexpr uint32_t kConsumeOnGrant = 1u << 0;
+	}
+
+	enum class CooperativeOpeningReplaceResult : uint32_t
+	{
+		kSuccess = 0,
+		kInvalidArgument = 1,
+		kUnsupportedVersion = 2,
+		kInvalidSize = 3,
+		kInvalidOwner = 4,
+		kInvalidGeneration = 5,
+		kStaleGeneration = 6,
+		kTooManyBindings = 7,
+		kInvalidBinding = 8,
+		kDuplicateBinding = 9
+	};
+
+	enum class CooperativeOpeningAttestation : uint32_t
+	{
+		kMatchedForThisOwner = 0,
+		kObservedButNotMatched = 1,
+		kNoUpstreamAttestationAvailable = 2
+	};
+
+	enum class CooperativeOpeningReason : uint32_t
+	{
+		kNone = 0,
+		kMatched = 1,
+		kNoProducerFrame = 2,
+		kNoGrantForEvent = 3,
+		kWrongOwner = 4,
+		kWrongDevice = 5,
+		kWrongKey = 6,
+		kWrongEdge = 7,
+		kWrongGeneration = 8,
+		kAlreadyClaimed = 9,
+		kInvalidScope = 10,
+		kUpstreamConsumerAlreadyObserved = 11,
+		kGrantRevoked = 12
+	};
+
+	struct CooperativeOpeningBinding
+	{
+		uint32_t structSize;
+		uint32_t descriptorVersion;
+		CooperativeOpeningDevice device;
+		uint32_t primaryMappedKey;
+		uint32_t modifierMappedKey;
+		CooperativeOpeningTriggerEdge triggerEdge;
+		int32_t priority;
+		uint32_t semanticFlags;
+	};
+
+	struct CooperativeOpeningBindingSet
+	{
+		uint32_t structSize;
+		uint32_t structVersion;
+		uint64_t ownerId;
+		uint64_t bindingGeneration;
+		uint32_t bindingCount;
+		uint32_t bindingStride;
+		const void* bindings;
+	};
+
+	struct CooperativeOpeningEventObservation
+	{
+		uint32_t structSize;
+		uint32_t structVersion;
+		uint64_t consumerScopeToken;
+		uintptr_t eventIdentity;
+		uint64_t ownerId;
+		uint64_t expectedBindingGeneration;
+		CooperativeOpeningDevice device;
+		uint32_t mappedKey;
+		CooperativeOpeningTriggerEdge edge;
+	};
+
+	struct CooperativeOpeningEventDisposition
+	{
+		uint32_t structSize;
+		uint32_t structVersion;
+		CooperativeOpeningAttestation attestation;
+		CooperativeOpeningReason reason;
+		uint64_t dispatchGeneration;
+		uint64_t bindingGeneration;
+		uint64_t opaqueGrantToken;
+		uint32_t mustSuppressDownstream;
+		uint32_t reserved;
+	};
+
+	struct CooperativeOpeningAPI
+	{
+		uint32_t apiVersion;
+		uint32_t structSize;
+		CooperativeOpeningReplaceResult (*ReplaceCooperativeOpeningBindings)(const CooperativeOpeningBindingSet* bindingSet);
+		uint64_t (*BeginCooperativeOpeningConsumerScope)(uint64_t ownerId, uint64_t expectedBindingGeneration);
+		CooperativeOpeningAttestation (*ObserveAndClaimCooperativeOpeningEvent)(
+			const CooperativeOpeningEventObservation* observation,
+			CooperativeOpeningEventDisposition* disposition);
+		CooperativeOpeningAttestation (*GetCooperativeOpeningEventDisposition)(
+			uint64_t consumerScopeToken,
+			uintptr_t eventIdentity,
+			uint64_t ownerId,
+			CooperativeOpeningEventDisposition* disposition);
+		void (*EndCooperativeOpeningConsumerScope)(uint64_t consumerScopeToken);
+	};
+
 	// ============================================================================
 	// Internal Functions (Wheeler server only)
 	// ============================================================================
@@ -263,3 +392,4 @@ namespace WheelerAPI
 // Returns pointer to static IWheelerAPI instance, or nullptr if not available
 extern "C" WHEELER_API WheelerAPI::IWheelerAPI* GetWheelerAPI();
 extern "C" WHEELER_API const WheelerAPI::WheelerInputBrokerAPI* GetInputBrokerAPI(uint32_t requestedVersion);
+extern "C" WHEELER_API const WheelerAPI::CooperativeOpeningAPI* GetCooperativeOpeningAPI(uint32_t requestedVersion);

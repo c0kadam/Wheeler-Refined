@@ -1,5 +1,6 @@
 #include "Hooks.h"
 #include "bin/Utilities/InventorySnapshotCache.h"
+#include "bin/InputBroker.h"
 #include "Utilities/UniqueIDHandler.h"
 #include "bin/UserInput/Input.h"
 #include "bin/Config.h"
@@ -7,11 +8,33 @@
 #include "bin/Wheeler/Wheeler.h"
 #include "RE/T/TESObjectWEAP.h"
 
+#include <array>
 #include <atomic>
+#include <filesystem>
+#include <Windows.h>
 namespace Hooks
 {
 	namespace
 	{
+		void LogInputDispatchTargetModule(std::uintptr_t target)
+		{
+			HMODULE module = nullptr;
+			if (!target || !::GetModuleHandleExW(
+					GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCWSTR>(target),
+					&module)) {
+				logger::info("Hooks: input dispatch previous target=0x{:X} module=<unresolved>", target);
+				return;
+			}
+
+			std::array<wchar_t, 32768> modulePath{};
+			const DWORD pathLength = ::GetModuleFileNameW(module, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+			const std::string moduleName = pathLength > 0 ?
+				std::filesystem::path(std::wstring_view(modulePath.data(), pathLength)).filename().string() :
+				"<path-unavailable>";
+			logger::info("Hooks: input dispatch previous target=0x{:X} module={}", target, moduleName);
+		}
+
 		int GetRepresentedItemCount(RE::ExtraDataList* a_extraList)
 		{
 			if (!a_extraList) {
@@ -252,12 +275,14 @@ namespace Hooks
 			}
 
 			_DispatchInputEvent = trampoline.write_call<5>(hookSite, DispatchInputEvent);
+			LogInputDispatchTargetModule(_DispatchInputEvent.address());
 			return true;
 		}
 
 	private:
 		static void DispatchInputEvent(RE::BSTEventSource<RE::InputEvent*>* a_dispatcher, RE::InputEvent** a_evns)
 		{
+			InputBroker::CooperativeOpeningProducerScope cooperativeOpeningScope;
 			if (!a_evns) {
 				_DispatchInputEvent(a_dispatcher, a_evns);
 				return;
