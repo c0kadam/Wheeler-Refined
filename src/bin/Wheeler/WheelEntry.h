@@ -8,7 +8,7 @@
 
 #include "bin/Animation/TimeInterpolator/TimeFloatInterpolator.h"
 #include "bin/Animation/TimeBounceInterpolator.h"
-class WheelItem;
+#include "WheelItems/WheelItem.h"
 enum class MissingCategory : std::uint8_t;
 struct EquippedHandsCache;
 class WheelEntry
@@ -68,7 +68,7 @@ public:
 	/// If we're not in edit mode, the entry calls the currently selected item's ActivateItemSecondary().
 	/// </summary>
 	/// <param name="editMode">Whether the wheel is in edit mode.</param>
-	void ActivateItemSecondary(bool editMode = false);
+	PreparedWheelItemActivation ActivateItemSecondary(bool editMode = false);
 
 	/// <summary>
 	/// Activate the item with primary(right) input, which corresponds to left mouse click or right controller trigger.
@@ -77,13 +77,13 @@ public:
 	/// If we're not in edit mode, the entry calls the currently selected item's ActivateItemPrimary().
 	/// </summary>
 	/// <param name="editMode">Whether the wheel is in edit mode.</param>
-	void ActivateItemPrimary(bool editMode = false);
+	PreparedWheelItemActivation ActivateItemPrimary(bool editMode = false);
 
 	/// <summary>
 	/// Activate the item with special(middle) input, which corresponds to a middle mouse click or a controller thumbstick press.
 	/// </summary>
 	/// <param name="editMode"></param>
-	void ActivateItemSpecial(bool editMode = false);
+	PreparedWheelItemActivation ActivateItemSpecial(bool editMode = false);
 
 
 	void PrevItem();

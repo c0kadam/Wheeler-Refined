@@ -1,4 +1,5 @@
 #include "Hooks.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "Utilities/UniqueIDHandler.h"
 #include "bin/UserInput/Input.h"
 #include "bin/Config.h"
@@ -84,17 +85,20 @@ namespace Hooks
 			void Hook_AddObjectToContainer(RE::TESBoundObject* a_object, RE::ExtraDataList* a_extraList, int32_t a_count, RE::TESObjectREFR* a_fromRefr)
 			{
 				if (!a_object || UniqueIDHandler::ShouldBypassInventoryHooks()) {
-					return _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr); });
 				}
 
 				if (IsTransientBoundWeapon(a_object)) {
 					LogBoundWeaponHookSkipOnce(a_object, "AddObjectToContainer");
-					return _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr); });
 				}
 
 				auto ft = a_object->GetFormType();
 				if (a_count <= 0 || (ft != RE::FormType::Weapon && ft != RE::FormType::Armor)) {
-					return _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _AddObjectToContainer(this, a_object, a_extraList, a_count, a_fromRefr); });
 				}
 
 				auto countLeft = a_count;
@@ -105,12 +109,14 @@ namespace Hooks
 					if (!HasReferenceIdentityData(a_extraList)) {
 						UniqueIDHandler::EnsureXListUniqueness(a_extraList);
 					}
-					_AddObjectToContainer(this, a_object, a_extraList, count, a_fromRefr);
+					InventorySnapshotCache::RunMutation(
+						[&]() { _AddObjectToContainer(this, a_object, a_extraList, count, a_fromRefr); });
 				}
 
 				while (countLeft-- > 0) {
 					a_extraList = 0;
-					_AddObjectToContainer(this, a_object, a_extraList, 1, a_fromRefr);
+					InventorySnapshotCache::RunMutation(
+						[&]() { _AddObjectToContainer(this, a_object, a_extraList, 1, a_fromRefr); });
 				}
 
 				auto invChanges = this->GetInventoryChanges();
@@ -143,7 +149,7 @@ namespace Hooks
 								xList = 0;
 								UniqueIDHandler::EnsureXListUniqueness(xList);
 								if (xList) {
-									entry->AddExtraList(xList);
+									InventorySnapshotCache::RunMutation([&]() { entry->AddExtraList(xList); });
 								}
 							}
 						}
@@ -155,35 +161,43 @@ namespace Hooks
 			void Hook_PickUpObject(RE::TESObjectREFR* a_object, uint32_t a_count, bool a_arg3, bool a_playSound)
 			{
 				if (!a_object) {
-					return _PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _PickUpObject(this, a_object, a_count, a_arg3, a_playSound); });
 				}
 				auto bo = a_object->GetBaseObject();
 				if (!bo) {
-					return _PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _PickUpObject(this, a_object, a_count, a_arg3, a_playSound); });
 				}
 
 				if (IsTransientBoundWeapon(bo)) {
 					LogBoundWeaponHookSkipOnce(bo, "PickUpObject");
-					return _PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _PickUpObject(this, a_object, a_count, a_arg3, a_playSound); });
 				}
 
 				auto ft = bo->GetFormType();
 
 				if (a_count <= 0 || (ft != RE::FormType::Weapon && ft != RE::FormType::Armor)) {
-					return _PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
+					return InventorySnapshotCache::RunMutation(
+						[&]() { _PickUpObject(this, a_object, a_count, a_arg3, a_playSound); });
 				}
-				_PickUpObject(this, a_object, a_count, a_arg3, a_playSound);
-				auto countLeft = a_count;
 
+				// Resolve and modify the world reference's xList only before PickUpObject.
+				// The reference and its ExtraDataList are invalid after the engine call.
+				auto countLeft = a_count;
 				auto count = GetRepresentedItemCount(&a_object->extraList);
 				countLeft -= count;
 				auto ptr = &a_object->extraList;
 				if (!HasReferenceIdentityData(ptr)) {
 					UniqueIDHandler::EnsureXListUniqueness(ptr);
 				}
+				InventorySnapshotCache::RunMutation(
+					[&]() { _PickUpObject(this, a_object, a_count, a_arg3, a_playSound); });
 
 				while (countLeft-- > 0) {
-					_AddObjectToContainer(this, a_object->GetBaseObject(), nullptr, 1, nullptr);
+					InventorySnapshotCache::RunMutation(
+						[&]() { _AddObjectToContainer(this, bo, nullptr, 1, nullptr); });
 				}
 			}
 		};
@@ -250,7 +264,7 @@ namespace Hooks
 			}
 
 			Input::GetSingleton()->ProcessAndFilter(a_evns);
-			
+
 			_DispatchInputEvent(a_dispatcher, a_evns);
 		}
 		static inline REL::Relocation<decltype(DispatchInputEvent)> _DispatchInputEvent;

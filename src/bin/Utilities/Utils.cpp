@@ -1,4 +1,5 @@
 #include "Utils.h"
+#include "InventorySnapshotCache.h"
 #include <chrono>
 #include <cstddef>
 #include <string_view>
@@ -113,8 +114,8 @@ namespace Utils
 			}
 			auto* dummy = RE::TESForm::LookupByID<RE::TESForm>(0x00020163)->As<RE::TESObjectWEAP>();
 			//sound false, queue false, force true
-			aem->EquipObject(a_pc, dummy, nullptr, 1, a_slot, false, true, false);
-			aem->UnequipObject(a_pc, dummy, nullptr, 1, a_slot, false, true, false);
+			InventorySnapshotCache::EquipObject(aem, a_pc, dummy, nullptr, 1, a_slot, false, true, false);
+			InventorySnapshotCache::UnequipObject(aem, a_pc, dummy, nullptr, 1, a_slot, false, true, false);
 		}
 	}
 
@@ -743,7 +744,6 @@ namespace Utils
 		RE::SendHUDMessage::ShowHUDMessage(a_message.data());
 	}
 }
-
 void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, RE::BSString& a_buf)
 {
 	LegacyItemCard card;
@@ -751,6 +751,7 @@ void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, RE::BSStr
 	static REL::Relocation<func_t> func{ RELOCATION_ID(51022, 51900) };
 	func(&card, a_magicItem, a_buf);
 }
+
 static void stripMagicItemDescriptionFormatCode(std::string& a_description)
 {
 	if (a_description.empty()) {

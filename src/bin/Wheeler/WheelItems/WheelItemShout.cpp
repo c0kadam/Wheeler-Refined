@@ -5,6 +5,7 @@
 #include "bin/Wheeler/TransformWheelManager.h"
 #include "bin/Wheeler/Wheeler.h"
 #include "WheelItemShout.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 
 #include "bin/Wheeler/ShoutUtils.h"
 
@@ -186,7 +187,7 @@ void WheelItemShout::ActivateItemSecondary()
 			ShoutDbg_Dump(_shout, pc, "WheelItemShout:ActivateSecondary:Unequip", "selectedPower set to nullptr");
 		}
 	} else {
-		aeMan->EquipShout(pc, this->_shout);
+		InventorySnapshotCache::EquipShout(aeMan, pc, this->_shout);
 		if (ShoutUtils::IsShoutPipelineDebugEnabled()) {
 			ShoutDbg_Dump(_shout, pc, "WheelItemShout:ActivateSecondary:Equip", "ActorEquipManager::EquipShout called");
 		}
@@ -221,7 +222,7 @@ void WheelItemShout::ActivateItemPrimary()
 			ShoutDbg_Dump(_shout, pc, "WheelItemShout:ActivatePrimary:Unequip", "selectedPower set to nullptr");
 		}
 	} else {
-		aeMan->EquipShout(pc, this->_shout);
+		InventorySnapshotCache::EquipShout(aeMan, pc, this->_shout);
 		if (ShoutUtils::IsShoutPipelineDebugEnabled()) {
 			ShoutDbg_Dump(_shout, pc, "WheelItemShout:ActivatePrimary:Equip", "ActorEquipManager::EquipShout called");
 		}

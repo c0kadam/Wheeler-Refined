@@ -4,11 +4,13 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 
 namespace
 {
 	using Clock = std::chrono::steady_clock;
+	std::atomic<std::uint64_t> g_inventoryMutationGeneration{ 0 };
 }
 
 double InventorySnapshotCache::ClampRefreshInterval(double a_seconds)
@@ -25,77 +27,102 @@ void InventorySnapshotCache::InitializeLogWindow(double a_now)
 
 void InventorySnapshotCache::Invalidate()
 {
-	_map.clear();
-	_nextRefreshTime = 0.0;
-	_valid = false;
+	_nextDerivedRefreshTime = 0.0;
 	_visibleLastFrame = false;
-	_refreshCountThisWindow = 0;
-	_lastRefreshMs = 0.0;
+	_captureCountThisWindow = 0;
+	_lastCaptureMs = 0.0;
 	_nextLogTime = 0.0;
 }
 
-RE::TESObjectREFR::InventoryItemMap& InventorySnapshotCache::Get(
+void InventorySnapshotCache::NotifyInventoryMutation() noexcept
+{
+	g_inventoryMutationGeneration.fetch_add(1, std::memory_order_release);
+}
+
+std::uint64_t InventorySnapshotCache::GetMutationGeneration() noexcept
+{
+	return g_inventoryMutationGeneration.load(std::memory_order_acquire);
+}
+
+bool InventorySnapshotCache::CaptureFresh(
 	RE::PlayerCharacter* a_player,
 	bool a_visibleNow,
-	double a_refreshIntervalSeconds,
+	double a_derivedRefreshIntervalSeconds,
+	RE::TESObjectREFR::InventoryItemMap& a_outInventory,
 	Stats* a_outStats)
 {
+	a_outInventory.clear();
 	if (a_outStats) {
 		*a_outStats = Stats{};
 	}
 
 	const double now = ImGui::GetTime();
-	const double refreshIntervalSeconds = ClampRefreshInterval(a_refreshIntervalSeconds);
+	const double derivedRefreshIntervalSeconds = ClampRefreshInterval(a_derivedRefreshIntervalSeconds);
 	if (a_outStats) {
-		a_outStats->refreshIntervalSeconds = refreshIntervalSeconds;
+		a_outStats->derivedRefreshIntervalSeconds = derivedRefreshIntervalSeconds;
+		a_outStats->mutationGeneration = GetMutationGeneration();
 	}
 
 	if (!a_visibleNow) {
-		if (_visibleLastFrame) {
-			Invalidate();
-		}
 		_visibleLastFrame = false;
-		return _map;
+		_nextDerivedRefreshTime = 0.0;
+		return false;
 	}
 
 	InitializeLogWindow(now);
-	const bool forceRefresh = !_visibleLastFrame;
-	const bool shouldRefresh = !_valid || forceRefresh || now >= _nextRefreshTime;
-
+	const bool refreshDerivedData = !_visibleLastFrame || now >= _nextDerivedRefreshTime;
 	if (!a_player) {
-		_map.clear();
-		_valid = false;
-		_nextRefreshTime = now + refreshIntervalSeconds;
-	} else if (shouldRefresh) {
-		const auto refreshStart = Clock::now();
-		if (!Utils::Inventory::TryGetInventorySnapshot(a_player, _map, "InventorySnapshotCache")) {
-			_valid = false;
-			_nextRefreshTime = now + refreshIntervalSeconds;
-			_lastRefreshMs = 0.0;
-			_visibleLastFrame = true;
-			return _map;
-		}
-		const auto refreshEnd = Clock::now();
+		_visibleLastFrame = true;
+		return false;
+	}
 
-		_valid = true;
-		_nextRefreshTime = now + refreshIntervalSeconds;
-		_lastRefreshMs = std::chrono::duration<double, std::milli>(refreshEnd - refreshStart).count();
-		_refreshCountThisWindow++;
-		if (a_outStats) {
-			a_outStats->refreshedThisCall = true;
+	const auto captureStart = Clock::now();
+	bool captured = false;
+	bool retriedAfterMutation = false;
+	std::uint64_t stableGeneration = GetMutationGeneration();
+	for (int attempt = 0; attempt < 2; ++attempt) {
+		const std::uint64_t generationBefore = GetMutationGeneration();
+		if (!Utils::Inventory::TryGetInventorySnapshot(
+				a_player,
+				a_outInventory,
+				"InventorySnapshotCache::CaptureFresh")) {
+			a_outInventory.clear();
+			break;
 		}
+		const std::uint64_t generationAfter = GetMutationGeneration();
+		if (generationBefore == generationAfter) {
+			captured = true;
+			stableGeneration = generationAfter;
+			break;
+		}
+
+		a_outInventory.clear();
+		retriedAfterMutation = true;
+	}
+	const auto captureEnd = Clock::now();
+	_lastCaptureMs = std::chrono::duration<double, std::milli>(captureEnd - captureStart).count();
+	_captureCountThisWindow++;
+
+	if (captured && refreshDerivedData) {
+		_nextDerivedRefreshTime = now + derivedRefreshIntervalSeconds;
+	}
+	if (a_outStats) {
+		a_outStats->capturedFreshThisCall = captured;
+		a_outStats->refreshDerivedDataThisCall = captured && refreshDerivedData;
+		a_outStats->retriedAfterMutation = retriedAfterMutation;
+		a_outStats->mutationGeneration = stableGeneration;
 	}
 
 	if (now >= _nextLogTime) {
 		if (a_outStats) {
 			a_outStats->shouldLog = true;
-			a_outStats->refreshCountThisWindow = _refreshCountThisWindow;
-			a_outStats->lastRefreshMs = _lastRefreshMs;
+			a_outStats->captureCountThisWindow = _captureCountThisWindow;
+			a_outStats->lastCaptureMs = _lastCaptureMs;
 		}
-		_refreshCountThisWindow = 0;
+		_captureCountThisWindow = 0;
 		_nextLogTime = now + 1.0;
 	}
 
 	_visibleLastFrame = true;
-	return _map;
+	return captured;
 }

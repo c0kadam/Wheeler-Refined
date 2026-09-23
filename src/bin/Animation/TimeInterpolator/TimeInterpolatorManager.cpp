@@ -1,5 +1,7 @@
 #include "TimeInterpolatorManager.h"
 
+#include <vector>
+
 void TimeFloatInterpolatorManager::RegisterInterpolator(TimeFloatInterpolator* interpolator)
 {
 	std::lock_guard<std::mutex> lock(mutex);
@@ -14,12 +16,23 @@ void TimeFloatInterpolatorManager::UnregisterInterpolator(TimeFloatInterpolator*
 
 void TimeFloatInterpolatorManager::Update(float dt)
 {
-	std::lock_guard<std::mutex> lock(mutex);
-	for (auto it = interpolators.begin(); it != interpolators.end();) {
-		if ((*it)->Update(dt)) {
-			it = interpolators.erase(it);  // interpolator is done, remove it
-		} else {
-			++it;
+	std::vector<TimeFloatInterpolator*> completed;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		for (auto it = interpolators.begin(); it != interpolators.end();) {
+			if ((*it)->Update(dt)) {
+				completed.push_back(*it);
+				it = interpolators.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+	// A bounce callback may re-register its interpolator. Run it only after the
+	// completed entry is erased and the manager lock is released.
+	for (auto* interpolator : completed) {
+		if (interpolator) {
+			interpolator->InvokeCallbacks();
 		}
 	}
 	/*ImGui::Begin("INTERPOLATOR DEBUGGING");

@@ -173,6 +173,8 @@ private:
 	static inline std::unordered_map<KeyId, std::vector<BridgeWheelBindingCandidate>> _bridgeWheelBindingsMkb;
 	static inline std::unordered_map<KeyId, std::vector<BridgeWheelBindingCandidate>> _bridgeWheelBindingsGamepad;
 	static inline std::unordered_map<ArmedToggleKey, ArmedToggleState, ArmedToggleKeyHash> _armedToggleBindings;
+	static inline std::unordered_map<ArmedToggleKey, std::uint64_t, ArmedToggleKeyHash> _keyStateGenerations;
+	static inline std::uint64_t _bindingGeneration{ 1 };
 
 	static inline std::mutex _lock;
 };

@@ -2,6 +2,7 @@
 #include "bin/Config.h"
 #include "bin/Wheeler/ActionPolicy.h"
 #include "WheelItemScroll.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 
 WheelItemScroll::WheelItemScroll(RE::ScrollItem* a_scroll)
 {
@@ -84,7 +85,7 @@ void WheelItemScroll::ActivateItemSecondary()
 	
 	// If scroll is in LEFT hand (target hand for secondary), toggle off from left
 	if (lhs && lhs->GetFormID() == this->_scroll->GetFormID()) {
-		aeMan->UnequipObject(pc, this->_scroll, nullptr, 1, Utils::Slot::GetLeftHandSlot());
+		InventorySnapshotCache::UnequipObject(aeMan, pc, this->_scroll, nullptr, 1, Utils::Slot::GetLeftHandSlot());
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[Scroll] ActivateSecondary: toggled OFF from left hand, formID={:08X}", _formID);
 		}
@@ -93,7 +94,7 @@ void WheelItemScroll::ActivateItemSecondary()
 	
 	// If scroll is in RIGHT hand, toggle off from right (user wants to unequip, not re-equip to other hand)
 	if (rhs && rhs->GetFormID() == this->_scroll->GetFormID()) {
-		aeMan->UnequipObject(pc, this->_scroll, nullptr, 1, Utils::Slot::GetRightHandSlot());
+		InventorySnapshotCache::UnequipObject(aeMan, pc, this->_scroll, nullptr, 1, Utils::Slot::GetRightHandSlot());
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[Scroll] ActivateSecondary: toggled OFF from right hand (was in other hand), formID={:08X}", _formID);
 		}
@@ -101,8 +102,13 @@ void WheelItemScroll::ActivateItemSecondary()
 	}
 	
 	// Not equipped - check availability for equip
-	RE::TESObjectREFR::InventoryItemMap iMap = pc->GetInventory();
-	if (!iMap.contains(this->_scroll) || iMap[this->_scroll].first <= 0) {
+	bool available = false;
+	{
+		RE::TESObjectREFR::InventoryItemMap inventory = pc->GetInventory();
+		const auto it = inventory.find(this->_scroll);
+		available = it != inventory.end() && it->second.first > 0;
+	}
+	if (!available) {
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[Scroll] ActivateSecondary: not available in inventory, formID={:08X}", _formID);
 		}
@@ -118,7 +124,7 @@ void WheelItemScroll::ActivateItemSecondary()
 	}
 	
 	// Equip the scroll to left hand
-	aeMan->EquipObject(pc, this->_scroll, nullptr, 1, Utils::Slot::GetLeftHandSlot());
+	InventorySnapshotCache::EquipObject(aeMan, pc, this->_scroll, nullptr, 1, Utils::Slot::GetLeftHandSlot());
 	
 	// Post-condition verification
 	RE::TESForm* newLhs = pc->GetEquippedObject(true);
@@ -146,7 +152,7 @@ void WheelItemScroll::ActivateItemPrimary()
 	
 	// If scroll is in RIGHT hand (target hand for primary), toggle off from right
 	if (rhs && rhs->GetFormID() == this->_scroll->GetFormID()) {
-		aeMan->UnequipObject(pc, this->_scroll, nullptr, 1, Utils::Slot::GetRightHandSlot());
+		InventorySnapshotCache::UnequipObject(aeMan, pc, this->_scroll, nullptr, 1, Utils::Slot::GetRightHandSlot());
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[Scroll] ActivatePrimary: toggled OFF from right hand, formID={:08X}", _formID);
 		}
@@ -155,7 +161,7 @@ void WheelItemScroll::ActivateItemPrimary()
 	
 	// If scroll is in LEFT hand, toggle off from left (user wants to unequip, not re-equip to other hand)
 	if (lhs && lhs->GetFormID() == this->_scroll->GetFormID()) {
-		aeMan->UnequipObject(pc, this->_scroll, nullptr, 1, Utils::Slot::GetLeftHandSlot());
+		InventorySnapshotCache::UnequipObject(aeMan, pc, this->_scroll, nullptr, 1, Utils::Slot::GetLeftHandSlot());
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[Scroll] ActivatePrimary: toggled OFF from left hand (was in other hand), formID={:08X}", _formID);
 		}
@@ -163,8 +169,13 @@ void WheelItemScroll::ActivateItemPrimary()
 	}
 	
 	// Not equipped - check availability for equip
-	RE::TESObjectREFR::InventoryItemMap iMap = pc->GetInventory();
-	if (!iMap.contains(this->_scroll) || iMap[this->_scroll].first <= 0) {
+	bool available = false;
+	{
+		RE::TESObjectREFR::InventoryItemMap inventory = pc->GetInventory();
+		const auto it = inventory.find(this->_scroll);
+		available = it != inventory.end() && it->second.first > 0;
+	}
+	if (!available) {
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[Scroll] ActivatePrimary: not available in inventory, formID={:08X}", _formID);
 		}
@@ -180,7 +191,7 @@ void WheelItemScroll::ActivateItemPrimary()
 	}
 	
 	// Equip the scroll to right hand
-	aeMan->EquipObject(pc, this->_scroll, nullptr, 1, Utils::Slot::GetRightHandSlot());
+	InventorySnapshotCache::EquipObject(aeMan, pc, this->_scroll, nullptr, 1, Utils::Slot::GetRightHandSlot());
 	
 	// Post-condition verification
 	RE::TESForm* newRhs = pc->GetEquippedObject(false);

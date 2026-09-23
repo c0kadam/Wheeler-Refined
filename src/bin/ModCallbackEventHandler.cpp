@@ -340,7 +340,7 @@ EventResult ModCallbackEventHandler::ProcessEvent(const SKSE::ModCallbackEvent* 
 		}
 	} else if (a_event->eventName == "dmenu_buttonCallback") {
 		if (a_event->strArg == "wheeler_reset_all_wheels") {
-			Wheeler::SetupDefaultWheels();
+			Wheeler::RequestResetAllWheelsInCurrentWorld();
 		} else if (a_event->strArg == "wheeler_wheelbehavior_restore_defaults") {
 			if (Config::RestoreWheelBehaviorDefaults()) {
 				Config::ReadStyleConfig();

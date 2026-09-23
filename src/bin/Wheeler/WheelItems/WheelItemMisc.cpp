@@ -5,6 +5,7 @@
 #include "bin/Utilities/EquipEventDispatcher.h"
 #include "bin/Utilities/ItemCapabilities.h"
 #include "WheelItemMisc.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 
 namespace YpsItems
 {
@@ -264,27 +265,33 @@ namespace
 		int count = 0;
 		bool hasExtraList = false;
 		std::uint16_t uniqueID = 0;
+	};
+
+	struct MiscInventorySelection
+	{
+		MiscActivationContext values{};
 		RE::ExtraDataList* extraList = nullptr;
 	};
 
-	MiscActivationContext ResolveMiscActivationContext(RE::PlayerCharacter* pc, RE::TESObjectMISC* item)
+	MiscInventorySelection ResolveMiscInventorySelection(
+		const RE::TESObjectREFR::InventoryItemMap& inv,
+		RE::TESObjectMISC* item)
 	{
-		MiscActivationContext ctx{};
-		if (!pc || !item) {
-			return ctx;
+		MiscInventorySelection selection{};
+		if (!item) {
+			return selection;
 		}
 
-		const auto inv = pc->GetInventory();
 		RE::InventoryEntryData* entry = nullptr;
 		auto it = inv.find(item);
 		if (it != inv.end()) {
-			ctx.count = it->second.first;
+			selection.values.count = it->second.first;
 			entry = it->second.second.get();
 		} else {
 			const RE::FormID formID = item->GetFormID();
 			for (auto& [boundObj, data] : inv) {
 				if (boundObj && boundObj->GetFormID() == formID) {
-					ctx.count = data.first;
+					selection.values.count = data.first;
 					entry = data.second.get();
 					break;
 				}
@@ -292,27 +299,36 @@ namespace
 		}
 
 		if (!entry || !entry->extraLists) {
-			return ctx;
+			return selection;
 		}
 
 		for (auto* extraList : *entry->extraLists) {
 			if (!extraList) {
 				continue;
 			}
-			ctx.hasExtraList = true;
-			if (!ctx.extraList) {
-				ctx.extraList = extraList;
+			selection.values.hasExtraList = true;
+			if (!selection.extraList) {
+				selection.extraList = extraList;
 			}
 			if (auto* uniqueData = extraList->GetByType<RE::ExtraUniqueID>()) {
 				if (uniqueData->uniqueID != 0) {
-					ctx.uniqueID = uniqueData->uniqueID;
-					ctx.extraList = extraList;
+					selection.values.uniqueID = uniqueData->uniqueID;
+					selection.extraList = extraList;
 					break;
 				}
 			}
 		}
 
-		return ctx;
+		return selection;
+	}
+
+	MiscActivationContext ResolveMiscActivationContext(RE::PlayerCharacter* pc, RE::TESObjectMISC* item)
+	{
+		if (!pc || !item) {
+			return {};
+		}
+		const auto inventory = pc->GetInventory();
+		return ResolveMiscInventorySelection(inventory, item).values;
 	}
 }
 
@@ -451,19 +467,31 @@ void WheelItemMisc::useItem()
 	if (!aeMan) {
 		return;
 	}
+	MiscActivationContext immediateValues{};
+	RE::ExtraDataList* selectedExtraList = nullptr;
+	{
+		auto inventory = pc->GetInventory();
+		MiscInventorySelection selection = ResolveMiscInventorySelection(inventory, this->_miscItem);
+		immediateValues = selection.values;
+		selectedExtraList = selection.extraList;
+		selection.extraList = nullptr;
+		inventory.clear();
+	}
 	if (Config::Debug::LogActionPolicy) {
 		logger::info("[MiscItem] Activate: '{}' formID={:08X} formType={} count={} extraList={} uniqueID={} path=immediate_equip",
 			itemName ? itemName : "(null)", formID,
 			static_cast<int>(this->_miscItem->GetFormType()),
-			ctx.count, ctx.hasExtraList ? 1 : 0, ctx.uniqueID);
+			immediateValues.count, immediateValues.hasExtraList ? 1 : 0, immediateValues.uniqueID);
 	}
-	if (ctx.count <= 0) {
+	if (immediateValues.count <= 0) {
 		if (Config::Debug::LogActionPolicy) {
 			logger::info("[MiscItem] Immediate equip skipped: not in inventory, formID={:08X}", formID);
 		}
+		selectedExtraList = nullptr;
 		return;
 	}
-	aeMan->EquipObject(pc, this->_miscItem, ctx.extraList);
+	InventorySnapshotCache::EquipObject(aeMan, pc, this->_miscItem, selectedExtraList);
+	selectedExtraList = nullptr;
 	if (Config::Debug::LogActionPolicy) {
 		logger::info("[MiscItem] Immediate EquipObject dispatched: '{}' formID={:08X}", itemName ? itemName : "(null)", formID);
 	}

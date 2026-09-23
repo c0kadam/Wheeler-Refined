@@ -23,6 +23,7 @@ public:
 	void ActivateItemPrimary() override;
 	void ActivateItemSecondary() override;
 	void ActivateItemSpecial() override;
+	bool MayQueueTransientGameplayAction() const override { return true; }
 	void SerializeIntoJsonObj(nlohmann::json& a_json) override;
 
 	bool RequiresRuntimeFormValidation() const override { return false; }

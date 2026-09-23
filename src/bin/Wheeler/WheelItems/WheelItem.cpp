@@ -672,6 +672,39 @@ void WheelItem::ActivateItemSpecial()
 {
 }
 
+WheelItemActivationResult WheelItem::ActivateItemWithResult(WheelItemActivationKind a_kind)
+{
+	switch (a_kind) {
+	case WheelItemActivationKind::Primary:
+		ActivateItemPrimary();
+		break;
+	case WheelItemActivationKind::Secondary:
+		ActivateItemSecondary();
+		break;
+	case WheelItemActivationKind::Special:
+		ActivateItemSpecial();
+		break;
+	}
+	return WheelItemActivationResult::Succeeded;
+}
+
+const char* WheelItemActivationResultName(WheelItemActivationResult a_result) noexcept
+{
+	switch (a_result) {
+	case WheelItemActivationResult::Succeeded:
+		return "succeeded";
+	case WheelItemActivationResult::AlreadyPoisoned:
+		return "already_poisoned";
+	case WheelItemActivationResult::UnsafeResolution:
+		return "unsafe_resolution";
+	case WheelItemActivationResult::InvalidTarget:
+		return "invalid_target";
+	case WheelItemActivationResult::Rejected:
+		return "rejected";
+	}
+	return "unknown";
+}
+
 void WheelItem::SerializeIntoJsonObj(nlohmann::json& a_json)
 {
 	a_json["type"] = ITEM_TYPE_STR;

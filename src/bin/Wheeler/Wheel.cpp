@@ -18,7 +18,6 @@
 #include "bin/Config.h"
 #include "bin/Rendering/ResolutionScaleContext.h"
 #include "bin/Rendering/TextureManager.h"
-#include "bin/API/WheelerAPI.h"
 #include "MainWheelDebug.h"
 #include "ShoutUtils.h"
 #include "RE/E/ExtraUniqueID.h"
@@ -353,7 +352,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 		const float cursorRadiusRaw = std::sqrt(a_cursorPos.x * a_cursorPos.x + a_cursorPos.y * a_cursorPos.y);
 		// Legacy behavior: clear hovered entry when cursor is centered.
 		if (!mouseStabilizeEnabled && a_cursorCentered) {
-			_hoveredEntryIdx = -1;
+			HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, -1);
 		}
 
 		// draw entries
@@ -461,7 +460,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 		// Center can act as a neutral rest zone (no hovered slot) to avoid instant opposite-slot flips.
 		const bool centerRestActive = a_cursorCentered || centerHoldActive;
 
-		const int lastIdx = _hoveredEntryIdx;
+		const int lastIdx = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
 		const bool validLast = (lastIdx >= 0 && lastIdx < numEntries);
 
 		ImVec2 velocity{ 0.0f, 0.0f };
@@ -567,7 +566,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 			if (centerRestActive) {
 				finalIdx = -1;
 				guardReason = "CENTER_REST";
-				_hoveredEntryIdx = finalIdx;
+				HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, finalIdx);
 				committedThisFrame = true;
 			} else {
 				finalIdx = candidateIdx;
@@ -602,17 +601,17 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 						}
 					}
 				}
-				_hoveredEntryIdx = finalIdx;
+				HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, finalIdx);
 				committedThisFrame = true;
 			}
 		} else if (!mouseStabilizeEnabled) {
 			if (centerRestActive) {
 				finalIdx = -1;
-				_hoveredEntryIdx = finalIdx;
+				HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, finalIdx);
 				committedThisFrame = true;
 			} else {
 				finalIdx = candidateIdx;
-				_hoveredEntryIdx = finalIdx;
+				HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, finalIdx);
 				committedThisFrame = true;
 			}
 		} else {
@@ -680,7 +679,7 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 				}
 			}
 
-			_hoveredEntryIdx = finalIdx;
+			HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, finalIdx);
 			committedThisFrame = true;
 
 			if (finalIdx >= 0) {
@@ -697,11 +696,12 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 			}
 		}
 
+		const int committedHoverIdx = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
 		if (mouseStabilizeEnabled && Config::MainWheel::Mouse::DebugHoverLog &&
-			committedThisFrame && _hoveredEntryIdx != finalIdx) {
+			committedThisFrame && committedHoverIdx != finalIdx) {
 			MainWheelDebug::LogRateLimited(MainWheelDebug::Category::MouseHover, "hover_mismatch",
 				"MouseHoverFinalMismatch prev={} cand={} final={} actual={} reason={}",
-				lastIdx, candidateIdx, finalIdx, _hoveredEntryIdx, guardReason);
+				lastIdx, candidateIdx, finalIdx, committedHoverIdx, guardReason);
 		}
 
 		if (Config::MainWheel::Mouse::DrawDebugOverlay) {
@@ -738,11 +738,12 @@ void Wheel::Draw(ImVec2 a_wheelCenter, ImVec2 a_cursorPos, float a_cursorAngle, 
 		}
 		
 		const bool suppressHoverVisuals = centerRestActive;
+		const int hoverForDraw = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
 
 		// draw background, cache data for foreground
 		for (int entryIdx = 0; entryIdx < numEntries; entryIdx++) {
 			const auto& angles = entryAnglesDraw[entryIdx];
-			bool hovered = (!suppressHoverVisuals && _hoveredEntryIdx == entryIdx);
+			bool hovered = (!suppressHoverVisuals && hoverForDraw == entryIdx);
 
 			// calculate wheel center
 			float t1 = (OuterCircleRadius - InnerCircleRadius) / 2;
@@ -1774,18 +1775,20 @@ void Wheel::Clear()
 
 void Wheel::PrevItemInHoveredEntry()
 {
-	if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= this->_entries.size()) {
+	const auto capturedHover = HoverActivationSnapshotPolicy::Capture(_hoveredEntryIdx, _entries.size());
+	if (!capturedHover) {
         return;
     }
-	this->_entries[_hoveredEntryIdx]->PrevItem();
+	this->_entries[static_cast<std::size_t>(*capturedHover)]->PrevItem();
 }
 
 void Wheel::NextItemInHoveredEntry()
 {
-	if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= this->_entries.size()) {
+	const auto capturedHover = HoverActivationSnapshotPolicy::Capture(_hoveredEntryIdx, _entries.size());
+	if (!capturedHover) {
         return;
     }
-	this->_entries[_hoveredEntryIdx]->NextItem();
+	this->_entries[static_cast<std::size_t>(*capturedHover)]->NextItem();
 
 }
 
@@ -1797,56 +1800,45 @@ void Wheel::ResetAnimation()
 	}
 }
 
-void Wheel::ActivateHoveredEntryPrimary(bool a_editMode)
+PreparedWheelItemActivation Wheel::ActivateHoveredEntryPrimary(bool a_editMode)
 {
 	std::shared_lock<std::shared_mutex> lock(_lock);  // might involve editing the wheel, so unique lock
+	const int32_t hoverSnapshot = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
 	
 	// Debug: log which entry we're trying to activate
 	MainWheelDebug::Log(MainWheelDebug::Category::Input, 
-		"ActivateEntry: editMode={} hoveredIdx={} totalEntries={}", 
-		a_editMode ? 1 : 0, _hoveredEntryIdx, static_cast<int>(_entries.size()));
+		"ActivateEntry: editMode={} hoveredIdx={} activationSnapshot={} totalEntries={}",
+		a_editMode ? 1 : 0, hoverSnapshot, hoverSnapshot, static_cast<int>(_entries.size()));
 	
-	if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= this->_entries.size()) {
-        return;
+	if (!HoverActivationSnapshotPolicy::IsValid(hoverSnapshot, _entries.size())) {
+        return {};
     }
+	WheelEntry* const entry = _entries[static_cast<std::size_t>(hoverSnapshot)].get();
+	if (!entry) {
+		return {};
+	}
 	if (!a_editMode) {
-		WheelEntry* entry = _entries[_hoveredEntryIdx].get();
-		if (!entry) {
-			return;
-		}
 		const std::shared_ptr<WheelItem> item = entry->GetSelectedItem();
 		// Check if the CURRENTLY SELECTED item is a WheelItemMissing placeholder
 		// NOTE: We only check for WheelItemMissing here, NOT IsInPlayerInventory()
 		// The full inventory check happens in WheelEntry::ActivateItemPrimary to avoid
 		// duplicate IsInPlayerInventory() calls which have side effects (uniqueID updates)
 		if (item && dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
-			return;
+			return {};
 		}
-		if (!ShouldActivateWheelItem(item, _hoveredEntryIdx)) {
-			return;
+		if (!ShouldActivateWheelItem(item, hoverSnapshot)) {
+			return {};
 		}
 		
-		// Capture item info BEFORE activation for callback
-		const int32_t entryIdx = _hoveredEntryIdx;
-		const int32_t itemIdx = entry->GetSelectedItemIndex();
-		const RE::FormID formID = item ? item->GetFormID() : 0;
-		
-		// Actually activate the item (WheelEntry handles inventory checks)
-		this->_entries[_hoveredEntryIdx]->ActivateItemPrimary(a_editMode);
-		
-		// Notify external API clients (fires before wheel close callback)
-		if (formID != 0) {
-			WheelerAPI::NotifyItemActivated(
-				Wheeler::GetActiveWheelIndex(),
-				entryIdx,
-				itemIdx,
-				formID,
-				true  // isPrimary
-			);
-		}
-		return;
+		// WheelEntry either executes the accepted entry-locked item (weapons and
+		// other non-queueing families) or returns a retained queue-capable item for
+		// Wheeler to execute after every container lock has been released.
+		PreparedWheelItemActivation prepared = entry->ActivateItemPrimary(false);
+		prepared.entryIndex = hoverSnapshot;
+		return prepared;
 	}
-	this->_entries[_hoveredEntryIdx]->ActivateItemPrimary(a_editMode);
+	(void)entry->ActivateItemPrimary(true);
+	return {};
 }
 
 
@@ -1863,41 +1855,45 @@ void Wheel::ClearDepletedConsumables()
 std::shared_ptr<WheelItem> Wheel::GetHoveredSelectedItem()
 {
 	std::shared_lock<std::shared_mutex> lock(_lock);
-	if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= _entries.size()) {
+	const auto capturedHover = HoverActivationSnapshotPolicy::Capture(_hoveredEntryIdx, _entries.size());
+	if (!capturedHover) {
 		return {};
 	}
-	return _entries[_hoveredEntryIdx]->GetSelectedItem();
+	return _entries[static_cast<std::size_t>(*capturedHover)]->GetSelectedItem();
 }
 
-void Wheel::ActivateHoveredEntrySecondary(bool a_editMode)
+PreparedWheelItemActivation Wheel::ActivateHoveredEntrySecondary(bool a_editMode)
 {
 	// Edit-mode path mutates the entry list, so keep exclusive lock.
 	if (a_editMode) {
 		std::unique_lock<std::shared_mutex> lock(_lock);
-		if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= this->_entries.size()) {
-			return;
+		const int32_t hoverSnapshot = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
+		if (!HoverActivationSnapshotPolicy::IsValid(hoverSnapshot, _entries.size())) {
+			return {};
 		}
-		std::unique_ptr<WheelEntry>& entry = this->_entries[_hoveredEntryIdx];
+		const std::size_t entryOffset = static_cast<std::size_t>(hoverSnapshot);
+		std::unique_ptr<WheelEntry>& entry = _entries[entryOffset];
 		if (entry->IsEmpty()) { // remove the entry if it's empty
-			this->_entries.erase(this->_entries.begin() + _hoveredEntryIdx);
-			if (_hoveredEntryIdx >= static_cast<int>(_entries.size())) {
-				_hoveredEntryIdx = static_cast<int>(_entries.size()) - 1;
+			_entries.erase(_entries.begin() + hoverSnapshot);
+			if (hoverSnapshot >= static_cast<int>(_entries.size())) {
+				HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, static_cast<int32_t>(_entries.size()) - 1);
 			}
-			return;
+			return {};
 		}
-		this->_entries[_hoveredEntryIdx]->ActivateItemSecondary(true);
-		return;
+		(void)entry->ActivateItemSecondary(true);
+		return {};
 	}
 
 	// Runtime activation path should not mutate wheel structure. Match primary path
 	// by using a shared lock to avoid unnecessary exclusive lock contention.
 	std::shared_lock<std::shared_mutex> lock(_lock);
-	if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= this->_entries.size()) {
-		return;
+	const int32_t hoverSnapshot = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
+	if (!HoverActivationSnapshotPolicy::IsValid(hoverSnapshot, _entries.size())) {
+		return {};
 	}
-	std::unique_ptr<WheelEntry>& entry = this->_entries[_hoveredEntryIdx];
-	if (entry->IsEmpty()) {
-		return;
+	WheelEntry* const entry = _entries[static_cast<std::size_t>(hoverSnapshot)].get();
+	if (!entry || entry->IsEmpty()) {
+		return {};
 	}
 
 	const std::shared_ptr<WheelItem> item = entry->GetSelectedItem();
@@ -1906,41 +1902,27 @@ void Wheel::ActivateHoveredEntrySecondary(bool a_editMode)
 	// The full inventory check happens in WheelEntry::ActivateItemSecondary to avoid
 	// duplicate IsInPlayerInventory() calls which have side effects (uniqueID updates)
 	if (item && dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
-		return;
+		return {};
 	}
-	if (!ShouldActivateWheelItem(item, _hoveredEntryIdx)) {
-		return;
+	if (!ShouldActivateWheelItem(item, hoverSnapshot)) {
+		return {};
 	}
 
-	// Capture item info BEFORE activation for callback
-	const int32_t entryIdx = _hoveredEntryIdx;
-	const int32_t itemIdx = entry->GetSelectedItemIndex();
-	const RE::FormID formID = item ? item->GetFormID() : 0;
-
-	// Actually activate the item (WheelEntry handles inventory checks)
-	this->_entries[_hoveredEntryIdx]->ActivateItemSecondary(false);
-
-	// Notify external API clients (fires before wheel close callback)
-	if (formID != 0) {
-		WheelerAPI::NotifyItemActivated(
-			Wheeler::GetActiveWheelIndex(),
-			entryIdx,
-			itemIdx,
-			formID,
-			false  // isPrimary = false for secondary activation
-		);
-	}
+	PreparedWheelItemActivation prepared = entry->ActivateItemSecondary(false);
+	prepared.entryIndex = hoverSnapshot;
+	return prepared;
 }
 
-void Wheel::ActivateHoveredEntrySpecial(bool a_editMode)
+PreparedWheelItemActivation Wheel::ActivateHoveredEntrySpecial(bool a_editMode)
 {
 	std::shared_lock<std::shared_mutex> lock(_lock);
-	if (_hoveredEntryIdx < 0 || _hoveredEntryIdx >= this->_entries.size() || a_editMode) {  // don't do anything if in edit mode
-		return;
+	const int32_t hoverSnapshot = HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx);
+	if (!HoverActivationSnapshotPolicy::IsValid(hoverSnapshot, _entries.size()) || a_editMode) {  // don't do anything if in edit mode
+		return {};
 	}
-	WheelEntry* entry = _entries[_hoveredEntryIdx].get();
+	WheelEntry* const entry = _entries[static_cast<std::size_t>(hoverSnapshot)].get();
 	if (!entry) {
-		return;
+		return {};
 	}
 	const std::shared_ptr<WheelItem> item = entry->GetSelectedItem();
 	// Check if the CURRENTLY SELECTED item is a WheelItemMissing placeholder
@@ -1948,51 +1930,39 @@ void Wheel::ActivateHoveredEntrySpecial(bool a_editMode)
 	// The full inventory check happens in WheelEntry::ActivateItemSpecial to avoid
 	// duplicate IsInPlayerInventory() calls which have side effects (uniqueID updates)
 	if (item && dynamic_cast<WheelItemMissing*>(item.get()) != nullptr) {
-		return;
+		return {};
 	}
-	if (!ShouldActivateWheelItem(item, _hoveredEntryIdx)) {
-		return;
+	if (!ShouldActivateWheelItem(item, hoverSnapshot)) {
+		return {};
 	}
-	
-	// Capture item info BEFORE activation for callback
-	const int32_t entryIdx = _hoveredEntryIdx;
-	const int32_t itemIdx = entry->GetSelectedItemIndex();
-	const RE::FormID formID = item ? item->GetFormID() : 0;
-	
-	// Actually activate the item (WheelEntry handles inventory checks)
-	this->_entries[_hoveredEntryIdx]->ActivateItemSpecial(a_editMode);
-	
-	// Notify external API clients (fires before wheel close callback)
-	// Special activation is treated as primary for API purposes
-	if (formID != 0) {
-		WheelerAPI::NotifyItemActivated(
-			Wheeler::GetActiveWheelIndex(),
-			entryIdx,
-			itemIdx,
-			formID,
-			true  // isPrimary = true for special activation
-		);
-	}
+
+	PreparedWheelItemActivation prepared = entry->ActivateItemSpecial(false);
+	prepared.entryIndex = hoverSnapshot;
+	return prepared;
 }
 
 void Wheel::MoveHoveredEntryForward()
 {
 	std::unique_lock<std::shared_mutex> lock(_lock);  // might involve editing the wheel, so unique lock
-	if (_hoveredEntryIdx < 0 || this->_entries.empty()) {
+	const auto capturedHover = HoverActivationSnapshotPolicy::Capture(_hoveredEntryIdx, _entries.size());
+	if (!capturedHover) {
 		return;
 	}
-	int target = _hoveredEntryIdx == this->_entries.size() - 1 ? 0 : _hoveredEntryIdx + 1;  // wrap around
-	std::swap(this->_entries[_hoveredEntryIdx], this->_entries[target]);
+	const int32_t hoverSnapshot = *capturedHover;
+	const int target = hoverSnapshot == static_cast<int32_t>(_entries.size()) - 1 ? 0 : hoverSnapshot + 1;  // wrap around
+	std::swap(_entries[static_cast<std::size_t>(hoverSnapshot)], _entries[static_cast<std::size_t>(target)]);
 }
 
 void Wheel::MoveHoveredEntryBack()
 {
 	std::unique_lock<std::shared_mutex> lock(_lock);  // might involve editing the wheel, so unique loc
-	if (_hoveredEntryIdx < 0 || this->_entries.empty()) {
+	const auto capturedHover = HoverActivationSnapshotPolicy::Capture(_hoveredEntryIdx, _entries.size());
+	if (!capturedHover) {
 		return;
 	}
-	int target = _hoveredEntryIdx == 0 ? this->_entries.size() - 1 : _hoveredEntryIdx - 1;  // wrap around
-	std::swap(this->_entries[_hoveredEntryIdx], this->_entries[target]);
+	const int32_t hoverSnapshot = *capturedHover;
+	const int target = hoverSnapshot == 0 ? static_cast<int>(_entries.size()) - 1 : hoverSnapshot - 1;  // wrap around
+	std::swap(_entries[static_cast<std::size_t>(hoverSnapshot)], _entries[static_cast<std::size_t>(target)]);
 }
 
 void Wheel::SerializeIntoJsonObj(nlohmann::json& j_wheel)
@@ -2044,7 +2014,7 @@ std::unique_ptr<Wheel> Wheel::SerializeFromJsonObj(const nlohmann::json& j_wheel
 
 void Wheel::SetHoveredEntryIndex(int a_index)
 {
-	this->_hoveredEntryIdx = a_index;
+	HoverActivationSnapshotPolicy::Store(_hoveredEntryIdx, static_cast<int32_t>(a_index));
 	_mouseHoverState.lastHoverIdx = a_index;
 	_mouseHoverState.dwellTime = 0.0f;
 	if (a_index >= 0) {

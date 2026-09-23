@@ -1,10 +1,12 @@
 #pragma once
+#include <atomic>
 #include <array>
 #include <memory>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
 #include "nlohmann/json.hpp"
+#include "HoverActivationSnapshotPolicy.h"
 #include "WheelEntry.h"
 
 class Wheel
@@ -55,22 +57,22 @@ public:
 	/// Activate the entry using a primary input(mouse left click / controller right trigger), which either activates
 	/// the currently active item in the entry, or, under edit mode, adds a new item to the entry(if applicable).
     /// </summary>
-    void ActivateHoveredEntryPrimary(bool a_editMode);
+    PreparedWheelItemActivation ActivateHoveredEntryPrimary(bool a_editMode);
 
 	/// <summary>
 	/// Activate the entry using a secondary input(mouse right click / controller left trigger), which either deletes
 	/// an item in the entry, or the whole entry when it's empty.
 	/// </summary>
 	/// <param name="a_editMode">Whether we're in edit mode, which prompts us to deletion.</param>
-	void ActivateHoveredEntrySecondary(bool a_editMode);
+	PreparedWheelItemActivation ActivateHoveredEntrySecondary(bool a_editMode);
 
-	void ActivateHoveredEntrySpecial(bool a_editMode);
+	PreparedWheelItemActivation ActivateHoveredEntrySpecial(bool a_editMode);
 
 	// Removes depleted consumables (alchemy items with 0 count) from their slots.
 	// Does not remove entries; it just clears the item(s) from the entry so the slot becomes empty.
 	void ClearDepletedConsumables();
 	void SetHoveredEntryIndex(int a_index);
-	int GetHoveredEntryIndex() const { return _hoveredEntryIdx; }
+	int GetHoveredEntryIndex() const { return HoverActivationSnapshotPolicy::Load(_hoveredEntryIdx); }
 	std::shared_ptr<WheelItem> GetHoveredSelectedItem();
 	const MouseHoverDebugInfo& GetMouseHoverDebugInfo() const { return _mouseHoverState.debug; }
 
@@ -126,7 +128,7 @@ private:
 	std::shared_mutex _lock;
 	
 	// currently active item, will be highlighted. Gets reset every time wheel reopens.
-	int _hoveredEntryIdx = -1;
+	std::atomic<std::int32_t> _hoveredEntryIdx{ -1 };
 	MouseHoverState _mouseHoverState{};
 	
 };

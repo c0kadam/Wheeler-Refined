@@ -1,4 +1,5 @@
 #include "WheelItemArmor.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Rendering/Drawer.h"
 #include "bin/Utilities/Utils.h"
 #include "bin/Wheeler/TransformWheelManager.h"
@@ -214,7 +215,9 @@ void WheelItemArmor::equipArmor()
 		return;
 	}
 	auto slot = this->_obj->As<RE::TESObjectARMO>()->GetEquipSlot();
-	aeMan->EquipObject(pc, _obj, extraData, 1, slot);
+	InventorySnapshotCache::EquipObject(aeMan, pc, _obj, extraData, 1, slot);
+	extraData = nullptr;
+	inv.clear();
 }
 
 void WheelItemArmor::unequipArmor()
@@ -227,7 +230,7 @@ void WheelItemArmor::unequipArmor()
 	if (!aeMan) {
 		return;
 	}
-	aeMan->UnequipObject(pc, this->_obj, nullptr, 1, this->_obj->As<RE::TESObjectARMO>()->GetEquipSlot());
+	InventorySnapshotCache::UnequipObject(aeMan, pc, this->_obj, nullptr, 1, this->_obj->As<RE::TESObjectARMO>()->GetEquipSlot());
 }
 
 
