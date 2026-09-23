@@ -3,10 +3,8 @@
 /**
  * AutoDrawPatch - Dynamic memory patching to prevent Skyrim's automatic weapon draw
  * 
- * Adapted from StopAutomaticWeaponDrawNG by FlyingParticle/jolly-gopher,
- * revision 98df40fbe6996d90da072346b6eef27fd192f94e (GNU GPL v3):
+ * Based on technique from StopAutomaticWeaponDrawNG by FlyingParticle/jolly-gopher
  * https://github.com/jolly-gopher/StopAutomaticWeaponDrawNG
- * The Wheeler Refined activation call is currently disabled, so this patch is dormant.
  * 
  * The mod works by patching specific memory locations in Skyrim's code that handle
  * automatic weapon drawing when mouse buttons or gamepad triggers are pressed.

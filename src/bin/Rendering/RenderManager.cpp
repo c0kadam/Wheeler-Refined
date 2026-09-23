@@ -11,11 +11,7 @@
 #include <cctype>
 
 #include "imgui_internal.h"
-// Renderer hook/setup patterns derive from LamasTinyHUD revision
-// dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited through
-// original Wheeler. The ImGui FreeType integration also follows
-// MaxsuDetectionMeter revision fcc5ef75d6cdabc63db0b214bc61fc272a5b22cf
-// (MIT).
+// stole this from MaxSu's detection meter
 #include "include/lib/imgui_freetype.h"
 
 #include "bin/Wheeler/Wheeler.h"
