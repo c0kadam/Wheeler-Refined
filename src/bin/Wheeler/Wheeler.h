@@ -380,7 +380,7 @@ public:
 	static void UpdateAmmoWheelCursorPosGamepad(float a_x, float a_y);
 
 	/// <summary>
-	/// Handle mouse button input for ammo wheel (TASK 4: fixed-open mode).
+	/// Handle mouse button input for the ammo wheel's fixed-open mode.
 	/// Returns true if input was consumed.
 	/// </summary>
 	static bool HandleAmmoWheelMouseButton(int button, bool pressed, bool fromGamepad = false);
@@ -559,6 +559,10 @@ private:
 
 	static void ExecuteScriptedMiscActivation(RE::PlayerCharacter* pc,
 		RE::TESObjectMISC* miscItem, RE::ExtraDataList* extraList, std::uint16_t uniqueID);
+	static PreparedWheelItemActivation PrepareHoveredWheelItemActivation(
+		WheelItemActivationKind a_kind,
+		std::optional<std::int32_t> a_expectedEntryIndex = std::nullopt);
+	static bool ExecutePreparedWheelItemActivation(PreparedWheelItemActivation a_activation);
 	static void ArmSpellHoldRelease(
 		RE::INPUT_DEVICE a_device,
 		std::uint32_t a_idCode,
@@ -738,7 +742,7 @@ private:
 	
 	// Shout hold state machine for proper input simulation
 	// Send the DOWN event and start the timer.
-	// Send the UP event after holdDuration elapses.
+	// Send the UP event after the hold duration elapses.
 	static inline bool _shoutHoldActive = false;
 	static inline float _shoutHoldStartTime = 0.0f;
 	static inline float _shoutHoldDuration = 0.0f;
