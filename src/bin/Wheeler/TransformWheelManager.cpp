@@ -461,6 +461,7 @@ namespace
 	bool IsTransformKitShout(RE::TESShout* shout, TransformState state);
 	bool IsActivatableTransformSpell(RE::SpellItem* spell, TransformState state);
 	bool IsLichExitSpell(RE::SpellItem* spell);
+	bool IsLichHiddenSpell(RE::SpellItem* spell);
 	TransformState GetCurrentTransformState(RE::PlayerCharacter* pc);
 	MajorTransformKind GetMajorTransformSpellKind(RE::SpellItem* spell);
 	bool ShouldHideMajorTransformSpellForState(RE::SpellItem* spell, TransformState state, const char* source);
@@ -832,12 +833,15 @@ namespace
 		mix(std::hash<bool>{}(Config::WheelBehavior::TransformWheels::LichForm::HideGear));
 		mix(std::hash<bool>{}(Config::WheelBehavior::TransformWheels::LichForm::BlockStaffSwapping));
 		mix(std::hash<bool>{}(Config::WheelBehavior::TransformWheels::LichForm::SuppressDirectCast));
+		mix(std::hash<bool>{}(Config::WheelBehavior::TransformWheels::LichForm::BlockHiddenSpellActivation));
 		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::RaceEditorIDContains));
 		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::RaceKeywords));
 		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::RaceFormIDs));
 		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::SpellTokens));
 		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::ExitSpellTokens));
 		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::AdditionalSpellFormIDs));
+		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellFormIDs));
+		mix(std::hash<std::string>{}(Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellTokens));
 		mix(std::hash<bool>{}(Config::WheelBehavior::TransformWheels::LichForm::DebugLog));
 		return signature;
 	}
@@ -861,6 +865,7 @@ namespace
 		s_lichConfigCache.hideGear = Config::WheelBehavior::TransformWheels::LichForm::HideGear;
 		s_lichConfigCache.blockStaffSwapping = Config::WheelBehavior::TransformWheels::LichForm::BlockStaffSwapping;
 		s_lichConfigCache.suppressDirectCast = Config::WheelBehavior::TransformWheels::LichForm::SuppressDirectCast;
+		s_lichConfigCache.blockHiddenSpellActivation = Config::WheelBehavior::TransformWheels::LichForm::BlockHiddenSpellActivation;
 		s_lichConfigCache.debugLog = Config::WheelBehavior::TransformWheels::LichForm::DebugLog ||
 			Config::WheelBehavior::TransformWheels::DebugLog;
 		s_lichConfigCache.stateId = kLichStateIdFallback;
@@ -879,8 +884,15 @@ namespace
 				s_lichConfigCache.additionalSpellFormIDs.insert(*formId);
 			}
 		}
+		s_lichConfigCache.hiddenSpellFormIDs.clear();
+		for (const auto& token : SplitCsv(Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellFormIDs)) {
+			if (auto formId = ResolveConfiguredFormIDToken(token); formId.has_value()) {
+				s_lichConfigCache.hiddenSpellFormIDs.insert(*formId);
+			}
+		}
 		s_lichConfigCache.spellTokens = SplitCsv(Config::WheelBehavior::TransformWheels::LichForm::SpellTokens);
 		s_lichConfigCache.exitSpellTokens = SplitCsv(Config::WheelBehavior::TransformWheels::LichForm::ExitSpellTokens);
+		s_lichConfigCache.hiddenSpellTokens = SplitCsv(Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellTokens);
 		s_lichConfigCache.hasAnyMatchers =
 			!s_lichConfigCache.raceEditorIdContains.empty() ||
 			!s_lichConfigCache.raceKeywords.empty() ||
@@ -2369,6 +2381,9 @@ namespace
 		}
 		if (state == TransformState::Lich) {
 			RefreshLichConfigCache();
+			if (IsLichHiddenSpell(spell)) {
+				return false;
+			}
 			if (s_lichConfigCache.additionalSpellFormIDs.contains(spell->GetFormID())) {
 				return true;
 			}
@@ -2452,6 +2467,30 @@ namespace
 		}
 		return MatchesAnySubstringToken(edid, s_lichConfigCache.exitSpellTokens, 2) ||
 			MatchesAnySubstringToken(name, s_lichConfigCache.exitSpellTokens, 2);
+	}
+
+	bool IsLichHiddenSpell(RE::SpellItem* spell)
+	{
+		if (!spell) {
+			return false;
+		}
+		RefreshLichConfigCache();
+		if (!s_lichConfigCache.enabled || s_lichConfigCache.mode == LichMode::Disabled) {
+			return false;
+		}
+		if (IsLichExitSpell(spell)) {
+			return false;
+		}
+		if (s_lichConfigCache.hiddenSpellFormIDs.contains(spell->GetFormID())) {
+			return true;
+		}
+
+		const char* edidC = spell->GetFormEditorID();
+		const char* nameC = spell->GetName();
+		const std::string_view edid = edidC ? std::string_view(edidC) : std::string_view{};
+		const std::string_view name = nameC ? std::string_view(nameC) : std::string_view{};
+		return MatchesAnySubstringToken(edid, s_lichConfigCache.hiddenSpellTokens, 3) ||
+			MatchesAnySubstringToken(name, s_lichConfigCache.hiddenSpellTokens, 3);
 	}
 
 	bool IsTransformExitSpellForState(RE::SpellItem* spell, TransformState state)
@@ -4960,6 +4999,19 @@ namespace
 					forms.size());
 			}
 		}
+		if (state == TransformState::Lich) {
+			const auto beforeFilter = forms.size();
+			forms.erase(std::remove_if(forms.begin(), forms.end(), [](RE::FormID formId) {
+				auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(formId);
+				return spell != nullptr && IsLichHiddenSpell(spell);
+			}), forms.end());
+			if (beforeFilter != forms.size() && s_lichConfigCache.debugLog) {
+				logger::info(
+					"TransformWheels: [LichFilter] removed hidden forms at final pass before={} after={}",
+					beforeFilter,
+					forms.size());
+			}
+		}
 
 		if (state == TransformState::Lich) {
 			forms = ApplyLichStableSpellOrder(forms);
@@ -5523,15 +5575,26 @@ namespace
 		if (!s_lichConfigCache.enabled || s_lichConfigCache.mode == LichMode::Disabled) {
 			return false;
 		}
+		const bool exitSpell = IsLichExitSpell(spell);
+		if (exitSpell) {
+			return false;
+		}
+		if (s_lichConfigCache.blockHiddenSpellActivation && IsLichHiddenSpell(spell)) {
+			if (s_lichConfigCache.debugLog) {
+				logger::info(
+					"TransformWheels: [LichGuard] blocked hidden spell {:08X} edid='{}' name='{}' source='{}'",
+					spell->GetFormID(),
+					spell->GetFormEditorID() ? spell->GetFormEditorID() : "",
+					spell->GetName() ? spell->GetName() : "",
+					source ? source : "");
+			}
+			return true;
+		}
 		const auto guardMode = s_lichConfigCache.transformGuard;
 		if (guardMode == LichTransformGuardMode::Off) {
 			return false;
 		}
 
-		const bool exitSpell = IsLichExitSpell(spell);
-		if (exitSpell) {
-			return false;
-		}
 		const bool transformEntryLike = IsLikelyTransformEntrySpell(spell);
 		if (!transformEntryLike) {
 			return false;
