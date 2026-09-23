@@ -145,7 +145,7 @@ public:
 	static float GetCursorDistance();
 
 	// Queue a poison activation to run after the wheel fully closes (prevents input-filter soft-locks).
-	static void QueuePoisonApply(RE::FormID a_poisonFormID);
+	static bool QueuePoisonApply(RE::FormID a_poisonFormID);
 	static void QueueMiscItemUse(RE::FormID a_miscItemFormID, std::uint16_t a_uniqueID = 0);
 	static void QueueSGTInstrumentSpell(RE::FormID a_spellFormID);
 	static bool QueueShoutActivation(RE::FormID a_shoutFormID, float a_hoverTime = 1.0f);

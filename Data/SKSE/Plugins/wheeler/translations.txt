@@ -27,6 +27,8 @@ EditHintActionExitWheel = Exit Wheel
 EditHintNavToggleMkb = H for keybind hints
 EditHintNavToggleGamepad = Left Stick Button for keybind hints
 InsufficientMagickaForInstantCast = Not enough magicka for instant cast.
+PoisonAlreadyApplied = The current weapon is already poisoned.
+PoisonSafeResolutionFailed = Wheeler: Unable to safely apply poison to the equipped weapon.
 
 ; Notifications
 WheelBehaviorDefaultsSaved = Wheeler: Wheel Behavior defaults saved.

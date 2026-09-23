@@ -11,6 +11,7 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HoverActivationSnapshotVerif
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/LegacyWeaponRestoreVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HandMemoryAttackDiagnosticVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HandMemorySameFormRestoreVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/AlreadyPoisonedReapplyGuardVerification\\.cpp$")
 
 # Explicitly include newly added capability helpers (guards against stale glob caches).
 list(APPEND SOURCE_FILES
@@ -217,6 +218,18 @@ target_compile_definitions(wheeler_handmemory_same_form_restore_verification PRI
 target_include_directories(wheeler_handmemory_same_form_restore_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
 if(MSVC)
 	target_compile_options(wheeler_handmemory_same_form_restore_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	already_poisoned_reapply_guard_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/AlreadyPoisonedReapplyGuardVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/AlreadyPoisonedReapplyGuardPolicy.h"
+)
+target_compile_features(already_poisoned_reapply_guard_verification PRIVATE cxx_std_23)
+target_include_directories(already_poisoned_reapply_guard_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(already_poisoned_reapply_guard_verification PRIVATE "/utf-8" "/permissive-")
 endif()
 
 target_precompile_headers(

@@ -95,6 +95,10 @@ namespace
 			return "AmmoWheelFactoryDefaultsFailed";
 		case Texts::TextType::InsufficientMagickaForInstantCast:
 			return "InsufficientMagickaForInstantCast";
+		case Texts::TextType::PoisonAlreadyApplied:
+			return "PoisonAlreadyApplied";
+		case Texts::TextType::PoisonSafeResolutionFailed:
+			return "PoisonSafeResolutionFailed";
 		default:
 			return "";
 		}

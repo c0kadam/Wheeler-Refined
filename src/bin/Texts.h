@@ -41,6 +41,8 @@ public:
 		AmmoWheelFactoryDefaultsRestored,
 		AmmoWheelFactoryDefaultsFailed,
 		InsufficientMagickaForInstantCast,
+		PoisonAlreadyApplied,
+		PoisonSafeResolutionFailed,
 		
 		Total
 	};
@@ -89,6 +91,9 @@ private:
 		MAP_ENTRY(MouseToggleCleared, "Wheeler: Mouse toggle cleared."),
 		MAP_ENTRY(AmmoWheelFactoryDefaultsRestored, "Wheeler: Ammo Wheel restored to factory defaults."),
 		MAP_ENTRY(AmmoWheelFactoryDefaultsFailed, "Wheeler: Failed to restore Ammo Wheel factory defaults."),
-		MAP_ENTRY(InsufficientMagickaForInstantCast, "Not enough magicka for instant cast.")
+		MAP_ENTRY(InsufficientMagickaForInstantCast, "Not enough magicka for instant cast."),
+		MAP_ENTRY(PoisonAlreadyApplied, "The current weapon is already poisoned."),
+		MAP_ENTRY(PoisonSafeResolutionFailed, "Wheeler: Unable to safely apply poison to the equipped weapon."),
+		MAP_ENTRY(PoisonSafeResolutionFailed, "Wheeler: Unable to safely apply poison to the equipped weapon.")
 	};
 };
