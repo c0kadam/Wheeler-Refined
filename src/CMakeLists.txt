@@ -8,6 +8,9 @@ file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "${SOURCE_DIR}/*.cpp" "${SOURCE
 list(FILTER SOURCE_FILES EXCLUDE REGEX "imgui_freetype\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/TransientGameplayLifecycleVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HoverActivationSnapshotVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/LegacyWeaponRestoreVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HandMemoryAttackDiagnosticVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HandMemorySameFormRestoreVerification\\.cpp$")
 
 # Explicitly include newly added capability helpers (guards against stale glob caches).
 list(APPEND SOURCE_FILES
@@ -18,6 +21,7 @@ list(APPEND SOURCE_FILES
 	"${SOURCE_DIR}/bin/Wheeler/SlotHandIndicators.cpp"
 	"${SOURCE_DIR}/bin/Wheeler/SlotHandIndicators.h"
 	"${SOURCE_DIR}/bin/Wheeler/RestorationLifecyclePolicy.h"
+	"${SOURCE_DIR}/bin/Wheeler/HandMemoryAttackDiagnosticPolicy.h"
 	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemExternalHotkey.cpp"
 	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemExternalHotkey.h"
 	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WheelItemIngredient.cpp"
@@ -174,6 +178,45 @@ target_compile_definitions(wheeler_hover_activation_snapshot_verification PRIVAT
 target_include_directories(wheeler_hover_activation_snapshot_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
 if(MSVC)
 	target_compile_options(wheeler_hover_activation_snapshot_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_legacy_weapon_restore_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/LegacyWeaponRestoreVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/LegacyWeaponRestorePolicy.h"
+)
+target_compile_features(wheeler_legacy_weapon_restore_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_legacy_weapon_restore_verification PRIVATE WHEELER_LEGACY_WEAPON_RESTORE_VERIFICATION_MAIN)
+target_include_directories(wheeler_legacy_weapon_restore_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_legacy_weapon_restore_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_handmemory_attack_diagnostic_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/HandMemoryAttackDiagnosticVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/HandMemoryAttackDiagnosticPolicy.h"
+)
+target_compile_features(wheeler_handmemory_attack_diagnostic_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_handmemory_attack_diagnostic_verification PRIVATE WHEELER_HANDMEMORY_ATTACK_DIAGNOSTIC_VERIFICATION_MAIN)
+target_include_directories(wheeler_handmemory_attack_diagnostic_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_handmemory_attack_diagnostic_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_handmemory_same_form_restore_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/HandMemorySameFormRestoreVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/LegacyWeaponRestorePolicy.h"
+)
+target_compile_features(wheeler_handmemory_same_form_restore_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_handmemory_same_form_restore_verification PRIVATE WHEELER_HANDMEMORY_SAME_FORM_RESTORE_VERIFICATION_MAIN)
+target_include_directories(wheeler_handmemory_same_form_restore_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_handmemory_same_form_restore_verification PRIVATE "/utf-8" "/permissive-")
 endif()
 
 target_precompile_headers(

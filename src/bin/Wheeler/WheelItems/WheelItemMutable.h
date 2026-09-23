@@ -1,6 +1,8 @@
 #pragma once
 #include "WheelItem.h"
 #include "WheelItemMutableManager.h"
+
+#include <utility>
 /**
  * WheelItemMutable is a special parent class for WheelItemWeapon and WheelItemArmor.
  * Weapons and armors in player's inventory cannot be stored through their formID, as 
@@ -36,9 +38,13 @@ public:
 	/// WheelItemMutable's destructor will be invoked when all shared_ptr to the item goes out of scope,
 	/// and the item will be untracked from the WheelItemMutableManager through WheelItemMutable's destructor.
 	template <typename T, typename... Args>
-	static std::shared_ptr<T>CreateWheelItemMutable(RE::TESBoundObject* a_obj, uint16_t a_uniqueID)
+	static std::shared_ptr<T>CreateWheelItemMutable(
+		RE::TESBoundObject* a_obj,
+		uint16_t a_uniqueID,
+		Args&&... a_args)
 	{
-		std::shared_ptr<T> ret = std::make_shared<T>(a_obj, a_uniqueID);
+		std::shared_ptr<T> ret = std::make_shared<T>(
+			a_obj, a_uniqueID, std::forward<Args>(a_args)...);
 		WheelItemMutableManager::GetSingleton()->Track(ret.get());
 		return ret;
 	}
