@@ -7,8 +7,6 @@ NoWheelPresent = No wheel layout is available. Enter edit mode and add a wheel f
 ; Format: Key = Translated Text
 ; Lines starting with ; or # are comments.
 
-AlchemyDynamicIDConsumptionWarning = 
-NoWheelPresent = 
 EditHintTitle = Edit Mode Controls
 EditHintDeviceHeaderMkb = KB/M
 EditHintDeviceHeaderGamepad = Gamepad
