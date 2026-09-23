@@ -11045,7 +11045,7 @@ void Wheeler::OpenWheeler()
 			resolutionContext.Update();
 			const auto& state = resolutionContext.GetState();
 			const char* mapping = state.active ? "Config::OffsetSizingToViewport" : "None";
-			logger::info("[ResolutionFix] MainWheel open: display {}x{}, game {}x{}, scaleX={:.3f}, scaleY={:.3f}, uniform={:.3f}, mode={}, mapping={}",
+			logger::debug("[ResolutionFix] MainWheel open: display {}x{}, game {}x{}, scaleX={:.3f}, scaleY={:.3f}, uniform={:.3f}, mode={}, mapping={}",
 				state.displayW, state.displayH, state.gameW, state.gameH,
 				state.scaleX, state.scaleY, state.uniformScale,
 				GetResolutionFixModeName(Config::ResolutionFix::ModeSetting), mapping);
@@ -13941,10 +13941,11 @@ void Wheeler::PruneWheelEntries_NotInInventory(PruneReason reason)
 					// This handles the case where player re-acquires a previously lost item
 					if (auto missingItem = dynamic_cast<WheelItemMissing*>(item)) {
 						std::uint16_t resolvedUniqueID = inventoryUniqueID != 0 ? inventoryUniqueID : missingItem->GetUniqueID();
-						std::shared_ptr<WheelItem> resolved = WheelItemFactory::MakeWheelItemFromResolvedForm(
-							missingItem->GetOriginalType(),
-							missingItem->GetFormID(),
-							resolvedUniqueID);
+						std::shared_ptr<WheelItem> resolved =
+							WheelItemFactory::MakeWheelItemFromResolvedForm(
+								missingItem->GetOriginalType(),
+								missingItem->GetFormID(),
+								resolvedUniqueID);
 						if (resolved) {
 							resolved->SetMissingCategory(category);
 							entry->ReplaceItemAt(i, resolved);
@@ -14027,10 +14028,11 @@ void Wheeler::PruneWheelEntries_NotInInventory(PruneReason reason)
 					if (auto missingItem = dynamic_cast<WheelItemMissing*>(selectedItem.get())) {
 						if (selectedInInventory) {
 							std::uint16_t resolvedUniqueID = inventoryUniqueID != 0 ? inventoryUniqueID : missingItem->GetUniqueID();
-							std::shared_ptr<WheelItem> resolved = WheelItemFactory::MakeWheelItemFromResolvedForm(
-								missingItem->GetOriginalType(),
-								missingItem->GetFormID(),
-								resolvedUniqueID);
+							std::shared_ptr<WheelItem> resolved =
+								WheelItemFactory::MakeWheelItemFromResolvedForm(
+									missingItem->GetOriginalType(),
+									missingItem->GetFormID(),
+									resolvedUniqueID);
 							if (resolved) {
 								resolved->SetMissingCategory(category);
 								entry->ReplaceSelectedItem(resolved);

@@ -140,16 +140,16 @@ namespace
 			static_cast<int>(HasLoadedPlugin("Lux Via.esp")) +
 			static_cast<int>(HasLoadedPlugin("NAT-ENB.esp"));
 
-		logger::info("CompatProbe: equip/combat DLL cluster = {}", equipDlls);
-		logger::info("CompatProbe: OAR cluster = {}", oarDlls);
-		logger::info("CompatProbe: render/equipment visual DLL cluster = {}", renderDlls);
-		logger::info("CompatProbe: drawn-weapon plugin cluster = {}", combatPlugins);
-		logger::info("CompatProbe: scene/render plugin cluster = {}", scenePlugins);
+		logger::debug("CompatProbe: equip/combat DLL cluster = {}", equipDlls);
+		logger::debug("CompatProbe: OAR cluster = {}", oarDlls);
+		logger::debug("CompatProbe: render/equipment visual DLL cluster = {}", renderDlls);
+		logger::debug("CompatProbe: drawn-weapon plugin cluster = {}", combatPlugins);
+		logger::debug("CompatProbe: scene/render plugin cluster = {}", scenePlugins);
 		logger::info(
 			"CompatProbe: mutable inventory profile={} edsActive={}",
 			Wheeler::IsEquipmentDurabilitySystemActive() ? "equipment_durability_system" : "vanilla",
 			Wheeler::IsEquipmentDurabilitySystemActive() ? 1 : 0);
-		logger::info(
+		logger::debug(
 			"CompatProbe: profile score={} assessment={}",
 			nolvusLikeScore,
 			nolvusLikeScore >= 6 ? "heavy_list_drawn_weapon_risk" : "general_profile");
@@ -395,7 +395,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	// Load debug.ini and configure log levels
 	Config::Debug::ReadDebugConfig();
 
-	logger::critical("[BUILD_MARK] wheeler build {} {}", __DATE__, __TIME__);
+	logger::info("[BUILD_MARK] wheeler build {} {}", __DATE__, __TIME__);
 
 	// Startup banner - ALWAYS log version/author info (not gated)
 	logger::info("{} {} by {} | Build: {}"sv, Plugin::DISPLAY_NAME, Plugin::DISPLAY_VERSION, Plugin::AUTHOR, Plugin::BUILD_TIMESTAMP);

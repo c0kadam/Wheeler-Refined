@@ -265,9 +265,6 @@ bool WheelItemShout::CastImmediate(float hoverTime)
 
 bool WheelItemShout::tryCastImmediate(float hoverTime)
 {
-	const RE::FormID shoutID = _shout ? _shout->GetFormID() : 0;
-	logger::critical("[SHOUT_MARK] tryCastImmediate enter shout={:08X}", shoutID);
-
 	if (!_shout) {
 		logger::warn("WheelItemShout::tryCastImmediate: no shout");
 		return false;
