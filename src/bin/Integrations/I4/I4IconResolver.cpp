@@ -17,7 +17,6 @@ namespace I4Integration
 	namespace
 	{
 		constexpr const char* kDefaultIconSource = "skyui/icons_item_psychosteve.swf";
-		constexpr RE::FormID kTrackedI4DiagFormID = 0x00057A7A;
 
 		enum class ArmorWeightClass : std::int32_t
 		{
@@ -951,37 +950,6 @@ namespace I4Integration
 			return DescribeGfxValue(value);
 		}
 
-		std::string DescribeObjectMembers(const RE::GFxValue& object)
-		{
-			if (!object.IsObject() && !object.IsDisplayObject()) {
-				return "<not_object>";
-			}
-
-			std::vector<std::string> members;
-			object.VisitMembers([&](const char* memberName, const RE::GFxValue& memberValue) {
-				members.push_back(fmt::format("{}={}", memberName ? memberName : "<null>", DescribeGfxValue(memberValue)));
-				return true;
-			});
-
-			if (members.empty()) {
-				return "<no_members>";
-			}
-
-			std::sort(members.begin(), members.end());
-			std::string joined;
-			for (std::size_t i = 0; i < members.size(); ++i) {
-				if (i != 0) {
-					joined += ", ";
-				}
-				joined += members[i];
-			}
-			return joined;
-		}
-
-		bool IsTrackedI4DiagForm(RE::FormID formID)
-		{
-			return formID == kTrackedI4DiagFormID;
-		}
 	}
 
 	I4IconResolver& I4IconResolver::GetSingleton()
@@ -1231,21 +1199,6 @@ namespace I4Integration
 				}
 				SetNumber(entryObj, "subType", static_cast<std::int32_t>(subType));
 				SetDefaultPotionIcon(entryObj, subType);
-				if (alchemy && IsTrackedI4DiagForm(formID)) {
-					logger::info(
-						"[I4Diag:00057A7A][resolver.pre] name='{}' isFood={} foodFlag={} vendorFood={} vendorPotion={} vendorPoison={} isPoison={} subType={} defaultSource={} defaultLabel={} defaultColor={}",
-						alchemy->GetName(),
-						alchemy->IsFood(),
-						alchemy->data.flags.any(RE::AlchemyItem::AlchemyFlag::kFoodItem),
-						alchemy->HasKeywordString("VendorItemFood"),
-						alchemy->HasKeywordString("VendorItemPotion"),
-						alchemy->HasKeywordString("VendorItemPoison"),
-						alchemy->IsPoison(),
-						static_cast<std::int32_t>(subType),
-						ReadMemberDescription(entryObj, "iconSource"),
-						ReadMemberDescription(entryObj, "iconLabel"),
-						ReadMemberDescription(entryObj, "iconColor"));
-				}
 			}
 			break;
 		case RE::FormType::Ingredient:
@@ -1357,20 +1310,6 @@ namespace I4Integration
 		}
 
 		spec.valid = !spec.iconSource.empty() && !spec.iconLabel.empty();
-		if (IsTrackedI4DiagForm(formID)) {
-			logger::info(
-				"[I4Diag:00057A7A][resolver.post] source='{}' label='{}' iconColorRaw={} iconColorParsed={} color=0x{:08X} valid={} sourceKind={}",
-				spec.iconSource,
-				spec.iconLabel,
-				iconColorRaw,
-				iconColorParsed,
-				static_cast<std::uint32_t>(spec.color),
-				spec.valid,
-				IsDefaultSourcePath(spec.iconSource) ? "default" : "custom");
-			logger::info(
-				"[I4Diag:00057A7A][resolver.members] {}",
-				DescribeObjectMembers(entryObj));
-		}
 		if (trace) {
 			I4_LOG_INFO("[I4][TRACE][resolver.entry.post] form={:08X} type={} sig={} source='{}' label='{}' iconColorRaw={} iconColorParsed={} color=0x{:08X} valid={} sourceKind={}",
 				formID,
