@@ -19,6 +19,7 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponLiveVisualStatusVerifi
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/GroupedPoisonLineageDiagnosticVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/GroupedPoisonPresentationAliasVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/AmmoRangedWeaponPoisonPresentationVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/PoisonDiagnosticVerification\\.cpp$")
 
 # Explicitly include newly added capability helpers (guards against stale glob caches).
 list(APPEND SOURCE_FILES
@@ -421,6 +422,19 @@ add_executable(wheeler_ammo_ranged_weapon_poison_presentation_verification EXCLU
 target_compile_features(wheeler_ammo_ranged_weapon_poison_presentation_verification PRIVATE cxx_std_23)
 if(MSVC)
 	target_compile_options(wheeler_ammo_ranged_weapon_poison_presentation_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_poison_diagnostic_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/PoisonDiagnosticVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/PoisonDiagnosticPolicy.h"
+)
+target_compile_features(wheeler_poison_diagnostic_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_poison_diagnostic_verification PRIVATE WHEELER_POISON_DIAGNOSTIC_VERIFICATION_MAIN)
+target_include_directories(wheeler_poison_diagnostic_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_poison_diagnostic_verification PRIVATE "/utf-8" "/permissive-")
 endif()
 
 target_precompile_headers(

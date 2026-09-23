@@ -39,6 +39,7 @@
 #include "bin/InputBroker.h"
 #include "MainWheelDebug.h"
 #include "HandMemoryAttackDiagnosticPolicy.h"
+#include "PoisonDiagnosticPolicy.h"
 #include "bin/UserInput/Controls.h"
 
 #include "WheelItems/WheelItem.h"
@@ -128,6 +129,330 @@ namespace
 		using Clock = std::chrono::steady_clock;
 		static const auto s_start = Clock::now();
 		return std::chrono::duration<double>(Clock::now() - s_start).count();
+	}
+
+	template <class Fn>
+	bool InvokePoisonDiagnosticGuard(Fn&& a_fn)
+	{
+#if defined(_MSC_VER)
+		__try {
+			a_fn();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+#else
+		try {
+			a_fn();
+			return true;
+		} catch (...) {
+			return false;
+		}
+#endif
+	}
+
+	std::uint64_t HashPoisonDiagnosticSignature(std::string_view a_signature) noexcept
+	{
+		std::uint64_t hash = 14695981039346656037ULL;
+		for (const auto byte : a_signature) {
+			hash ^= static_cast<unsigned char>(byte);
+			hash *= 1099511628211ULL;
+		}
+		return hash;
+	}
+
+	bool CapturePoisonDiagnosticMember(
+		RE::ExtraDataList* a_extraData,
+		int& a_count,
+		std::uint16_t& a_uniqueID,
+		bool& a_worn,
+		bool& a_wornLeft,
+		bool& a_hasPoison,
+		RE::FormID& a_poisonFormID,
+		std::uint32_t& a_poisonCount,
+		std::uint64_t& a_signatureDigest)
+	{
+		if (!a_extraData) {
+			return false;
+		}
+		return InvokePoisonDiagnosticGuard([&]() {
+			a_count = a_extraData->GetCount();
+			if (a_count <= 0) {
+				a_count = 1;
+			}
+			a_worn = a_extraData->HasType(RE::ExtraDataType::kWorn);
+			a_wornLeft = a_extraData->HasType(RE::ExtraDataType::kWornLeft);
+			a_uniqueID = 0;
+			if (auto* unique = a_extraData->GetByType<RE::ExtraUniqueID>()) {
+				a_uniqueID = unique->uniqueID;
+			}
+
+			auto* health = a_extraData->GetByType<RE::ExtraHealth>();
+			auto* enchantment = a_extraData->GetByType<RE::ExtraEnchantment>();
+			auto* charge = a_extraData->GetByType<RE::ExtraCharge>();
+			auto* poison = a_extraData->GetByType<RE::ExtraPoison>();
+			auto* text = a_extraData->GetByType<RE::ExtraTextDisplayData>();
+			auto* ownership = a_extraData->GetByType<RE::ExtraOwnership>();
+			auto* hotkey = a_extraData->GetByType<RE::ExtraHotkey>();
+			const auto enchantmentFormID =
+				enchantment && enchantment->enchantment ? enchantment->enchantment->GetFormID() : 0;
+			a_hasPoison = poison != nullptr;
+			a_poisonFormID = poison && poison->poison ? poison->poison->GetFormID() : 0;
+			a_poisonCount = poison ? poison->count : 0;
+			const auto ownerFormID = ownership && ownership->owner ? ownership->owner->GetFormID() : 0;
+			const auto hotkeyValue = hotkey ? static_cast<int>(hotkey->hotkey.underlying()) : -2;
+			const char* displayName = text ? text->displayName.c_str() : "";
+			const std::string signature = fmt::format(
+				"health={}:{};enchantment={}:{:08X}:{}:{};charge={}:{};poison={}:{:08X}:{};name={}:{};temper={};owner={}:{:08X};hotkey={}",
+				health ? 1 : 0,
+				health ? health->health : 0.0F,
+				enchantment ? 1 : 0,
+				enchantmentFormID,
+				enchantment ? enchantment->charge : 0,
+				enchantment && enchantment->removeOnUnequip ? 1 : 0,
+				charge ? 1 : 0,
+				charge ? charge->charge : 0.0F,
+				poison ? 1 : 0,
+				a_poisonFormID,
+				a_poisonCount,
+				text ? 1 : 0,
+				displayName ? displayName : "",
+				text ? text->temperFactor : 0.0F,
+				ownership ? 1 : 0,
+				ownerFormID,
+				hotkeyValue);
+			a_signatureDigest = HashPoisonDiagnosticSignature(signature);
+		});
+	}
+
+	std::pair<std::array<PoisonDiagnosticPolicy::FormID, 2>, std::uint8_t>
+	CapturePoisonDiagnosticCandidates(RE::PlayerCharacter* a_player)
+	{
+		std::array<PoisonDiagnosticPolicy::FormID, 2> candidates{};
+		std::uint8_t count = 0;
+		if (!a_player) {
+			return { candidates, count };
+		}
+		for (const bool left : { false, true }) {
+			auto* form = a_player->GetEquippedObject(left);
+			if (!form || !form->As<RE::TESObjectWEAP>()) {
+				continue;
+			}
+			const auto formID = form->GetFormID();
+			if (formID == 0 || (count != 0 && candidates[0] == formID)) {
+				continue;
+			}
+			candidates[count++] = formID;
+			if (count == candidates.size()) {
+				break;
+			}
+		}
+		return { candidates, count };
+	}
+
+	void EmitPoisonDiagnosticSnapshot(
+		std::uint64_t a_eventID,
+		const char* a_phase,
+		const std::array<PoisonDiagnosticPolicy::FormID, 2>& a_candidates,
+		std::uint8_t a_candidateCount)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player || !player->Is3DLoaded()) {
+			logger::debug("[PoisonDiag] event={} phase={} snapshot=unavailable reason=no_current_player",
+				a_eventID, a_phase ? a_phase : "unknown");
+			return;
+		}
+		RE::TESObjectREFR::InventoryItemMap inventory;
+		if (!Utils::Inventory::TryGetInventorySnapshot(player, inventory, "PoisonDiagnosticSnapshot")) {
+			logger::debug("[PoisonDiag] event={} phase={} snapshot=unavailable reason=inventory_unreadable",
+				a_eventID, a_phase ? a_phase : "unknown");
+			return;
+		}
+
+		for (std::uint8_t candidateIndex = 0; candidateIndex < a_candidateCount; ++candidateIndex) {
+			const RE::FormID formID = a_candidates[candidateIndex];
+			int sameFormCount = 0;
+			RE::InventoryEntryData* entry = nullptr;
+			for (auto& [boundObject, data] : inventory) {
+				if (boundObject && boundObject->GetFormID() == formID) {
+					sameFormCount = data.first;
+					entry = data.second.get();
+					break;
+				}
+			}
+			logger::debug("[PoisonDiag] event={} phase={} base={:08X} sameFormCount={} targetScope=equipped_candidate",
+				a_eventID, a_phase ? a_phase : "unknown", formID, sameFormCount);
+			if (!entry || !entry->extraLists) {
+				if (sameFormCount > 0) {
+					logger::debug("[PoisonDiag] event={} phase={} base={:08X} member=implicit xList=null uid=0 count={} worn=unknown wornLeft=unknown poison=0 poisonForm=00000000 poisonCount=0 legacySig=plain_default",
+						a_eventID, a_phase ? a_phase : "unknown", formID, sameFormCount);
+				}
+				continue;
+			}
+
+			std::vector<RE::ExtraDataList*> extraLists;
+			const bool listReadable = InvokePoisonDiagnosticGuard([&]() {
+				for (auto* extraData : *entry->extraLists) {
+					extraLists.push_back(extraData);
+				}
+			});
+			if (!listReadable) {
+				logger::debug("[PoisonDiag] event={} phase={} base={:08X} population=unreadable",
+					a_eventID, a_phase ? a_phase : "unknown", formID);
+				continue;
+			}
+
+			int representedCount = 0;
+			bool allCountsReadable = true;
+			for (auto* extraData : extraLists) {
+				int count = 0;
+				std::uint16_t uniqueID = 0;
+				bool worn = false;
+				bool wornLeft = false;
+				bool hasPoison = false;
+				RE::FormID poisonFormID = 0;
+				std::uint32_t poisonCount = 0;
+				std::uint64_t signatureDigest = 0;
+				const bool readable = CapturePoisonDiagnosticMember(
+					extraData, count, uniqueID, worn, wornLeft, hasPoison,
+					poisonFormID, poisonCount, signatureDigest);
+				if (readable) {
+					representedCount += count;
+				} else {
+					allCountsReadable = false;
+				}
+				logger::debug("[PoisonDiag] event={} phase={} base={:08X} xList={} ephemeral=1 readable={} uid={} count={} worn={} wornLeft={} poison={} poisonForm={:08X} poisonCount={} legacySig={:016X}",
+					a_eventID,
+					a_phase ? a_phase : "unknown",
+					formID,
+					static_cast<const void*>(extraData),
+					readable ? 1 : 0,
+					uniqueID,
+					count,
+					worn ? 1 : 0,
+					wornLeft ? 1 : 0,
+					hasPoison ? 1 : 0,
+					poisonFormID,
+					poisonCount,
+					signatureDigest);
+			}
+			if (allCountsReadable && representedCount < sameFormCount) {
+				logger::debug("[PoisonDiag] event={} phase={} base={:08X} member=implicit xList=null uid=0 count={} worn=unknown wornLeft=unknown poison=0 poisonForm=00000000 poisonCount=0 legacySig=plain_default",
+					a_eventID,
+					a_phase ? a_phase : "unknown",
+					formID,
+					sameFormCount - representedCount);
+			}
+		}
+		inventory.clear();
+	}
+
+	static PoisonDiagnosticPolicy::Watcher g_poisonDiagnosticWatcher{};
+	static std::uint64_t g_nextPoisonDiagnosticEventID = 0;
+
+	bool IsPoisonDiagnosticEnabled() noexcept
+	{
+		return Config::MainWheel::Debug::Enabled;
+	}
+
+	void CancelPoisonDiagnosticWatcher(const char* a_reason)
+	{
+		if (!IsPoisonDiagnosticEnabled()) {
+			g_poisonDiagnosticWatcher.Clear();
+			return;
+		}
+		if (g_poisonDiagnosticWatcher.IsActive()) {
+			logger::debug("[PoisonDiag] event={} observation=cancelled reason={}",
+				g_poisonDiagnosticWatcher.eventID,
+				a_reason ? a_reason : "unspecified");
+		}
+		g_poisonDiagnosticWatcher.Clear();
+	}
+
+	void EmitAndClearPoisonDiagnosticWatcher(const char* a_phase)
+	{
+		if (!IsPoisonDiagnosticEnabled()) {
+			g_poisonDiagnosticWatcher.Clear();
+			return;
+		}
+		if (!g_poisonDiagnosticWatcher.eventID) {
+			return;
+		}
+		EmitPoisonDiagnosticSnapshot(
+			g_poisonDiagnosticWatcher.eventID,
+			a_phase,
+			g_poisonDiagnosticWatcher.candidateFormIDs,
+			g_poisonDiagnosticWatcher.candidateCount);
+		g_poisonDiagnosticWatcher.Clear();
+	}
+
+	void ProcessPoisonDiagnosticWatcher()
+	{
+		if (!IsPoisonDiagnosticEnabled()) {
+			g_poisonDiagnosticWatcher.Clear();
+			return;
+		}
+		if (!g_poisonDiagnosticWatcher.IsActive()) {
+			return;
+		}
+		auto* ui = RE::UI::GetSingleton();
+		const bool inventoryOpen = ui && ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME);
+		const auto decision = PoisonDiagnosticPolicy::Advance(
+			g_poisonDiagnosticWatcher,
+			Wheeler::GetTransientRestorationEpoch(),
+			GetSafeInputTimestampSeconds(),
+			inventoryOpen);
+		switch (decision) {
+		case PoisonDiagnosticPolicy::Decision::EmitBoundary:
+			EmitPoisonDiagnosticSnapshot(
+				g_poisonDiagnosticWatcher.eventID,
+				"post_engine_boundary",
+				g_poisonDiagnosticWatcher.candidateFormIDs,
+				g_poisonDiagnosticWatcher.candidateCount);
+			break;
+		case PoisonDiagnosticPolicy::Decision::EmitFinal:
+			EmitAndClearPoisonDiagnosticWatcher("post_followup");
+			break;
+		case PoisonDiagnosticPolicy::Decision::Cancel:
+		case PoisonDiagnosticPolicy::Decision::None:
+		default:
+			break;
+		}
+	}
+
+	std::uint64_t ArmPoisonDiagnosticWatcher(
+		RE::PlayerCharacter* a_player,
+		RE::FormID a_poisonFormID,
+		RestorationLifecycle::Epoch a_epoch)
+	{
+		if (!IsPoisonDiagnosticEnabled()) {
+			g_poisonDiagnosticWatcher.Clear();
+			return 0;
+		}
+		if (g_poisonDiagnosticWatcher.IsActive()) {
+			EmitAndClearPoisonDiagnosticWatcher("post_superseded_by_next_poison");
+		}
+		++g_nextPoisonDiagnosticEventID;
+		if (g_nextPoisonDiagnosticEventID == 0) {
+			++g_nextPoisonDiagnosticEventID;
+		}
+		const auto [candidateFormIDs, candidateCount] =
+			CapturePoisonDiagnosticCandidates(a_player);
+		const auto poisonDiagnosticEventID = g_nextPoisonDiagnosticEventID;
+		logger::debug(
+			"[PoisonDiag] event={} boundary=pre_engine_poison targetScope=equipped_candidates candidateCount={} finalTargetUnavailableBeforeEngineUI=1 poison={:08X}",
+			poisonDiagnosticEventID,
+			candidateCount,
+			a_poisonFormID);
+		EmitPoisonDiagnosticSnapshot(
+			poisonDiagnosticEventID, "pre_engine_poison", candidateFormIDs, candidateCount);
+		g_poisonDiagnosticWatcher = PoisonDiagnosticPolicy::Arm(
+			poisonDiagnosticEventID,
+			a_epoch,
+			candidateFormIDs,
+			candidateCount,
+			GetSafeInputTimestampSeconds());
+		return poisonDiagnosticEventID;
 	}
 
 	bool IsPhysicalEscDown()
@@ -8047,8 +8372,20 @@ void Wheeler::ProcessPendingActions()
 				if (!aeMan) {
 					LOG_WARN(Activation_RTU, "Poison: pending apply failed (no ActorEquipManager)");
 				} else {
+					const auto poisonDiagnosticEventID =
+						ArmPoisonDiagnosticWatcher(pc, poisonFormID, currentRestorationEpoch);
 					LOG_INFO(Activation_RTU, "Poison: executing EquipObject after wheel closed: {}", poison->GetName());
-					aeMan->EquipObject(pc, poison);
+					if (poisonDiagnosticEventID != 0) {
+						logger::debug(
+							"[PoisonDiag] event={} mutation=ActorEquipManager::EquipObject(poison) begin",
+							poisonDiagnosticEventID);
+					}
+					InventorySnapshotCache::EquipObject(aeMan, pc, poison);
+					if (poisonDiagnosticEventID != 0) {
+						logger::debug(
+							"[PoisonDiag] event={} mutation=ActorEquipManager::EquipObject(poison) returned watcher=armed",
+							poisonDiagnosticEventID);
+					}
 				}
 			}
 		}
@@ -8808,6 +9145,8 @@ void Wheeler::Update(float a_deltaTime)
 	}
 
 	UpdateHandMemory();
+	ProcessPoisonDiagnosticWatcher();
+	WheelItemWeapon::ProcessGroupedPoisonLineageDiagnostic();
 	TransformWheelManager::Update();
 
 	if (!RE::PlayerCharacter::GetSingleton() || !RE::PlayerCharacter::GetSingleton()->Is3DLoaded()) {
@@ -9799,6 +10138,7 @@ void Wheeler::RollbackTemporaryPowerSelectionInCurrentWorld()
 void Wheeler::DiscardTransientGameplayStateForWorldTransition(const char* a_reason)
 {
 	const auto nextEpoch = _transientGameplayDomain.Reset([&]() {
+		CancelPoisonDiagnosticWatcher("world_transition_discard");
 		CancelHandMemoryAttackDiagnostic("world_transition_discard", false);
 		g_handMemory.Reset();
 		_pendingSpellActivation.reset();
@@ -9859,6 +10199,7 @@ void Wheeler::ResetTransientRestorationState(const char* a_reason)
 void Wheeler::CancelTransientGameplayStateInCurrentWorld(const char* a_reason)
 {
 	const auto nextEpoch = _transientGameplayDomain.Reset([&]() {
+		CancelPoisonDiagnosticWatcher("current_world_cancel");
 		CancelOwnedSyntheticInputInCurrentWorld();
 		ResetOwnedTempRefCleanup(RestorationLifecycle::ResetDisposition::kCurrentWorldCancel);
 		RollbackPendingSpellTransactionInCurrentWorld();
