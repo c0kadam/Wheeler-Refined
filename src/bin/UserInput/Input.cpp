@@ -646,6 +646,8 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 		const bool mainWheelOpenBeforeEvent = Wheeler::IsWheelerOpen();
 		bool passthroughThisEvent = false;
 		bool cooperativeOpeningGranted = false;
+		bool handMemoryAttackDiagnosticEvent = false;
+		std::string handMemoryAttackDiagnosticUserEvent;
 
 		if (event->eventType == RE::INPUT_EVENT_TYPE::kMouseMove) {
 			const bool wheelerOpen = Wheeler::IsWheelerOpen();
@@ -781,6 +783,20 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 							if (!userEvent.empty()) {
 								userEventName = userEvent;
 							}
+						}
+					}
+					if (isDown || isUp) {
+						const auto* userEvents = RE::UserEvents::GetSingleton();
+						const std::string_view userEventView = userEventName;
+						const bool matchesLeftAttack = userEvents ?
+							userEventView == std::string_view(userEvents->leftAttack.c_str()) :
+							userEventView == "Left Attack/Block";
+						const bool matchesRightAttack = userEvents ?
+							userEventView == std::string_view(userEvents->rightAttack.c_str()) :
+							userEventView == "Right Attack/Block";
+						handMemoryAttackDiagnosticEvent = matchesLeftAttack || matchesRightAttack;
+						if (handMemoryAttackDiagnosticEvent) {
+							handMemoryAttackDiagnosticUserEvent = userEventName;
 						}
 					}
 
@@ -1114,6 +1130,16 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 		}
 		if (passthroughThisEvent && !consumeEvent) {
 			keptPassthroughEvent = true;
+		}
+		if (!cooperativeOpeningGranted && handMemoryAttackDiagnosticEvent) {
+			Wheeler::ObserveHandMemoryAttackInput(
+				static_cast<std::uint32_t>(spyDevice),
+				spyRawInput,
+				spyMappedInput,
+				handMemoryAttackDiagnosticUserEvent,
+				spyIsDown,
+				spyIsUp,
+				consumeEvent);
 		}
 
 		if (IsInputSpyEnabled()) {

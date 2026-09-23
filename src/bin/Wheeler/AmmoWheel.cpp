@@ -712,6 +712,11 @@ namespace {
 
 			auto start = std::chrono::steady_clock::now();
 			
+			// Use Texture's load function (nanosvg-based)
+			// Note: We need to access the private load_texture_from_file - use a workaround
+			// by loading via nanosvg directly or making a public wrapper
+			// For now, we'll use the existing Texture system indirectly
+			
 			// Load SVG using nanosvg with deterministic sizing
 			SvgSizeInfo svgInfo{};
 			auto* svg = ParseSvgFromFileNormalized(path, svgInfo);
@@ -905,7 +910,7 @@ namespace {
 		return result;
 	}
 
-	// ========== ROTATED QUAD RENDERING ==========
+// ========== ROTATED QUAD RENDERING ==========
 	// Rotate a 2D point around origin by angle (radians)
 	ImVec2 RotatePoint(float x, float y, float cosA, float sinA) {
 		return ImVec2(x * cosA - y * sinA, x * sinA + y * cosA);
@@ -1030,7 +1035,7 @@ namespace {
 		return result;
 	}
 
-	// ========== INDICATOR RENDERING ==========
+// ========== INDICATOR RENDERING ==========
 	// Draw an arc indicator with configurable style
 	void DrawIndicatorArc(
 		ImDrawList* drawList,
@@ -1329,7 +1334,7 @@ bool AmmoWheel::TryRestoreRememberedAmmoForWeaponType(WeaponType a_weaponType, R
 		return true;
 	}
 
-	equipManager->EquipObject(player, rememberedAmmo);
+	InventorySnapshotCache::EquipObject(equipManager, player, rememberedAmmo);
 	logger::info("AmmoWheel: restored {} ammo memory current={:08X} restored={:08X}",
 		a_weaponType == WeaponType::Bow ? "bow" : "crossbow",
 		a_currentAmmoID,
@@ -1410,7 +1415,8 @@ bool AmmoWheel::ProcessInput()
 		// This is a simplified check - the full implementation would use proper input hooks
 		modDown = false;  // Will be set true if modifier is detected
 		
-		// Modifier-key state is not available through this input path.
+		// A configured modifier must match the Ammo Wheel toggle modifier.
+		// This means the user must configure a separate modifier key
 		// TODO: Implement proper modifier key checking via input hooks
 	}
 	
@@ -1578,7 +1584,7 @@ void AmmoWheel::Update(float a_deltaTime)
 		}
 
 		DrawArgs drawArgs;
-		// Apply CustomOpacity to the final alpha.
+		// Apply CustomOpacity to final alpha.
 		float customOpacity = std::clamp(Config::AmmoWheel::CustomOpacity, 0.0f, 1.0f);
 		drawArgs.alphaMult = fadeLerp * customOpacity;
 
@@ -1640,7 +1646,7 @@ void AmmoWheel::OnConfigChanged()
 		}
 	}
 	
-	// ========== VALIDATE VISUAL POLISH SETTINGS ==========
+	// ========== VALIDATE VISUAL SETTINGS ==========
 	// Clamp visual polish values to safe ranges to prevent rendering issues
 	Config::AmmoWheel::BorderInnerScale = std::clamp(Config::AmmoWheel::BorderInnerScale, 0.9f, 1.5f);
 	Config::AmmoWheel::BorderOuterScale = std::clamp(Config::AmmoWheel::BorderOuterScale, 0.95f, 1.6f);
