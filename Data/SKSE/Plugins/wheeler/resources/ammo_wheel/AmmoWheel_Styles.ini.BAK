@@ -1,0 +1,1112 @@
+; ==============================================================================
+; AmmoWheel Unified Reskin - Styles
+; ==============================================================================
+; Quickstart in 60 seconds:
+; 1) Open Data\SKSE\Plugins\wheeler\AmmoWheel.ini
+; 2) In [Reskin], set:
+;      Enabled = true
+;      BasePath = .\Data\SKSE\Plugins\wheeler\resources\ammo_wheel
+; 3) Define presets in this file as [Preset_<ID>]
+; 4) Map ammo to presets in AMMO_KID.ini
+;
+; NOTE:
+; - ReskinUnified reads enable/base path from AmmoWheel.ini [Reskin]
+; - This file is loaded from <BasePath>\AmmoWheel_Styles.ini
+; - Optional modular files are loaded from <BasePath>\styles\*.ini (sorted by filename)
+;
+; ==============================================================================
+; VisualTarget -> folder cheat sheet
+; ==============================================================================
+; WheelBackground   -> wheel_bg/
+; WheelBorderRing  -> wheel_border/
+;
+; SlotBackground   -> slot_bg/
+; SlotFrame        -> slot_frame/
+; SlotDivider      -> slot_divider/
+; SlotIcon         -> icons/
+;
+; IndicatorSelected -> indicators/selected/
+; IndicatorHovered  -> indicators/hovered/
+; IndicatorActive   -> indicators/active/
+; IndicatorCharge   -> indicators/charge/
+;
+; CenterBackground  -> center_bg/
+; CenterPanelFrame  -> center_frame/
+;
+; NamePanelBackground -> label_bg/
+; CursorIndicator     -> cursor/
+; LowAmmoIndicator    -> low_ammo/
+;
+; Popup            -> popup/
+; PopupBubble      -> popup/bubble_fill/
+; PopupBubbleRim   -> popup/bubble_rim/
+; PopupBubbleGlow  -> popup/bubble_glow/
+;
+; DamageDigits    -> digits/
+; MaxDamageDigits -> digits/
+;
+; AmmoCountDigits  -> digits/
+;
+; Static asset paths can be .png or .svg.
+; Flipbooks are frame sequences (typically .png), using pattern syntax like {:02}.
+;
+; ==============================================================================
+; Advanced optional keys (supported on every target prefix)
+; ==============================================================================
+; <Prefix>_RotationMode       : 0=FollowSlot, 1=Upright, 2=Fixed
+; <Prefix>_RotationOffsetDeg  : extra rotation in degrees
+; <Prefix>_FitMode            : 0=Contain(FitInsideSlot), 1=FixedSize
+; <Prefix>_FixedSizePx        : used when FitMode=1
+; <Prefix>_RotationSafetyScale: fit scale when FitMode=0
+; <Prefix>_ProgressDriven     : flipbook frame uses DrawContext progress (opt-in)
+; <Prefix>_IsAtlas            : sprite-sheet atlas mode (single texture + frame grid)
+; <Prefix>_StartTimeMode      : 0=Global, 1=PerSlot, 2=PerEntry (for Flipbook/Atlas animation phase)
+;
+; AmmoCountDigits atlas keys:
+; AmmoCountDigits_AtlasCols
+; AmmoCountDigits_AtlasRows
+; AmmoCountDigits_DigitSpacingPx
+;
+; Atlas animation keys (for targets like PopupBubble):
+; <Prefix>_IsAtlas = true
+; <Prefix>_Path = popup/my_effect_atlas.png
+; <Prefix>_AtlasCols = 8
+; <Prefix>_AtlasRows = 8
+; <Prefix>_FrameCount = 60        ; optional, defaults to AtlasCols*AtlasRows
+; <Prefix>_FPS = 24.0
+; <Prefix>_Loop = true
+; <Prefix>_ProgressDriven = false ; true => uses DrawContext.progress
+; DamageDigits_AtlasCols / DamageDigits_AtlasRows / DamageDigits_DigitSpacingPx
+; MaxDamageDigits_AtlasCols / MaxDamageDigits_AtlasRows / MaxDamageDigits_DigitSpacingPx
+;																					
+;
+; ============================================================================
+; Preset format
+; ============================================================================
+; Section name must be [Preset_<ID>]
+; Example: [Preset_Default], [Preset_Blood], [Preset_MyTheme]
+;
+; Strict key ordering used below:
+;   Metadata -> Wheel* -> Slot* -> Indicators* -> Center* ->
+;   NamePanel/Cursor/LowAmmo -> Popup* -> Digits
+;
+
+[Preset_Default]
+Name = Default
+Description = Primitive fallback baseline
+
+; Wheel*
+WheelBackground_Enabled = true
+WheelBackground_IsFlipbook = false
+WheelBackground_Path = wheel_bg/wheel_background.svg
+WheelBackground_Alpha = 0.8
+WheelBorderRing_Enabled = true
+WheelBorderRing_IsFlipbook = false
+WheelBorderRing_Path = wheel_border/wheel_border.svg
+WheelBorderRing_Alpha = 1.0
+
+; Slot*
+SlotBackground_Enabled = true
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_arrow.svg
+SlotFrame_Alpha = 1.0
+SlotDivider_Enabled = true
+SlotDivider_IsFlipbook = false
+SlotDivider_Path = slot_divider/divider.svg
+SlotDivider_Alpha = 0.3
+SlotIcon_Enabled = false
+
+; Indicators*
+IndicatorSelected_Enabled = true
+IndicatorSelected_IsFlipbook = false
+IndicatorSelected_Path = indicators/selected/selected_ring.svg
+IndicatorSelected_Alpha = 1.0
+IndicatorHovered_Enabled = true
+IndicatorHovered_IsFlipbook = false
+IndicatorHovered_Path = indicators/hovered/hovered_ring.svg
+IndicatorHovered_Alpha = 1.0
+IndicatorActive_Enabled = true
+IndicatorActive_IsFlipbook = false
+IndicatorActive_Path = indicators/active/active_ring.svg
+IndicatorActive_Alpha = 1.0
+IndicatorCharge_Enabled = true
+IndicatorCharge_IsFlipbook = false
+IndicatorCharge_Path = indicators/charge/charge_ring.svg
+IndicatorCharge_Alpha = 0.7
+
+; Center*
+CenterBackground_Enabled = true
+CenterBackground_IsFlipbook = false
+CenterBackground_Path = center_bg/center_background.svg
+CenterBackground_Alpha = 0.85
+CenterPanelFrame_Enabled = true
+CenterPanelFrame_IsFlipbook = false
+CenterPanelFrame_Path = center_frame/center_frame.svg
+CenterPanelFrame_Alpha = 0.5
+
+; NamePanel/Cursor/LowAmmo
+NamePanelBackground_Enabled = true
+NamePanelBackground_IsFlipbook = false
+NamePanelBackground_Path = label_bg/name_panel_bg.svg
+NamePanelBackground_Alpha = 1.0
+NamePanelBackground_FitMode = 1
+NamePanelBackground_FixedSizePx = 220.0
+CursorIndicator_Enabled = true
+CursorIndicator_IsFlipbook = false
+CursorIndicator_Path = cursor/cursor_dot.svg
+CursorIndicator_Alpha = 1.0
+CursorIndicator_FitMode = 1
+CursorIndicator_FixedSizePx = 10.0
+LowAmmoIndicator_Enabled = true
+LowAmmoIndicator_IsFlipbook = false
+LowAmmoIndicator_Path = low_ammo/low_ammo_ring.svg
+LowAmmoIndicator_Alpha = 1.0
+LowAmmoIndicator_FitMode = 1
+LowAmmoIndicator_FixedSizePx = 16.0
+
+; Popup*
+Popup_Enabled = true
+Popup_IsFlipbook = false
+Popup_Path = popup/popup_overlay.svg
+Popup_Alpha = 1.0
+PopupBubble_Enabled = false
+PopupBubbleRim_Enabled = true
+PopupBubbleRim_IsFlipbook = false
+PopupBubbleRim_Path = popup/bubble_rim/bubble_rim.svg
+PopupBubbleRim_Alpha = 1.0
+PopupBubbleGlow_Enabled = true
+PopupBubbleGlow_IsFlipbook = false
+PopupBubbleGlow_Path = popup/bubble_glow/bubble_glow.svg
+PopupBubbleGlow_Alpha = 0.3
+
+; Digits
+AmmoCountDigits_Enabled = true
+AmmoCountDigits_IsFlipbook = false
+AmmoCountDigits_Path = digits/digits_atlas.png
+AmmoCountDigits_Alpha = 1.0
+AmmoCountDigits_RotationMode = 1
+AmmoCountDigits_FitMode = 1
+AmmoCountDigits_FixedSizePx = 32.0
+AmmoCountDigits_AtlasCols = 10
+AmmoCountDigits_AtlasRows = 1
+AmmoCountDigits_DigitSpacingPx = 1.0
+DamageDigits_Enabled = true
+DamageDigits_IsFlipbook = false
+DamageDigits_Path = digits/damage_digits_atlas.png
+DamageDigits_Alpha = 1.0
+DamageDigits_RotationMode = 1
+DamageDigits_FitMode = 1
+DamageDigits_FixedSizePx = 32.0
+DamageDigits_AtlasCols = 10
+DamageDigits_AtlasRows = 1
+DamageDigits_DigitSpacingPx = 1.0
+MaxDamageDigits_Enabled = true
+MaxDamageDigits_IsFlipbook = false
+MaxDamageDigits_Path = digits/max_damage_digits_atlas.png
+MaxDamageDigits_Alpha = 1.0
+MaxDamageDigits_RotationMode = 1
+MaxDamageDigits_FitMode = 1
+MaxDamageDigits_FixedSizePx = 32.0
+MaxDamageDigits_AtlasCols = 10
+MaxDamageDigits_AtlasRows = 1
+MaxDamageDigits_DigitSpacingPx = 1.0
+[Preset_TemplateFull]
+Name = TemplateFull
+Description = Copy and rename this section to build a full skin preset
+
+; Wheel*
+WheelBackground_Enabled = true
+WheelBackground_IsFlipbook = false
+WheelBackground_Path = wheel_bg/wheel_background.svg
+WheelBackground_Alpha = 0.8
+WheelBackground_RotationMode = 1
+WheelBackground_FitMode = 0
+WheelBackground_RotationSafetyScale = 1.0
+
+WheelBorderRing_Enabled = true
+WheelBorderRing_IsFlipbook = false
+WheelBorderRing_Path = wheel_border/wheel_border.svg
+WheelBorderRing_Alpha = 0.7
+WheelBorderRing_RotationMode = 1
+WheelBorderRing_FitMode = 0
+
+; Slot*
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/slot_background.svg
+SlotBackground_Alpha = 1.0
+SlotBackground_RotationMode = 0
+SlotBackground_FitMode = 0
+
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_arrow.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+
+SlotDivider_Enabled = true
+SlotDivider_IsFlipbook = false
+SlotDivider_Path = slot_divider/divider.svg
+SlotDivider_Alpha = 0.3
+SlotDivider_RotationMode = 0
+SlotDivider_FitMode = 0
+
+SlotIcon_Enabled = false
+SlotIcon_IsFlipbook = false
+SlotIcon_Path = icons/default_arrow.svg
+SlotIcon_Alpha = 0.7
+SlotIcon_RotationMode = 0
+SlotIcon_FitMode = 0
+
+; Indicators*
+IndicatorSelected_Enabled = true
+IndicatorSelected_IsFlipbook = false
+IndicatorSelected_Path = indicators/selected/selected_ring.svg
+IndicatorSelected_Alpha = 1.0
+IndicatorSelected_RotationMode = 0
+IndicatorSelected_FitMode = 0
+
+IndicatorHovered_Enabled = true
+IndicatorHovered_IsFlipbook = false
+IndicatorHovered_Path = indicators/hovered/hovered_ring.svg
+IndicatorHovered_Alpha = 1.0
+IndicatorHovered_RotationMode = 0
+IndicatorHovered_FitMode = 0
+
+IndicatorActive_Enabled = true
+IndicatorActive_IsFlipbook = false
+IndicatorActive_Path = indicators/active/active_ring.svg
+IndicatorActive_Alpha = 1.0
+IndicatorActive_RotationMode = 0
+IndicatorActive_FitMode = 0
+
+IndicatorCharge_Enabled = true
+IndicatorCharge_IsFlipbook = false
+IndicatorCharge_Path = indicators/charge/charge_ring.svg
+IndicatorCharge_Alpha = 0.7
+IndicatorCharge_RotationMode = 0
+IndicatorCharge_FitMode = 0
+
+; Center*
+CenterBackground_Enabled = true
+CenterBackground_IsFlipbook = false
+CenterBackground_Path = center_bg/center_background.svg
+CenterBackground_Alpha = 0.85
+CenterBackground_RotationMode = 1
+CenterBackground_FitMode = 0
+
+CenterPanelFrame_Enabled = true
+CenterPanelFrame_IsFlipbook = false
+CenterPanelFrame_Path = center_frame/center_frame.svg
+CenterPanelFrame_Alpha = 0.5
+CenterPanelFrame_RotationMode = 1
+CenterPanelFrame_FitMode = 0
+
+; NamePanel/Cursor/LowAmmo
+NamePanelBackground_Enabled = true
+NamePanelBackground_IsFlipbook = false
+NamePanelBackground_Path = label_bg/name_panel_bg.svg
+NamePanelBackground_Alpha = 1.0
+NamePanelBackground_RotationMode = 1
+NamePanelBackground_FitMode = 1
+NamePanelBackground_FixedSizePx = 220.0
+
+CursorIndicator_Enabled = true
+CursorIndicator_IsFlipbook = false
+CursorIndicator_Path = cursor/cursor_dot.svg
+CursorIndicator_Alpha = 1.0
+CursorIndicator_RotationMode = 1
+CursorIndicator_FitMode = 1
+CursorIndicator_FixedSizePx = 10.0
+
+LowAmmoIndicator_Enabled = true
+LowAmmoIndicator_IsFlipbook = false
+LowAmmoIndicator_Path = low_ammo/low_ammo_ring.svg
+LowAmmoIndicator_Alpha = 1.0
+LowAmmoIndicator_RotationMode = 1
+LowAmmoIndicator_FitMode = 1
+LowAmmoIndicator_FixedSizePx = 16.0
+
+; Popup*
+Popup_Enabled = false
+Popup_IsFlipbook = false
+Popup_Path = popup/popup_overlay.svg
+Popup_Alpha = 1.0
+Popup_RotationMode = 1
+Popup_FitMode = 0
+
+PopupBubble_Enabled = false
+PopupBubble_IsFlipbook = false
+PopupBubble_Path = popup/bubble_fill/bubble_fill.svg
+PopupBubble_Alpha = 1.0
+PopupBubble_RotationMode = 1
+PopupBubble_FitMode = 0
+
+PopupBubbleRim_Enabled = true
+PopupBubbleRim_IsFlipbook = false
+PopupBubbleRim_Path = popup/bubble_rim/bubble_rim.svg
+PopupBubbleRim_Alpha = 1.0
+PopupBubbleRim_RotationMode = 1
+PopupBubbleRim_FitMode = 0
+
+PopupBubbleGlow_Enabled = false
+PopupBubbleGlow_IsFlipbook = false
+PopupBubbleGlow_Path = popup/bubble_glow/bubble_glow.svg
+PopupBubbleGlow_Alpha = 0.3
+PopupBubbleGlow_RotationMode = 1
+PopupBubbleGlow_FitMode = 0
+
+; Digits
+AmmoCountDigits_Enabled = true
+AmmoCountDigits_IsFlipbook = false
+AmmoCountDigits_Path = digits/digits_atlas.png
+AmmoCountDigits_Alpha = 1.0
+AmmoCountDigits_RotationMode = 1
+AmmoCountDigits_FitMode = 1
+AmmoCountDigits_FixedSizePx = 32.0
+AmmoCountDigits_AtlasCols = 10
+AmmoCountDigits_AtlasRows = 1
+AmmoCountDigits_DigitSpacingPx = 1.0
+DamageDigits_Enabled = true
+DamageDigits_IsFlipbook = false
+DamageDigits_Path = digits/damage_digits_atlas.png
+DamageDigits_Alpha = 1.0
+DamageDigits_RotationMode = 1
+DamageDigits_FitMode = 1
+DamageDigits_FixedSizePx = 32.0
+DamageDigits_AtlasCols = 10
+DamageDigits_AtlasRows = 1
+DamageDigits_DigitSpacingPx = 1.0
+MaxDamageDigits_Enabled = true
+MaxDamageDigits_IsFlipbook = false
+MaxDamageDigits_Path = digits/max_damage_digits_atlas.png
+MaxDamageDigits_Alpha = 1.0
+MaxDamageDigits_RotationMode = 1
+MaxDamageDigits_FitMode = 1
+MaxDamageDigits_FixedSizePx = 32.0
+MaxDamageDigits_AtlasCols = 10
+MaxDamageDigits_AtlasRows = 1
+MaxDamageDigits_DigitSpacingPx = 1.0
+;================Quivers Assets==================
+
+[Preset_BloodcursedElvenArrow]
+Name = Bloodcursed Elven Arrow Theme
+Description = Blood mist effect for Bloodcursed Elven Arrow popup
+
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/blood_mist_leather.png
+ SlotBackground_Alpha = 0.9
+
+;blood_mist_leather
+Popup_Enabled = false
+Popup_IsFlipbook = false
+Popup_Path =
+Popup_FrameCount = 1
+Popup_FPS = 32.0
+Popup_Loop = true
+Popup_Alpha = 0.9
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/blood_mist_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+
+
+[Preset_SunhallowedElvenArrow]
+Name = Sunhallowed Elven Arrow
+Description = Sun effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/sunhallowed_sun_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.95
+
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/sunhallowed_leather.png
+ SlotBackground_Alpha = 0.9
+
+
+; =========================
+; Universal effect variants
+; =========================
+[Preset_UniversalGlow]
+Name = Universal Glow Ring
+Description = Simple glowing ring effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/glow_ring_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/steel_glint_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_MagicSwirl]
+Name = Magic Swirl
+Description = Magical swirling effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/magic_swirl_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/elven_magic_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_FireBurst]
+Name = Fire Burst
+Description = Fire explosion effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/fire_burst_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.9
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/daedric_fire_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_FrostCrystal]
+Name = Frost Crystal
+Description = Ice crystal formation effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/frost_crystal_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/ancient_frost_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_ShadowSmoke]
+Name = Shadow Smoke
+Description = Dark smoke effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/shadow_smoke_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 18.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.7
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/necrotic_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_HolyLight]
+Name = Holy Light
+Description = Divine light effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/holy_light_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.95
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/sunhallowed_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_ElectricArc]
+Name = Electric Arc
+Description = Lightning/electric effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/electric_arc_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 35.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.9
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/steel_bolt_shock_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_NatureVine]
+Name = Nature Vine
+Description = Growing vine effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/nature_vine_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/forsworn_nature_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_StaticGlow]
+Name = Static Glow
+Description = Simple static glow image (no animation)
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = false
+PopupBubble_Path = popup/static_glow.png
+PopupBubble_FrameCount = 1
+PopupBubble_FPS = 0.0
+PopupBubble_Loop = false
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/leather.png
+ SlotBackground_Alpha = 0.9
+
+; =========================
+; Vanilla arrows (PresetIds used by mapping)
+; =========================
+[Preset_IronArrow]
+Name = Iron Arrow
+Description = Basic iron spark effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/iron_spark_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/iron_spark_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_SteelArrow]
+Name = Steel Arrow
+Description = Steel glint effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/steel_glint_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/steel_glint_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_OrcishArrow]
+Name = Orcish Arrow
+Description = Orcish glow effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/orcish_glow_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.9
+
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/orcish_leather.png
+ SlotBackground_Alpha = 0.9
+
+
+[Preset_DwarvenArrow]
+Name = Dwarven Arrow
+Description = Dwarven steam effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/dwarven_steam_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/dwarven_steam_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_ElvenArrow]
+Name = Elven Arrow
+Description = Elven magic effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/elven_magic_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/elven_magic_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_GlassArrow]
+Name = Glass Arrow
+Description = Glass shard effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/glass_shard_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.7
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/glass_shard_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_EbonyArrow]
+Name = Ebony Arrow
+Description = Ebony darkness effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/ebony_darkness_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/ebony_darkness_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_DaedricArrow]
+Name = Daedric Arrow
+Description = Daedric fire effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/daedric_fire_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.9
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/daedric_fire_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_AncientNordArrow]
+Name = Ancient Nord Arrow
+Description = Frost effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/ancient_frost_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/ancient_frost_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_ForswornArrow]
+Name = Forsworn Arrow
+Description = Nature effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/forsworn_nature_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/forsworn_nature_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_FalmerArrow]
+Name = Falmer Arrow
+Description = Poison effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/falmer_poison_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/falmer_poison_leather.png
+ SlotBackground_Alpha = 0.9
+
+[Preset_DragonboneArrow]
+Name = Dragonbone Arrow
+Description = Dragon fire effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/dragonbone_fire_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.9
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/dragonbone_fire_leather.png
+ SlotBackground_Alpha = 0.9
+ 
+[Preset_NecroticArrow]
+Name = Necrotic Arrow
+Description = Glowing Necro Effect
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/necrotic_glow_{:02}.png
+PopupBubble_FrameCount = 85
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.9
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/necrotic_leather.png
+ SlotBackground_Alpha = 1.0
+
+; =========================
+; Bolts (PresetIds used by mapping)
+; =========================
+[Preset_IronBolt]
+Name = Iron Bolt
+Description = Basic bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/iron_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.8
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/iron_bolt_leather.png
+ SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_SteelBolt]
+Name = Steel Bolt
+Description = Steel bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/steel_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/steel_bolt_leather.png
+ SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_DwarvenBolt]
+Name = Dwarven Bolt
+Description = Dwarven bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/dwarven_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background (static)
+ SlotBackground_Enabled = true
+ SlotBackground_IsFlipbook = false
+ SlotBackground_Path = slot_bg/dwarven_bolt_leather.png
+ SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_SteelBoltExplodingFire]
+Name = Steel Bolt (Fire)
+Description = Steel fire effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/fire_burst_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/steel_bolt_fire_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_SteelBoltExplodingIce]
+Name = Steel Bolt (Ice)
+Description = Steel ice effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/frost_crystal_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/steel_bolt_ice_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_SteelBoltExplodingShock]
+Name = Steel Bolt (Shock)
+Description = Steel shock effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/steel_bolt_shock_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/steel_bolt_shock_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_DwarvenBoltExplodingFire]
+Name = Dwarven Bolt (Fire)
+Description = Dwarven fire effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/fire_burst_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/dwarven_bolt_fire_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_DwarvenBoltExplodingShock]
+Name = Dwarven Bolt (Shock)
+Description = Dwarven shock effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/steel_bolt_shock_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/dwarven_bolt_shock_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_DwarvenBoltExplodingIce]
+Name = Dwarven Bolt (Ice)
+Description = Dwarven Ice effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/frost_crystal_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.75
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/dwarven_bolt_ice_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_IronBolt]
+Name = Iron Bolt
+Description = Iron bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/iron_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/iron_bolt_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+
+[Preset_OrcishBolt]
+Name = Orcish Bolt
+Description = Orcish bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/orcish_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/orcish_bolt_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0
+[Preset_SilverBolt]
+Name = Silver Bolt
+Description = Silver bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/silver_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/silver_bolt_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0				 
+
+[Preset_BonemoldBolt]
+Name = Bonemold Bolt
+Description = Bonemold bolt effect
+
+PopupBubble_Enabled = true
+PopupBubble_IsFlipbook = true
+PopupBubble_Path = popup/bonemold_bolt_{:02}.png
+PopupBubble_FrameCount = 60
+PopupBubble_FPS = 32.0
+PopupBubble_Loop = true
+PopupBubble_Alpha = 0.85
+; Slot background
+SlotBackground_Enabled = true
+SlotBackground_IsFlipbook = false
+SlotBackground_Path = slot_bg/bonemold_bolt_leather.png
+SlotBackground_Alpha = 0.9
+SlotFrame_Enabled = true
+SlotFrame_IsFlipbook = false
+SlotFrame_Path = slot_frame/slot_frame_bolt.svg
+SlotFrame_Alpha = 0.72
+SlotFrame_RotationMode = 0
+SlotFrame_FitMode = 0

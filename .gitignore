@@ -1,32 +1,45 @@
-build
-src/bin/_empty.cpp
-src/bin/_empty.h
-.vscode/settings.json
-
-# Local builds, binaries, and diagnostics
 /build/
 /build-*/
+/build_*/
+/_build*/
 /cmake-build-*/
 /artifacts/
 /logs/
+/.vs/
+**/CMakeFiles/
+
+# Generated binaries and build products
+*.obj
+*.lib
+*.exp
 *.pdb
 *.dll
 *.exe
+*.zip
+*.7z
+*.rar
+*.log
+*.py[cod]
+__pycache__/
+
+# Local recovery, comparison, and scratch data
+/memory-bank/
+/agents.md
+/BASELINE_A_source_manifest.sha256.txt
+/_hygiene_baseline_*/
+/_release_archives/
+*.bak
+*.BAK
+*.old
+*.orig
+*.tmp
+# Author-approved frozen AmmoWheel resources.
+!Data/SKSE/Plugins/wheeler/resources/ammo_wheel/AmmoWheel_Styles.ini.BAK
+!Data/SKSE/Plugins/wheeler/resources/ammo_wheel/slot_frame/slot_frame.svg.bak
 stdout*.txt
 stderr*.txt
 temp_check.txt
 
-# Local reference trees and scratch work
-/.upstream-wheeler/
-/__favwheel_port_work/
-/__tmp_src_process.cpp
-/__tmp_tgt_process.cpp
-/memory-bank/
-/agents.md
-
-# Generated Python and archive outputs
-__pycache__/
-*.py[cod]
-*.zip
-*.7z
-*.rar
+src/bin/_empty.cpp
+src/bin/_empty.h
+.vscode/settings.json

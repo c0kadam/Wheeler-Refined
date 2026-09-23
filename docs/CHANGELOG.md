@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.3.4
+
+### Highlights
+
+- Added ingredient wheel-item support and improved wheel behavior for configured Favorites and Quick Favorites workflows.
+- Improved weapon switching and restoration safety for bound weapons, identical weapon instances, and supported Immersive Weapon Switch transfers.
+
+### Transform Wheel
+
+- Reworked Transform Wheel behavior for Werewolf, Vampire Lord, and configured Lich forms.
+- Added form-specific ability discovery and configuration for mod-added Werewolf and Vampire Lord abilities.
+- Improved Vampire Lord generated-wheel contents, Revert Form availability, duplicate-entry handling, and melee/Blood Magic transitions.
+- Improved Lich and Undeath transformed-form handling with stable action ordering, safer staff/direct-cast behavior, protected return-form actions, and prevention of accidental transform chaining.
+
+### Compatibility
+
+- Added Skyrim 1.7.99 and 1.7.104 support with CommonLibSSE-NG 6.7 and Address Library v5. Skyrim 1.7.99 includes explicit structural hook validation; 1.7.104 uses the matching Address Library database and runtime-version path.
+
+### Weapons & Poison
+
+- Corrected active and hand indicators for identical weapons and true two-handed weapons.
+- Added safer already-poisoned weapon handling and applied-poison details.
+
+### Ammo Wheel
+
+- Added ranged-weapon poison information to Ammo Wheel Center Fields.
+
+### Integrations
+
+- Improved Inventory Injector icon reliability outside the Inventory Menu, including ingredient icon controls.
+- Improved dMenu input ownership and cooperative opening, allowing Ammo Wheel to remain visible while dMenu is open for live layout editing.
+- Expanded OStim scene-wheel controls, navigation, and optional appearance refresh behavior.
+- Fixed Action Hotkeys Bridge refresh safety while Wheeler is open.
+
+### Controls
+
+- Added configurable Favorites and Quick Favorites open/edit behavior with input pass-through.
+- Made keyboard wheel-close bindings configurable.
+
 ## 2026-04-26
 - Release metadata updated for `v1.3.3`.
 - Build/version logging banner updated to report `v1.3.3` with build date `4/26/2026`.

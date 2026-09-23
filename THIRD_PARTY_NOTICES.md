@@ -45,17 +45,21 @@ in the build instructions.
 - Bundled status: adapted source is present; no upstream binary is bundled;
   the integration is dormant because its activation call is disabled
 
-### OStimNG Thread API
+### OStimNG runtime API interop
 
-- Upstream: [VersuchDrei/OStimNG](https://github.com/VersuchDrei/OStimNG)
-- Audited revision: `95d9720ee3633896e893127d003dad7375459d50`
-- License: GNU GPL version 3
-- Use: the exact official `skse/src/ModAPI/OstimNG-API-Thread.h` header is
-  vendored at `src/include/third_party/ostim/OstimNG-API-Thread.h`; Wheeler's
-  wrapper compiles against its authoritative declarations
-- Bundled status: the official header is bundled; `OStim.dll` is neither
-  bundled nor linked and is discovered at runtime with
-  `GetModuleHandleA`/`GetProcAddress`
+- Upstream reference: [VersuchDrei/OStimNG](https://github.com/VersuchDrei/OStimNG)
+- Exact upstream API-source revision: not recorded by the current production
+  source
+- Recorded upstream license: GNU GPL version 3
+- Use: optional runtime integration. Wheeler contains local ABI/interface
+  declarations for OStimNG Thread and Scene runtime APIs in
+  `src/bin/Integrations/OStimNGThreadAPI.cpp` and
+  `src/bin/Integrations/OStimNGSceneAPI.cpp`; no official OStimNG header is
+  vendored or compiled
+- Bundled status: no upstream OStimNG header/source, import library, or
+  `OStim.dll` is bundled or link-time linked. Wheeler optionally discovers an
+  already-loaded `OStim.dll` and resolves `RequestPluginAPI_Thread` and
+  `RequestPluginAPI_Scene` with `GetModuleHandleA`/`GetProcAddress`
 
 ### MaxsuDetectionMeter
 
@@ -71,40 +75,53 @@ in the build instructions.
 
 ### CommonLibSSE-NG
 
-- Upstream: [alandtse/CommonLibSSE-NG](https://github.com/alandtse/CommonLibSSE-NG)
-- Audited release: `v6.7.0`, revision `3d81614617910e7f34b33d8750881811b5e36445`
-- License: GPL-3.0-or-later with the Modding Exception and GPL-3.0 Linking Exception (with Corresponding Source)
-- Use: SKSE/CommonLib headers and link target used to build Wheeler Refined
-- Bundled status: dependency source is not vendored; binary distributions must
-  retain the applicable CommonLibSSE-NG notice and upstream exceptions in
+- Upstream: [CharmedBaryon/CommonLibSSE-NG](https://github.com/CharmedBaryon/CommonLibSSE-NG)
+- Pinned/current build revision: `3d81614617910e7f34b33d8750881811b5e36445`
+- Version: `6.7.0`
+- License: GPL-3.0-or-later WITH Modding Exception AND GPL-3.0 Linking
+  Exception (with Corresponding Source)
+- Use: static build/link dependency providing SKSE/CommonLib headers and link
+  target used to build Wheeler Refined
+- Bundled status: dependency source is not vendored; binary distributions
+  retain the exact current CommonLibSSE-NG COPYING and EXCEPTIONS texts. The
+  upstream MIT text is historical/original provenance, not the current license
+
+### DirectXTK
+
+- Upstream: [microsoft/DirectXTK](https://github.com/microsoft/DirectXTK)
+- Resolved local build package: vcpkg `directxtk` `2025-10-27`
+  (`x64-windows-static-md`)
+- Exact upstream git revision: not pinned by this repository
+- License: MIT
+- Use: static build/link dependency present in the Wheeler Release linker
+  inputs as `DirectXTK.lib`
+- Bundled status: statically linked build dependency; no separate DirectXTK
+  binary is shipped. Its vcpkg copyright notice is retained under
   `Data/SKSE/Plugins/third-party-notices/`
 
-### DirectXMath and DirectXTK
+### DirectXMath
 
-- Upstream: [microsoft/DirectXMath](https://github.com/microsoft/DirectXMath) and [microsoft/DirectXTK](https://github.com/microsoft/DirectXTK)
-- Audited revision: resolved through the pinned vcpkg registry baseline
+- Upstream: [microsoft/DirectXMath](https://github.com/microsoft/DirectXMath)
+- Resolved local build package: vcpkg `directxmath` `2025-04-03`
+  (`x64-windows-static-md`)
 - License: MIT
-- Use: direct CommonLibSSE-NG 6.7.0 build and link requirements
-- Bundled status: linked build dependencies, not vendored; generated vcpkg
-  notices are retained under `Data/SKSE/Plugins/third-party-notices/`
-
-### fmt
-
-- Upstream: [fmtlib/fmt](https://github.com/fmtlib/fmt)
-- Audited revision: resolved through the pinned vcpkg registry baseline
-- License: MIT
-- Use: direct CommonLibSSE-NG 6.7.0 formatting dependency
-- Bundled status: linked build dependency, not vendored; its generated vcpkg
-  notice is retained under `Data/SKSE/Plugins/third-party-notices/`
+- Use: header-only build dependency used by the current DirectX/graphics
+  dependency chain
+- Bundled status: header-only build dependency; its vcpkg copyright notice,
+  `vcpkg-x64-windows-static-md-directxmath.copyright`, is retained under
+  `Data/SKSE/Plugins/third-party-notices/`
 
 ### toml11
 
 - Upstream: [ToruNiina/toml11](https://github.com/ToruNiina/toml11)
-- Audited revision: resolved through the pinned vcpkg registry baseline
+- Resolved local build package: vcpkg `toml11` `4.4.0`
+  (`x64-windows-static-md`)
 - License: MIT
-- Use: direct CommonLibSSE-NG 6.7.0 TOML dependency
-- Bundled status: linked/header build dependency, not vendored; its generated
-  vcpkg notice is retained under `Data/SKSE/Plugins/third-party-notices/`
+- Use: resolved manifest/build dependency; the current source does not require
+  a direct Wheeler runtime use
+- Bundled status: header-only build dependency; its vcpkg copyright notice,
+  `vcpkg-x64-windows-static-md-toml11.copyright`, is retained under
+  `Data/SKSE/Plugins/third-party-notices/`
 
 ### Dear ImGui
 

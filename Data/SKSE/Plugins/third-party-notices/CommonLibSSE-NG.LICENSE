@@ -1,14 +1,11 @@
-CommonLibSSE-NG v6.7.0
-Revision: 3d81614617910e7f34b33d8750881811b5e36445
-Upstream: https://github.com/alandtse/CommonLibSSE-NG
+CommonLibSSE-NG 6.7.0
+Pinned revision: 3d81614617910e7f34b33d8750881811b5e36445
+Current license: GPL-3.0-or-later WITH Modding Exception AND
+GPL-3.0 Linking Exception (with Corresponding Source)
 
-SPDX-License-Identifier: GPL-3.0-or-later
+The upstream licenses/LICENSE-MIT file is historical/original provenance only;
+it is not the current CommonLibSSE-NG license.
 
-CommonLibSSE-NG is licensed under the GNU General Public License version 3 or
-later, with the additional permissions reproduced in
-CommonLibSSE-NG.EXCEPTIONS.md.
-
-The GNU General Public License version 3 text distributed as Wheeler Refined's
-top-level LICENSE is also the license text supplied as CommonLibSSE-NG's
-COPYING file at this audited revision. Redistributors may select GPL version 3
-or a later version for CommonLibSSE-NG as permitted by its upstream license.
+See:
+CommonLibSSE-NG.COPYING
+CommonLibSSE-NG.EXCEPTIONS.md

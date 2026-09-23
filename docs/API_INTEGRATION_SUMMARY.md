@@ -176,7 +176,7 @@ This ensures that API-created wheels are NOT saved to the user's config file.
 
 ---
 
-## Optional extension points (not implemented)
+## Possible future extensions
 
 - Edit mode change callbacks (`enterEditMode`/`exitEditMode`)
 - Managed wheel label display in UI
