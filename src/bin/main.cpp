@@ -378,9 +378,9 @@ extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() {
 	v.PluginName(Plugin::NAME);
 
 	v.UsesAddressLibrary();
+	v.CompatibleVersions({ SKSE::RUNTIME_SSE_LATEST });
 	v.UsesNoStructs();
 
-	v.CompatibleVersions({ SKSE::RUNTIME_SSE_LATEST });
 	return v;
 }();
 
@@ -399,7 +399,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 
 	// Startup banner - ALWAYS log version/author info (not gated)
 	logger::info("{} {} by {} | Build: {}"sv, Plugin::DISPLAY_NAME, Plugin::DISPLAY_VERSION, Plugin::AUTHOR, Plugin::BUILD_TIMESTAMP);
-	logger::info("=== Wheeler - Refined v1.3.3 | 4/26/2026 | External API Enabled | C0kadam ===");
+	logger::info("=== Wheeler - Refined v1.3.4 | 9/22/2026 | External API Enabled | C0kadam ===");
 
 	SKSE::Init(a_skse);
 
