@@ -3988,14 +3988,14 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	return activated;
 }
 
-void Wheeler::QueuePoisonApply(RE::FormID a_poisonFormID)
+bool Wheeler::QueuePoisonApply(RE::FormID a_poisonFormID)
 {
 	if (a_poisonFormID == 0) {
-		return;
+		return false;
 	}
 	if (_pendingPoisonApplyFormID.has_value()) {
 		LOG_WARN(Activation_RTU, "Poison: apply request skipped (already pending): pending={}, new={}", *_pendingPoisonApplyFormID, a_poisonFormID);
-		return;
+		return false;
 	}
 	_pendingPoisonApplyFormID = a_poisonFormID;
 
@@ -4003,6 +4003,7 @@ void Wheeler::QueuePoisonApply(RE::FormID a_poisonFormID)
 	_activateOnCloseFired = true;
 	_forceCloseRequested = true;
 	LOG_INFO(Activation_RTU, "Poison: queued apply after wheel closes (formID={}, state={})", a_poisonFormID, static_cast<int>(_state));
+	return true;
 }
 
 void Wheeler::QueueMiscItemUse(RE::FormID a_miscItemFormID, std::uint16_t a_uniqueID)

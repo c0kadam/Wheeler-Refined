@@ -1,17 +1,17 @@
 #include "bin/Rendering/Drawer.h"
 #include "bin/Utilities/Utils.h"
 #include "bin/Wheeler/Wheeler.h"
+#include "bin/Wheeler/MainWheelDebug.h"
 #include "bin/Texts.h"
 #include "bin/Config.h"
 #include "WheelItemAlchemy.h"
-#include "RE/B/BGSEntryPointPerkEntry.h"
+#include "AlreadyPoisonedReapplyGuardPolicy.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 
-#include <unordered_set>
+#include <vector>
 
 namespace
 {
-	constexpr RE::FormID kTrackedI4DiagFormID = 0x00057A7A;
-
 	static std::int32_t GetPlayerItemCount(RE::AlchemyItem* a_item)
 	{
 		if (!a_item) {
@@ -29,256 +29,290 @@ namespace
 		return it != counts.end() ? it->second : 0;
 	}
 
-	static char ToLowerAscii(char a_ch)
+	template <class Fn>
+	bool InvokeWithSehGuard(Fn&& a_fn)
 	{
-		return a_ch >= 'A' && a_ch <= 'Z' ? static_cast<char>(a_ch - 'A' + 'a') : a_ch;
-	}
-
-	static bool ContainsCaseInsensitive(std::string_view a_text, std::string_view a_needle)
-	{
-		if (a_needle.empty()) {
+#if defined(_MSC_VER)
+		__try {
+			a_fn();
 			return true;
-		}
-		if (a_text.size() < a_needle.size()) {
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			return false;
 		}
-
-		for (size_t pos = 0; pos + a_needle.size() <= a_text.size(); ++pos) {
-			bool matched = true;
-			for (size_t i = 0; i < a_needle.size(); ++i) {
-				if (ToLowerAscii(a_text[pos + i]) != ToLowerAscii(a_needle[i])) {
-					matched = false;
-					break;
-				}
-			}
-			if (matched) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	static const char* SafeName(const RE::TESForm* a_form)
-	{
-		const char* name = a_form ? a_form->GetName() : nullptr;
-		return name ? name : "";
-	}
-
-	static const char* SafeEditorID(const RE::TESForm* a_form)
-	{
-		const char* editorID = a_form ? a_form->GetFormEditorID() : nullptr;
-		return editorID ? editorID : "";
-	}
-
-	static bool IsTargetAlchemyDescriptionDiagItem(RE::AlchemyItem* a_item, std::string_view a_description)
-	{
-		if (!a_item) {
+#else
+		try {
+			a_fn();
+			return true;
+		} catch (...) {
 			return false;
 		}
+#endif
+	}
 
-		const char* name = a_item->GetName();
-		if (name && ContainsCaseInsensitive(name, "frost shield")) {
-			return true;
+	template <class TContainer>
+	bool CopyExtraListsSafe(TContainer* a_extraLists, std::vector<RE::ExtraDataList*>& a_out)
+	{
+		if (!a_extraLists) {
+			return false;
 		}
-
-		return ContainsCaseInsensitive(a_description, "SURV") ||
-		       ContainsCaseInsensitive(a_description, "Cold") ||
-		       ContainsCaseInsensitive(a_description, "Warmth");
+		return InvokeWithSehGuard([&]() {
+			for (auto* extraList : *a_extraLists) {
+				a_out.push_back(extraList);
+			}
+		});
 	}
 
-	static bool IsRelevantDurationEntryPoint(RE::BGSEntryPoint::ENTRY_POINT a_entryPoint)
+	bool TryHasTypeSafe(RE::ExtraDataList* a_list, RE::ExtraDataType a_type, bool& a_outHasType)
 	{
-		using EP = RE::BGSEntryPoint::ENTRY_POINTS;
-		return a_entryPoint == EP::kModSpellDuration ||
-		       a_entryPoint == EP::kModAlchemyEffectiveness ||
-		       a_entryPoint == EP::kModPositiveChemDuration ||
-		       a_entryPoint == EP::kModPotionsCreated;
+		a_outHasType = false;
+		if (!a_list) {
+			return false;
+		}
+		return InvokeWithSehGuard([&]() { a_outHasType = a_list->HasType(a_type); });
 	}
 
-	static const char* GetEntryPointName(RE::BGSEntryPoint::ENTRY_POINT a_entryPoint)
+	template <class T>
+	T* GetByTypeSafe(RE::ExtraDataList* a_list)
 	{
-		using EP = RE::BGSEntryPoint::ENTRY_POINTS;
-		switch (a_entryPoint) {
-		case EP::kModSpellDuration:
-			return "ModSpellDuration";
-		case EP::kModAlchemyEffectiveness:
-			return "ModAlchemyEffectiveness";
-		case EP::kModPositiveChemDuration:
-			return "ModPositiveChemDuration";
-		case EP::kModPotionsCreated:
-			return "ModPotionsCreated";
+		T* result = nullptr;
+		if (!a_list || !InvokeWithSehGuard([&]() { result = a_list->GetByType<T>(); })) {
+			return nullptr;
+		}
+		return result;
+	}
+
+	RE::FormID GetEquippedWeaponFormID(RE::PlayerCharacter* a_player, bool a_leftHand)
+	{
+		if (!a_player) {
+			return 0;
+		}
+		auto* equipped = a_player->GetEquippedObject(a_leftHand);
+		auto* weapon = equipped ? equipped->As<RE::TESObjectWEAP>() : nullptr;
+		return weapon ? weapon->GetFormID() : 0;
+	}
+
+	bool IsSinglePhysicalTwoHandedPoisonTarget(const RE::TESObjectWEAP* a_weapon)
+	{
+		if (!a_weapon) {
+			return false;
+		}
+		switch (a_weapon->GetWeaponType()) {
+		case RE::WEAPON_TYPE::kTwoHandSword:
+		case RE::WEAPON_TYPE::kTwoHandAxe:
+		case RE::WEAPON_TYPE::kBow:
+		case RE::WEAPON_TYPE::kCrossbow:
+			return true;
 		default:
-			return "Other";
+			return false;
 		}
 	}
 
-	static bool IsRelevantActorValue(RE::ActorValue a_av)
+	RE::TESObjectWEAP* ResolveSinglePhysicalTwoHandedScalarTarget(
+		RE::TESObjectWEAP* a_right,
+		RE::TESObjectWEAP* a_left)
 	{
-		return a_av == RE::ActorValue::kAlchemy ||
-		       a_av == RE::ActorValue::kAlchemyModifier ||
-		       a_av == RE::ActorValue::kAlchemyPowerModifier ||
-		       a_av == RE::ActorValue::kRestorationPowerModifier ||
-		       a_av == RE::ActorValue::kAlterationPowerModifier;
+		auto* candidate = IsSinglePhysicalTwoHandedPoisonTarget(a_right) ? a_right :
+		                  IsSinglePhysicalTwoHandedPoisonTarget(a_left) ? a_left : nullptr;
+		if (!candidate || candidate->GetFormID() == 0) {
+			return nullptr;
+		}
+
+		auto* opposite = candidate == a_right ? a_left : a_right;
+		if (opposite && opposite->GetFormID() != candidate->GetFormID()) {
+			return nullptr;
+		}
+		return candidate;
 	}
 
-	static void LogRelevantPerkEntries(RE::PlayerCharacter* a_pc)
+	struct LivePoisonReapplyGuardEvaluation
 	{
-		if (!a_pc) {
+		AlreadyPoisonedReapplyGuardPolicy::Evidence evidence{};
+		AlreadyPoisonedReapplyGuardPolicy::Result result{};
+		std::int32_t singlePhysicalWeaponType = -1;
+	};
+
+	void MarkEvidenceUnreadableForForm(
+		AlreadyPoisonedReapplyGuardPolicy::Evidence& a_evidence,
+		RE::FormID a_formID)
+	{
+		if (a_evidence.targetModel == AlreadyPoisonedReapplyGuardPolicy::TargetModel::kSinglePhysicalTwoHanded &&
+		    a_evidence.singlePhysicalTarget.formID == a_formID) {
+			a_evidence.singlePhysicalTarget.readable = false;
 			return;
 		}
+		if (a_evidence.right.equipped && a_evidence.right.formID == a_formID) {
+			a_evidence.right.readable = false;
+		}
+		if (a_evidence.left.equipped && a_evidence.left.formID == a_formID) {
+			a_evidence.left.readable = false;
+		}
+	}
 
-		using EP = RE::BGSEntryPoint::ENTRY_POINTS;
-		logger::info(
-			"[AlchemyDescDiag] playerEntryPoints ModSpellDuration={} ModAlchemyEffectiveness={} ModPositiveChemDuration={} ModPotionsCreated={}",
-			a_pc->HasPerkEntries(EP::kModSpellDuration) ? 1 : 0,
-			a_pc->HasPerkEntries(EP::kModAlchemyEffectiveness) ? 1 : 0,
-			a_pc->HasPerkEntries(EP::kModPositiveChemDuration) ? 1 : 0,
-			a_pc->HasPerkEntries(EP::kModPotionsCreated) ? 1 : 0);
-
-		auto* handler = RE::TESDataHandler::GetSingleton();
-		if (!handler) {
+	void AccumulateSinglePhysicalWornMember(
+		AlreadyPoisonedReapplyGuardPolicy::HandEvidence& a_target,
+		bool a_wornRight,
+		bool a_wornLeft,
+		bool a_containsExtraPoison)
+	{
+		if (!a_wornRight && !a_wornLeft) {
 			return;
 		}
+		++a_target.targetWornMembers;
+		if (a_containsExtraPoison) {
+			++a_target.poisonedTargetMembers;
+		}
+	}
 
-		int logged = 0;
-		for (auto* perk : handler->GetFormArray<RE::BGSPerk>()) {
-			if (!perk || !a_pc->HasPerk(perk)) {
+	void AccumulateWornMember(
+		AlreadyPoisonedReapplyGuardPolicy::HandEvidence& a_hand,
+		bool a_targetIsLeft,
+		bool a_wornRight,
+		bool a_wornLeft,
+		bool a_containsExtraPoison)
+	{
+		const bool isTarget = a_targetIsLeft ? a_wornLeft : a_wornRight;
+		const bool isOpposite = a_targetIsLeft ? a_wornRight : a_wornLeft;
+		if (isTarget) {
+			++a_hand.targetWornMembers;
+			if (a_containsExtraPoison) {
+				++a_hand.poisonedTargetMembers;
+			}
+		}
+		if (isOpposite) {
+			++a_hand.oppositeWornMembers;
+		}
+	}
+
+	LivePoisonReapplyGuardEvaluation EvaluateLivePoisonReapplyGuard(RE::PlayerCharacter* a_player)
+	{
+		using namespace AlreadyPoisonedReapplyGuardPolicy;
+
+		LivePoisonReapplyGuardEvaluation evaluation{};
+		auto* rightEquipped = a_player ? a_player->GetEquippedObject(false) : nullptr;
+		auto* leftEquipped = a_player ? a_player->GetEquippedObject(true) : nullptr;
+		auto* rightWeapon = rightEquipped ? rightEquipped->As<RE::TESObjectWEAP>() : nullptr;
+		auto* leftWeapon = leftEquipped ? leftEquipped->As<RE::TESObjectWEAP>() : nullptr;
+		evaluation.evidence.right.formID = rightWeapon ? rightWeapon->GetFormID() : 0;
+		evaluation.evidence.left.formID = leftWeapon ? leftWeapon->GetFormID() : 0;
+		evaluation.evidence.right.equipped = evaluation.evidence.right.formID != 0;
+		evaluation.evidence.left.equipped = evaluation.evidence.left.formID != 0;
+
+		if (auto* singlePhysicalTarget = ResolveSinglePhysicalTwoHandedScalarTarget(rightWeapon, leftWeapon)) {
+			evaluation.evidence.targetModel = TargetModel::kSinglePhysicalTwoHanded;
+			evaluation.evidence.singlePhysicalTarget.equipped = true;
+			evaluation.evidence.singlePhysicalTarget.formID = singlePhysicalTarget->GetFormID();
+			evaluation.singlePhysicalWeaponType = static_cast<std::int32_t>(singlePhysicalTarget->GetWeaponType());
+		}
+
+		// Same-FormID dual wield is deliberately rejected before any physical-member
+		// ownership is inferred. A worn marker, never FormID or UID alone, is required.
+		if (evaluation.evidence.targetModel == TargetModel::kPerHand &&
+		    evaluation.evidence.right.equipped && evaluation.evidence.left.equipped &&
+		    evaluation.evidence.right.formID == evaluation.evidence.left.formID) {
+			evaluation.result = Evaluate(evaluation.evidence);
+			return evaluation;
+		}
+
+		RE::TESObjectREFR::InventoryItemMap inventory;
+		if (!Utils::Inventory::TryGetInventorySnapshot(
+				a_player, inventory, "WheelItemAlchemy::AlreadyPoisonedReapplyGuard")) {
+			evaluation.result = Evaluate(evaluation.evidence);
+			return evaluation;
+		}
+
+		if (evaluation.evidence.targetModel == TargetModel::kSinglePhysicalTwoHanded) {
+			evaluation.evidence.singlePhysicalTarget.readable = true;
+		} else {
+			evaluation.evidence.right.readable = evaluation.evidence.right.equipped;
+			evaluation.evidence.left.readable = evaluation.evidence.left.equipped;
+		}
+
+		for (auto& [boundObject, data] : inventory) {
+			if (!boundObject) {
+				continue;
+			}
+			const RE::FormID formID = boundObject->GetFormID();
+			const bool matchesSinglePhysical =
+				evaluation.evidence.targetModel == TargetModel::kSinglePhysicalTwoHanded &&
+				evaluation.evidence.singlePhysicalTarget.formID == formID;
+			const bool matchesRight = evaluation.evidence.targetModel == TargetModel::kPerHand &&
+				evaluation.evidence.right.equipped &&
+				evaluation.evidence.right.formID == formID;
+			const bool matchesLeft = evaluation.evidence.targetModel == TargetModel::kPerHand &&
+				evaluation.evidence.left.equipped &&
+				evaluation.evidence.left.formID == formID;
+			if (!matchesSinglePhysical && !matchesRight && !matchesLeft) {
 				continue;
 			}
 
-			for (auto* entry : perk->perkEntries) {
-				if (!entry || !IsRelevantDurationEntryPoint(entry->GetFunction())) {
+			RE::InventoryEntryData* entry = data.second.get();
+			decltype(entry->extraLists) extraLists = nullptr;
+			if (data.first <= 0 || !entry ||
+			    !InvokeWithSehGuard([&]() { extraLists = entry->extraLists; }) ||
+			    !extraLists) {
+				MarkEvidenceUnreadableForForm(evaluation.evidence, formID);
+				continue;
+			}
+
+			std::vector<RE::ExtraDataList*> extraListSnapshot;
+			if (!CopyExtraListsSafe(extraLists, extraListSnapshot)) {
+				MarkEvidenceUnreadableForForm(evaluation.evidence, formID);
+				continue;
+			}
+
+			for (auto* extraList : extraListSnapshot) {
+				bool hasWorn = false;
+				bool hasWornLeft = false;
+				if (!TryHasTypeSafe(extraList, RE::ExtraDataType::kWorn, hasWorn) ||
+				    !TryHasTypeSafe(extraList, RE::ExtraDataType::kWornLeft, hasWornLeft)) {
+					MarkEvidenceUnreadableForForm(evaluation.evidence, formID);
 					continue;
 				}
 
-				logger::info(
-					"[AlchemyDescDiag] playerPerkEntry perk={:08X} name='{}' editor='{}' entry={} rank={} priority={}",
-					perk->GetFormID(),
-					SafeName(perk),
-					SafeEditorID(perk),
-					GetEntryPointName(entry->GetFunction()),
-					static_cast<int>(entry->GetRank()),
-					static_cast<int>(entry->GetPriority()));
+				// CommonLib's worn truth table treats WornLeft as left authority even if
+				// both markers are present; Worn alone identifies the right member.
+				const bool wornLeft = hasWornLeft;
+				const bool wornRight = hasWorn && !hasWornLeft;
+				if (!wornRight && !wornLeft) {
+					continue;
+				}
 
-				if (++logged >= 32) {
-					logger::info("[AlchemyDescDiag] playerPerkEntry log truncated at 32 entries");
-					return;
+				bool hasPoison = false;
+				if (!TryHasTypeSafe(extraList, RE::ExtraDataType::kPoison, hasPoison) ||
+				    (hasPoison && !GetByTypeSafe<RE::ExtraPoison>(extraList))) {
+					MarkEvidenceUnreadableForForm(evaluation.evidence, formID);
+					continue;
+				}
+
+				if (matchesSinglePhysical) {
+					AccumulateSinglePhysicalWornMember(
+						evaluation.evidence.singlePhysicalTarget, wornRight, wornLeft, hasPoison);
+				} else if (matchesRight) {
+					AccumulateWornMember(
+						evaluation.evidence.right, false, wornRight, wornLeft, hasPoison);
+				}
+				if (matchesLeft) {
+					AccumulateWornMember(
+						evaluation.evidence.left, true, wornRight, wornLeft, hasPoison);
 				}
 			}
 		}
+
+		inventory.clear();
+
+		// The equipped scalar forms must still match the snapshot boundary. Any
+		// concurrent hand transition makes attribution ambiguous and fails closed.
+		if (GetEquippedWeaponFormID(a_player, false) != evaluation.evidence.right.formID ||
+		    GetEquippedWeaponFormID(a_player, true) != evaluation.evidence.left.formID) {
+			evaluation.evidence.equippedStateStable = false;
+		}
+
+		evaluation.result = Evaluate(evaluation.evidence);
+		return evaluation;
 	}
 
-	static void LogRelevantActiveEffects(RE::PlayerCharacter* a_pc)
-	{
-		if (!a_pc) {
-			return;
-		}
-
-		auto* magicTarget = a_pc->AsMagicTarget();
-		auto* activeEffects = magicTarget ? magicTarget->GetActiveEffectList() : nullptr;
-		if (!activeEffects) {
-			logger::info("[AlchemyDescDiag] activeEffects unavailable");
-			return;
-		}
-
-		int logged = 0;
-		for (auto* active : *activeEffects) {
-			if (!active || !active->effect || !active->effect->baseEffect) {
-				continue;
-			}
-
-			auto* baseEffect = active->effect->baseEffect;
-			const bool relevant =
-				IsRelevantActorValue(baseEffect->data.primaryAV) ||
-				IsRelevantActorValue(baseEffect->data.secondaryAV) ||
-				ContainsCaseInsensitive(SafeName(baseEffect), "alchemy") ||
-				ContainsCaseInsensitive(SafeName(baseEffect), "potion") ||
-				ContainsCaseInsensitive(SafeEditorID(baseEffect), "alchemy") ||
-				ContainsCaseInsensitive(SafeEditorID(baseEffect), "potion");
-			if (!relevant) {
-				continue;
-			}
-
-			logger::info(
-				"[AlchemyDescDiag] activeEffect spell={:08X} spellName='{}' effect={:08X} effectName='{}' effectEditor='{}' archetype={} primaryAV={} secondaryAV={} mag={:.2f} dur={:.2f} elapsed={:.2f}",
-				active->spell ? active->spell->GetFormID() : 0,
-				active->spell ? active->spell->GetName() : "",
-				baseEffect->GetFormID(),
-				SafeName(baseEffect),
-				SafeEditorID(baseEffect),
-				static_cast<int>(baseEffect->GetArchetype()),
-				static_cast<int>(baseEffect->data.primaryAV),
-				static_cast<int>(baseEffect->data.secondaryAV),
-				active->magnitude,
-				active->duration,
-				active->elapsedSeconds);
-
-			if (++logged >= 32) {
-				logger::info("[AlchemyDescDiag] activeEffect log truncated at 32 entries");
-				return;
-			}
-		}
-	}
-
-	static void LogAlchemyDescriptionDiagnostic(RE::AlchemyItem* a_item, std::string_view a_cachedDescription)
-	{
-		if (!IsTargetAlchemyDescriptionDiagItem(a_item, a_cachedDescription)) {
-			return;
-		}
-
-		static std::unordered_set<RE::FormID> loggedForms;
-		if (!loggedForms.insert(a_item->GetFormID()).second) {
-			return;
-		}
-
-		RE::BSString rawDescription;
-		Utils::Magic::GetMagicItemDescription(a_item, rawDescription);
-
-		logger::info("[AlchemyDescDiag] item form={:08X} name='{}' editor='{}' rawDesc='{}' cachedDesc='{}'",
-			a_item->GetFormID(),
-			a_item->GetName(),
-			SafeEditorID(a_item),
-			rawDescription.c_str(),
-			a_cachedDescription);
-
-		int idx = 0;
-		for (auto* effect : a_item->effects) {
-			auto* baseEffect = effect ? effect->baseEffect : nullptr;
-			logger::info(
-				"[AlchemyDescDiag] effect[{}] effectForm={:08X} effectName='{}' effectEditor='{}' magnitude={:.2f} duration={} area={} archetype={} primaryAV={} secondaryAV={} noDuration={} powerAffectsDuration={}",
-				idx++,
-				baseEffect ? baseEffect->GetFormID() : 0,
-				SafeName(baseEffect),
-				SafeEditorID(baseEffect),
-				effect ? effect->GetMagnitude() : 0.0f,
-				effect ? effect->GetDuration() : 0,
-				effect ? effect->GetArea() : 0,
-				baseEffect ? static_cast<int>(baseEffect->GetArchetype()) : -1,
-				baseEffect ? static_cast<int>(baseEffect->data.primaryAV) : -1,
-				baseEffect ? static_cast<int>(baseEffect->data.secondaryAV) : -1,
-				baseEffect && baseEffect->data.flags.any(RE::EffectSetting::EffectSettingData::Flag::kNoDuration) ? 1 : 0,
-				baseEffect && baseEffect->data.flags.any(RE::EffectSetting::EffectSettingData::Flag::kPowerAffectsDuration) ? 1 : 0);
-		}
-
-		auto* pc = RE::PlayerCharacter::GetSingleton();
-		if (pc) {
-			auto* avOwner = pc->AsActorValueOwner();
-			logger::info(
-				"[AlchemyDescDiag] playerAV alchemy={:.2f} alchemyMod={:.2f} alchemyPowerMod={:.2f} restorationPowerMod={:.2f} alterationPowerMod={:.2f}",
-				avOwner ? avOwner->GetActorValue(RE::ActorValue::kAlchemy) : 0.0f,
-				avOwner ? avOwner->GetActorValue(RE::ActorValue::kAlchemyModifier) : 0.0f,
-				avOwner ? avOwner->GetActorValue(RE::ActorValue::kAlchemyPowerModifier) : 0.0f,
-				avOwner ? avOwner->GetActorValue(RE::ActorValue::kRestorationPowerModifier) : 0.0f,
-				avOwner ? avOwner->GetActorValue(RE::ActorValue::kAlterationPowerModifier) : 0.0f);
-			LogRelevantPerkEntries(pc);
-			LogRelevantActiveEffects(pc);
-		}
-	}
 }
 
-// The alchemy/potion classification below derives from LamasTinyHUD revision
-// dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited through
-// original Wheeler and subsequently adapted for Wheeler Refined.
 WheelItemAlchemy::WheelItemAlchemy(RE::AlchemyItem* a_alchemyItem)
 {
 	this->_alchemyItem = a_alchemyItem;
@@ -347,23 +381,8 @@ WheelItemAlchemy::WheelItemAlchemy(RE::AlchemyItem* a_alchemyItem)
 		iconType = Texture::icon_image_type::icon_default;
 		this->_alchemyItemType = WheelItemAlchemyType::kDeployable;
 	}
-	if (_formID == kTrackedI4DiagFormID) {
-		logger::info(
-			"[I4Diag:00057A7A][native] name='{}' type={} isFood={} foodFlag={} vendorFood={} vendorPotion={} vendorPoison={} isPoison={} isMedicine={} iconType={}",
-			_alchemyItem->GetName(),
-			static_cast<std::uint32_t>(_alchemyItemType),
-			_alchemyItem->IsFood(),
-			_alchemyItem->data.flags.any(RE::AlchemyItem::AlchemyFlag::kFoodItem),
-			_alchemyItem->HasKeywordString("VendorItemFood"),
-			_alchemyItem->HasKeywordString("VendorItemPotion"),
-			_alchemyItem->HasKeywordString("VendorItemPoison"),
-			_alchemyItem->IsPoison(),
-			_alchemyItem->data.flags.any(RE::AlchemyItem::AlchemyFlag::kMedicine),
-			static_cast<std::uint32_t>(iconType));
-	}
 	this->_texture = Texture::GetIconImage(iconType, this->_alchemyItem);
 	Utils::Magic::GetMagicItemDescription(_alchemyItem, this->_description);
-	LogAlchemyDescriptionDiagnostic(_alchemyItem, this->_description);
 }
 
 void WheelItemAlchemy::DrawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
@@ -433,7 +452,7 @@ void WheelItemAlchemy::ActivateItemPrimary()
 		this->consume();
 		break;
 	case WheelItemAlchemyType::kPoison:
-		this->applyPoison();
+		(void)this->applyPoison();
 		break;
 	case WheelItemAlchemyType::kDeployable:
 	case WheelItemAlchemyType::kNone:
@@ -456,7 +475,7 @@ void WheelItemAlchemy::ActivateItemSecondary()
 		this->consume();
 		break;
 	case WheelItemAlchemyType::kPoison:
-		this->applyPoison();
+		(void)this->applyPoison();
 		break;
 	case WheelItemAlchemyType::kDeployable:
 	case WheelItemAlchemyType::kNone:
@@ -470,6 +489,16 @@ void WheelItemAlchemy::ActivateItemSecondary()
 void WheelItemAlchemy::ActivateItemSpecial()
 {
 	return;
+}
+
+WheelItemActivationResult WheelItemAlchemy::ActivateItemWithResult(WheelItemActivationKind a_kind)
+{
+	if ((a_kind == WheelItemActivationKind::Primary ||
+		 a_kind == WheelItemActivationKind::Secondary) &&
+		_alchemyItemType == WheelItemAlchemyType::kPoison) {
+		return applyPoison();
+	}
+	return WheelItem::ActivateItemWithResult(a_kind);
 }
 
 void WheelItemAlchemy::SerializeIntoJsonObj(nlohmann::json& a_json)
@@ -503,7 +532,7 @@ void WheelItemAlchemy::consume()
 		Utils::NotificationMessage(Texts::GetText(Texts::TextType::AlchemyDynamicIDConsumptionWarning));
 		return;
 	}
-	RE::ActorEquipManager::GetSingleton()->EquipObject(pc, alchemyItem);
+	InventorySnapshotCache::EquipObject(RE::ActorEquipManager::GetSingleton(), pc, alchemyItem);
 	if (Config::WheelBehavior::ClearDepletedConsumables && countBefore <= 1 &&
 		!IsKeepMissingCategoryEnabled(MissingCategory::Consumable) &&
 		_alchemyItemType != WheelItemAlchemyType::kDeployable) {
@@ -511,19 +540,19 @@ void WheelItemAlchemy::consume()
 	}
 }
 
-void WheelItemAlchemy::applyPoison()
+WheelItemActivationResult WheelItemAlchemy::applyPoison()
 {
 	RE::AlchemyItem* alchemyItem = ResolveAlchemyItem();
 	if (!alchemyItem) {
-		return;
+		return WheelItemActivationResult::InvalidTarget;
 	}
 	if (this->_alchemyItemType != WheelItemAlchemyType::kPoison) {
 		logger::warn("WheelItemAlchemy::applyPoison: called for non-poison item");
-		return;
+		return WheelItemActivationResult::InvalidTarget;
 	}
 	RE::PlayerCharacter* pc = RE::PlayerCharacter::GetSingleton();
 	if (!pc) {
-		return;
+		return WheelItemActivationResult::InvalidTarget;
 	}
 
 	// Safety: poison application triggers a follow-up UI flow (choose weapon). If the wheel is still open, Wheeler's input filter
@@ -533,15 +562,53 @@ void WheelItemAlchemy::applyPoison()
 	if (!rhsWeap && !lhsWeap) {
 		Utils::NotificationMessage("Wheeler: Cannot apply poison (no weapon equipped).");
 		logger::warn("Poison: blocked apply (no weapon equipped): {}", alchemyItem->GetName());
-		return;
+		return WheelItemActivationResult::InvalidTarget;
 	}
 
 	const int countBefore = GetPlayerItemCount(alchemyItem);
-	Wheeler::QueuePoisonApply(_formID);
+	if (countBefore <= 0) {
+		logger::warn("Poison: blocked apply (poison unavailable): {:08X}", _formID);
+		return WheelItemActivationResult::InvalidTarget;
+	}
+	const auto guard = EvaluateLivePoisonReapplyGuard(pc);
+	if (!guard.result.AllowsQueue()) {
+		logger::warn(
+			"POISON_REAPPLY_GUARD decision=skip reason={} poisonForm={:08X} targetModel={} weaponType={} physicalForm={:08X} physicalReadable={} physicalMembers={} physicalPoisoned={} equippedStateStable={} rightForm={:08X} rightReadable={} rightTargetMembers={} rightOppositeMembers={} rightPoisoned={} leftForm={:08X} leftReadable={} leftTargetMembers={} leftOppositeMembers={} leftPoisoned={}",
+			AlreadyPoisonedReapplyGuardPolicy::ReasonName(guard.result.reason),
+			_formID,
+			AlreadyPoisonedReapplyGuardPolicy::TargetModelName(guard.evidence.targetModel),
+			guard.singlePhysicalWeaponType,
+			guard.evidence.singlePhysicalTarget.formID,
+			guard.evidence.singlePhysicalTarget.readable ? 1 : 0,
+			guard.evidence.singlePhysicalTarget.targetWornMembers,
+			guard.evidence.singlePhysicalTarget.poisonedTargetMembers,
+			guard.evidence.equippedStateStable ? 1 : 0,
+			guard.evidence.right.formID,
+			guard.evidence.right.readable ? 1 : 0,
+			guard.evidence.right.targetWornMembers,
+			guard.evidence.right.oppositeWornMembers,
+			guard.evidence.right.poisonedTargetMembers,
+			guard.evidence.left.formID,
+			guard.evidence.left.readable ? 1 : 0,
+			guard.evidence.left.targetWornMembers,
+			guard.evidence.left.oppositeWornMembers,
+			guard.evidence.left.poisonedTargetMembers);
+		if (guard.result.decision == AlreadyPoisonedReapplyGuardPolicy::Decision::kBlockAlreadyPoisoned) {
+			Utils::NotificationMessage(Texts::GetText(Texts::TextType::PoisonAlreadyApplied));
+			return WheelItemActivationResult::AlreadyPoisoned;
+		}
+		Utils::NotificationMessage(Texts::GetText(Texts::TextType::PoisonSafeResolutionFailed));
+		return WheelItemActivationResult::UnsafeResolution;
+	}
+	if (!Wheeler::QueuePoisonApply(_formID)) {
+		logger::warn("Poison: queue admission rejected for {:08X}", _formID);
+		return WheelItemActivationResult::Rejected;
+	}
 	if (Config::WheelBehavior::ClearDepletedConsumables && countBefore <= 1 &&
 		!IsKeepMissingCategoryEnabled(MissingCategory::Consumable)) {
 		Wheeler::QueueDepletedConsumablesCleanup();
 	}
+	return WheelItemActivationResult::Succeeded;
 }
 
 bool WheelItemAlchemy::IsDepletedInPlayerInventory()
@@ -563,20 +630,17 @@ RE::AlchemyItem* WheelItemAlchemy::ResolveAlchemyItem()
 	// for dynamic (crafted) items that the game may have destroyed.
 	RE::AlchemyItem* alchemyItem = RE::TESForm::LookupByID<RE::AlchemyItem>(_formID);
 	if (!alchemyItem) {
-		_alchemyItem = nullptr;
 		return nullptr;
 	}
 
 	// For dynamic forms, make sure the player still has at least one copy.
 	if (alchemyItem->IsDynamicForm()) {
 		if (GetPlayerItemCount(alchemyItem) <= 0) {
-			_alchemyItem = nullptr;
 			return nullptr;
 		}
 	}
 
-	_alchemyItem = alchemyItem;
-	return _alchemyItem;
+	return alchemyItem;
 }
 
 const char* WheelItemAlchemy::GetItemName() const
