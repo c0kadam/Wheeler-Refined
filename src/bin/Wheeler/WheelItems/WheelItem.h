@@ -72,6 +72,12 @@ struct EquippedHandsCache
 	std::uint64_t leftSignature = 0;
 };
 
+struct WeaponPresentationHandState
+{
+	bool right = false;
+	bool left = false;
+};
+
 class WheelItem
 {
 public:
@@ -156,6 +162,9 @@ public:
 	{
 		return std::nullopt;
 	}
+	// Draw-only supplement. It is intentionally separate from IsActive and the
+	// authoritative equipped-hand resolver used by activation/gameplay code.
+	virtual WeaponPresentationHandState GetTransientDrawOnlyHandPresentation() const { return {}; }
 	MissingCategory GetMissingCategory() const { return _missingCategory; }
 	void SetMissingCategory(MissingCategory category) { _missingCategory = category; }
 

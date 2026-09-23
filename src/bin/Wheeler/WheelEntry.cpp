@@ -302,7 +302,20 @@ void WheelEntry::drawSlot(ImVec2 a_center, bool a_slotOnRightSide, bool a_hovere
 			Drawer::draw_text(labelX, labelY, "MISSING", C_SKYRIMWHITE, labelSize, labelArgs);
 		}
 		if (Config::MainWheel::ShowHandIndicator) {
-			const SlotHandState handState = SlotHandIndicators::ComputeSlotHandState(_items, _selectedItem, a_imap, a_hands);
+			SlotHandState handState = SlotHandIndicators::ComputeSlotHandState(_items, _selectedItem, a_imap, a_hands);
+			// A transient mutation alias may supplement drawing only. The authoritative
+			// resolver above remains unchanged and continues to own gameplay identity.
+			const auto presentationHand = currentItem->GetTransientDrawOnlyHandPresentation();
+			if (presentationHand.right) {
+				handState.hasRight = true;
+				handState.currentIsRight = true;
+				handState.rightLayerIdx = _selectedItem;
+			}
+			if (presentationHand.left) {
+				handState.hasLeft = true;
+				handState.currentIsLeft = true;
+				handState.leftLayerIdx = _selectedItem;
+			}
 			if (handState.hasLeft || handState.hasRight) {
 				Texture::Image slotBg = Texture::GetIconImage(Texture::icon_image_type::slot_background);
 				const float bgScale = Config::Styling::Item::Slot::BackgroundTexture::Scale;

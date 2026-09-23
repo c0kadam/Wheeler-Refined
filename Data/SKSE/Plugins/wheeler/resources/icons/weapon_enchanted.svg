@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="enchantGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f3dcff"/>
+      <stop offset="0.5" stop-color="#bd72ff"/>
+      <stop offset="1" stop-color="#6f35d8"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 4l5.6 16.4L54 26l-16.4 5.6L32 48l-5.6-16.4L10 26l16.4-5.6z"
+        fill="url(#enchantGlow)" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M49 39l2.7 7.3L59 49l-7.3 2.7L49 59l-2.7-7.3L39 49l7.3-2.7z"
+        fill="#f7e9ff" stroke="#9d55ea" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>
