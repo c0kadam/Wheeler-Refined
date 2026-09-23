@@ -1799,6 +1799,15 @@ std::shared_ptr<WheelItem> WheelItemFactory::MakeWheelItemFromJsonObject(nlohman
 		return nullptr;
 	}
 	std::string type = a_json["type"];
+	if (type == WheelItemWeapon::ITEM_TYPE_STR &&
+		(a_json.contains("stableIdentityVersion") ||
+			a_json.contains("stableIdentity") ||
+			a_json.contains("wheelerOpaqueCanonicalProvenance"))) {
+		LOG_WARN(
+			Serialization,
+			"Deserialize: unsupported weapon persistence payload encountered; skipping");
+		return nullptr;
+	}
 	RE::FormID savedFormID = a_json["formID"].get<RE::FormID>();
 	const std::uint16_t uniqueID = ReadUniqueID(a_json);
 	const bool formLevelStack = ReadFormLevelStack(a_json);
@@ -1846,6 +1855,9 @@ std::shared_ptr<WheelItem> WheelItemFactory::MakeWheelItemFromJsonObject(nlohman
 				LOG_INFO(Serialization, "Deserialize: WheelItemWeapon using form-level stack form {:08X}", formID);
 			}
 			std::shared_ptr<WheelItemWeapon> wheelItemweap = WheelItemMutable::CreateWheelItemMutable<WheelItemWeapon>(weap, uniqueID);
+			if (a_json.contains("logicalRowSignature") && a_json["logicalRowSignature"].is_string()) {
+				wheelItemweap->RestoreLogicalRowSignature(a_json["logicalRowSignature"].get<std::string>());
+			}
 			wheelItemweap->SetMissingCategory(category);
 			return wheelItemweap;
 		} else if (type == WheelItemArmor::ITEM_TYPE_STR) {

@@ -2,11 +2,13 @@
 #include "bin/Rendering/Drawer.h"
 #include "bin/Utilities/Utils.h"
 #include "bin/Utilities/ActorVirtualCompat.h"
+#include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Config.h"
 #include "bin/Wheeler/MainWheelDebug.h"
 #include "bin/Wheeler/TransformWheelManager.h"
 #include "bin/Wheeler/Wheeler.h"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <string_view>
@@ -180,13 +182,298 @@ namespace
 		return (std::max)(count, 1);
 	}
 
+	bool TryGetExtraListCount(RE::ExtraDataList* a_list, int& a_outCount)
+	{
+		a_outCount = 0;
+		if (!a_list) {
+			return std::nullopt;
+		}
+		int count = 0;
+		if (!InvokeWithSehGuard([&]() { count = a_list->GetCount(); }) || count <= 0) {
+			return std::nullopt;
+		}
+		a_outCount = count;
+		return true;
+	}
+
+	struct LogicalRowMember
+	{
+		RE::ExtraDataList* extraData = nullptr;
+		std::uint16_t uniqueID = 0;
+		int count = 0;
+		bool wornRight = false;
+		bool wornLeft = false;
+		bool wornStateReadable = false;
+		bool countReadable = false;
+		bool signatureReadable = false;
+		bool signatureMatch = false;
+		std::string signature;
+	};
+
+	std::string BuildLogicalRowSignature(RE::ExtraDataList* a_extraData)
+	{
+		if (!a_extraData) {
+			return "none";
+		}
+
+		auto* health = GetByTypeSafe<RE::ExtraHealth>(a_extraData);
+		auto* enchantment = GetByTypeSafe<RE::ExtraEnchantment>(a_extraData);
+		auto* charge = GetByTypeSafe<RE::ExtraCharge>(a_extraData);
+		auto* poison = GetByTypeSafe<RE::ExtraPoison>(a_extraData);
+		auto* text = GetByTypeSafe<RE::ExtraTextDisplayData>(a_extraData);
+		auto* ownership = GetByTypeSafe<RE::ExtraOwnership>(a_extraData);
+		auto* hotkey = GetByTypeSafe<RE::ExtraHotkey>(a_extraData);
+
+		const auto enchantmentFormID = enchantment && enchantment->enchantment ? enchantment->enchantment->GetFormID() : 0;
+		const auto poisonFormID = poison && poison->poison ? poison->poison->GetFormID() : 0;
+		const auto ownerFormID = ownership && ownership->owner ? ownership->owner->GetFormID() : 0;
+		const auto hotkeyValue = hotkey ? static_cast<int>(hotkey->hotkey.underlying()) : -2;
+		const char* displayName = text ? text->displayName.c_str() : "";
+
+		return fmt::format(
+			"health={}:{};enchantment={}:{:08X}:{}:{};charge={}:{};poison={}:{:08X}:{};name={}:{};temper={};owner={}:{:08X};hotkey={}",
+			health ? 1 : 0,
+			health ? health->health : 0.0F,
+			enchantment ? 1 : 0,
+			enchantmentFormID,
+			enchantment ? enchantment->charge : 0,
+			enchantment && enchantment->removeOnUnequip ? 1 : 0,
+			charge ? 1 : 0,
+			charge ? charge->charge : 0.0F,
+			poison ? 1 : 0,
+			poisonFormID,
+			poison ? poison->count : 0,
+			text ? 1 : 0,
+			displayName ? displayName : "",
+			text ? text->temperFactor : 0.0F,
+			ownership ? 1 : 0,
+			ownerFormID,
+			hotkeyValue);
+	}
+
+	const std::string& GetPlainLogicalRowSignature()
+	{
+		static const std::string signature = fmt::format(
+			"health={}:{};enchantment={}:{:08X}:{}:{};charge={}:{};poison={}:{:08X}:{};name={}:{};temper={};owner={}:{:08X};hotkey={}",
+			0, 0.0F,
+			0, 0U, 0, 0,
+			0, 0.0F,
+			0, 0U, 0,
+			0, "", 0.0F,
+			0, 0U,
+			-2);
+		return signature;
+	}
+
+	bool TryBuildReadableLogicalRowSignature(RE::ExtraDataList* a_extraData, std::string& a_outSignature)
+	{
+		a_outSignature.clear();
+		if (!a_extraData) {
+			return std::nullopt;
+		}
+
+		constexpr std::array signatureTypes{
+			RE::ExtraDataType::kHealth,
+			RE::ExtraDataType::kEnchantment,
+			RE::ExtraDataType::kCharge,
+			RE::ExtraDataType::kPoison,
+			RE::ExtraDataType::kTextDisplayData,
+			RE::ExtraDataType::kOwnership,
+			RE::ExtraDataType::kHotkey
+		};
+		for (const auto type : signatureTypes) {
+			bool hasType = false;
+			if (!TryHasTypeSafe(a_extraData, type, hasType)) {
+				return false;
+			}
+			if (!hasType) {
+				continue;
+			}
+			switch (type) {
+			case RE::ExtraDataType::kHealth:
+				if (!GetByTypeSafe<RE::ExtraHealth>(a_extraData)) return false;
+				break;
+		bool foundRequestedHandWorn = false;
+			case RE::ExtraDataType::kEnchantment:
+				if (!GetByTypeSafe<RE::ExtraEnchantment>(a_extraData)) return false;
+				break;
+			case RE::ExtraDataType::kCharge:
+				if (!GetByTypeSafe<RE::ExtraCharge>(a_extraData)) return false;
+				break;
+			case RE::ExtraDataType::kPoison:
+				if (!GetByTypeSafe<RE::ExtraPoison>(a_extraData)) return false;
+				break;
+			case RE::ExtraDataType::kTextDisplayData:
+				if (!GetByTypeSafe<RE::ExtraTextDisplayData>(a_extraData)) return false;
+				break;
+			case RE::ExtraDataType::kOwnership:
+				if (!GetByTypeSafe<RE::ExtraOwnership>(a_extraData)) return false;
+				break;
+			case RE::ExtraDataType::kHotkey:
+				if (!GetByTypeSafe<RE::ExtraHotkey>(a_extraData)) return false;
+				break;
+			default:
+				return false;
+			}
+		}
+		return InvokeWithSehGuard([&]() {
+			auto* health = a_extraData->GetByType<RE::ExtraHealth>();
+			auto* enchantment = a_extraData->GetByType<RE::ExtraEnchantment>();
+			auto* charge = a_extraData->GetByType<RE::ExtraCharge>();
+			auto* poison = a_extraData->GetByType<RE::ExtraPoison>();
+			auto* text = a_extraData->GetByType<RE::ExtraTextDisplayData>();
+			auto* ownership = a_extraData->GetByType<RE::ExtraOwnership>();
+			auto* hotkey = a_extraData->GetByType<RE::ExtraHotkey>();
+			const auto enchantmentFormID =
+				enchantment && enchantment->enchantment ? enchantment->enchantment->GetFormID() : 0;
+			const auto poisonFormID = poison && poison->poison ? poison->poison->GetFormID() : 0;
+			const auto ownerFormID = ownership && ownership->owner ? ownership->owner->GetFormID() : 0;
+			const auto hotkeyValue = hotkey ? static_cast<int>(hotkey->hotkey.underlying()) : -2;
+			const char* displayName = text ? text->displayName.c_str() : "";
+			a_outSignature = fmt::format(
+				"health={}:{};enchantment={}:{:08X}:{}:{};charge={}:{};poison={}:{:08X}:{};name={}:{};temper={};owner={}:{:08X};hotkey={}",
+				health ? 1 : 0,
+				health ? health->health : 0.0F,
+				enchantment ? 1 : 0,
+				enchantmentFormID,
+				enchantment ? enchantment->charge : 0,
+				enchantment && enchantment->removeOnUnequip ? 1 : 0,
+				charge ? 1 : 0,
+				charge ? charge->charge : 0.0F,
+				poison ? 1 : 0,
+				poisonFormID,
+				poison ? poison->count : 0,
+				text ? 1 : 0,
+				displayName ? displayName : "",
+				text ? text->temperFactor : 0.0F,
+				ownership ? 1 : 0,
+				ownerFormID,
+				hotkeyValue);
+		});
+	}
+
+	std::vector<LogicalRowMember> CollectLogicalRowMembers(
+		RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::FormID a_formID,
+		std::uint16_t a_uniqueID,
+		std::string_view a_logicalRowSignature)
+	{
+		std::vector<LogicalRowMember> members;
+		if (a_formID == 0 || a_uniqueID == 0) {
+			return members;
+		}
+
+		auto* entry = FindInventoryEntryByForm(a_inv, a_formID);
+		if (!entry || !entry->extraLists) {
+			return members;
+		}
+
+		std::vector<RE::ExtraDataList*> extraListSnapshot;
+		if (!CopyExtraListsSafe(entry->extraLists, extraListSnapshot)) {
+			return members;
+		}
+
+		for (auto* extraData : extraListSnapshot) {
+			if (!extraData) {
+				continue;
+			}
+
+			auto* uniqueData = GetByTypeSafe<RE::ExtraUniqueID>(extraData);
+			if (!uniqueData || uniqueData->uniqueID != a_uniqueID) {
+				continue;
+			}
+
+			LogicalRowMember member;
+			member.extraData = extraData;
+			member.uniqueID = uniqueData->uniqueID;
+			member.count = GetExtraListCountSafe(extraData);
+			const bool readWorn = TryHasTypeSafe(extraData, RE::ExtraDataType::kWorn, member.wornRight);
+			const bool readWornLeft = TryHasTypeSafe(extraData, RE::ExtraDataType::kWornLeft, member.wornLeft);
+			member.wornStateReadable = readWorn && readWornLeft;
+			member.signature = BuildLogicalRowSignature(extraData);
+			member.signatureMatch = a_logicalRowSignature.empty() || member.signature == a_logicalRowSignature;
+			members.push_back(std::move(member));
+		}
+
+		return members;
+	}
+
+	std::string CaptureLogicalRowSignature(RE::TESObjectWEAP* a_weapon, std::uint16_t a_uniqueID)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player || !a_weapon || a_uniqueID == 0) {
+			return {};
+		}
+
+		auto inv = player->GetInventory();
+		auto members = CollectLogicalRowMembers(inv, a_weapon->GetFormID(), a_uniqueID, {});
+		return members.empty() ? std::string{} : members.front().signature;
+	}
+
+	struct LogicalRowResolution
+	{
+		RE::ExtraDataList* chosen = nullptr;
+		int logicalCount = 0;
+		std::vector<LogicalRowMember> members;
+	};
+
+	LogicalRowResolution ResolveLogicalRowMember(
+		RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::FormID a_formID,
+		std::uint16_t a_uniqueID,
+		std::string_view a_logicalRowSignature,
+		bool a_targetRight,
+		bool a_forUnequip)
+	{
+		LogicalRowResolution result;
+		result.members = CollectLogicalRowMembers(a_inv, a_formID, a_uniqueID, a_logicalRowSignature);
+		for (const auto& member : result.members) {
+			result.logicalCount += member.count;
+		}
+
+		auto choose = [&](auto&& a_predicate) {
+			if (result.chosen) {
+				return;
+			}
+			for (const auto& member : result.members) {
+				if (a_predicate(member)) {
+					result.chosen = member.extraData;
+					return;
+				}
+			}
+		};
+
+		auto wornInTargetHand = [&](const LogicalRowMember& a_member) {
+			return a_member.wornStateReadable &&
+			       (a_targetRight ? (a_member.wornRight && !a_member.wornLeft) : a_member.wornLeft);
+		};
+		auto completelyUnworn = [](const LogicalRowMember& a_member) {
+			return a_member.wornStateReadable && !a_member.wornRight && !a_member.wornLeft;
+		};
+
+		if (a_forUnequip) {
+			choose([&](const auto& member) { return member.signatureMatch && wornInTargetHand(member); });
+			choose([&](const auto& member) { return wornInTargetHand(member); });
+		} else {
+			choose([&](const auto& member) { return member.signatureMatch && completelyUnworn(member); });
+			choose([&](const auto& member) { return completelyUnworn(member); });
+			choose([&](const auto& member) { return member.signatureMatch && wornInTargetHand(member); });
+			choose([&](const auto& member) { return wornInTargetHand(member); });
+		}
+
+		return result;
+	}
+
 	bool IsPerInstanceModifiedExtraData(RE::ExtraDataList* a_extraData)
 	{
 		if (!a_extraData) {
 			return false;
 		}
 		return HasTypeSafe(a_extraData, RE::ExtraDataType::kEnchantment) ||
-		       HasTypeSafe(a_extraData, RE::ExtraDataType::kPoison);
+		       HasTypeSafe(a_extraData, RE::ExtraDataType::kPoison) ||
+		       HasTypeSafe(a_extraData, RE::ExtraDataType::kHealth) ||
+		       HasTypeSafe(a_extraData, RE::ExtraDataType::kCharge) ||
+		       GetByTypeSafe<RE::ExtraTextDisplayData>(a_extraData) != nullptr;
 	}
 
 	int GetSameFormInventoryCount(const RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon);
@@ -235,6 +522,91 @@ namespace
 		return a_leftHand ? hasWornLeft : (hasWorn && !hasWornLeft);
 	}
 
+	enum class SameFormIndicatorTopology
+	{
+		kUnambiguous,
+		kMixedLogicalRows,
+		kUnknown
+	};
+
+	SameFormIndicatorTopology ClassifySameFormIndicatorTopology(
+		RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::TESObjectWEAP* a_weapon)
+	{
+		if (!a_weapon) {
+			return SameFormIndicatorTopology::kUnknown;
+		}
+
+		const int sameFormCount = GetSameFormInventoryCount(a_inv, a_weapon);
+		if (sameFormCount == 1) {
+			return SameFormIndicatorTopology::kUnambiguous;
+		}
+		if (sameFormCount <= 0) {
+			return SameFormIndicatorTopology::kUnknown;
+		}
+
+		RE::InventoryEntryData* entry = FindInventoryEntryByForm(a_inv, a_weapon->GetFormID());
+		if (!entry || !entry->extraLists) {
+			return SameFormIndicatorTopology::kUnknown;
+		}
+
+		std::vector<RE::ExtraDataList*> extraListSnapshot;
+		if (!CopyExtraListsSafe(entry->extraLists, extraListSnapshot)) {
+			return SameFormIndicatorTopology::kUnknown;
+		}
+
+		for (auto* extraList : extraListSnapshot) {
+			if (IsInstanceSpecificIndicatorExtraData(extraList)) {
+				return SameFormIndicatorTopology::kMixedLogicalRows;
+			}
+		}
+		return SameFormIndicatorTopology::kUnambiguous;
+	}
+
+	bool MatchesLogicalRowInHandFromInventory(
+		RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::TESObjectWEAP* a_weapon,
+		std::string_view a_logicalRowSignature,
+		bool a_cleanSentinel,
+		bool a_leftHand)
+	{
+		if (!a_weapon) {
+			return false;
+		}
+
+		RE::InventoryEntryData* entry = FindInventoryEntryByForm(a_inv, a_weapon->GetFormID());
+		if (!entry || !entry->extraLists) {
+			return false;
+		}
+
+		std::vector<RE::ExtraDataList*> extraListSnapshot;
+		if (!CopyExtraListsSafe(entry->extraLists, extraListSnapshot)) {
+			return false;
+		}
+
+		if (!a_cleanSentinel && a_logicalRowSignature.empty()) {
+			return false;
+		}
+
+		for (auto* extraList : extraListSnapshot) {
+			if (!extraList || !MatchesRequestedHandWorn(extraList, a_leftHand)) {
+				continue;
+			}
+
+			if (a_cleanSentinel) {
+				if (!IsInstanceSpecificIndicatorExtraData(extraList)) {
+					return true;
+				}
+				continue;
+			}
+
+			if (BuildLogicalRowSignature(extraList) == a_logicalRowSignature) {
+				return true;
+			}
+		}
+
+		return false;
+	}
 	bool HasMixedSameFormIndicatorSiblings(RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon)
 	{
 		if (!a_weapon || GetSameFormInventoryCount(a_inv, a_weapon) < 2) {
@@ -266,17 +638,17 @@ namespace
 		bool a_leftHand)
 	{
 		if (!a_weapon) {
-			return std::nullopt;
+			return false;
 		}
 
 		RE::InventoryEntryData* entry = FindInventoryEntryByForm(a_inv, a_weapon->GetFormID());
 		if (!entry || !entry->extraLists) {
-			return std::nullopt;
+			return false;
 		}
 
 		std::vector<RE::ExtraDataList*> extraListSnapshot;
 		if (!CopyExtraListsSafe(entry->extraLists, extraListSnapshot)) {
-			return std::nullopt;
+			return false;
 		}
 
 		if (a_handSignature != 0) {
@@ -292,7 +664,6 @@ namespace
 			return std::nullopt;
 		}
 
-		bool foundRequestedHandWorn = false;
 		for (auto* extraList : extraListSnapshot) {
 			if (!extraList || !MatchesRequestedHandWorn(extraList, a_leftHand)) {
 				continue;
@@ -311,55 +682,57 @@ namespace
 		return std::nullopt;
 	}
 
-	int GetSameFormInventoryCount(const RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon)
+	struct LogicalRowInventoryState
 	{
-		if (!a_weapon) {
-			return 0;
+		int count = 0;
+		bool hasPerInstanceModifiedMember = false;
+	};
+
+	LogicalRowInventoryState GetLogicalRowInventoryState(
+		const RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::TESObjectWEAP* a_weapon,
+		std::uint16_t a_uniqueID)
+	{
+		if (!a_weapon || a_uniqueID == 0) {
+			return {};
 		}
 
 		const RE::FormID formID = a_weapon->GetFormID();
-		int totalCount = 0;
 		for (const auto& [boundObj, data] : a_inv) {
-			if (!boundObj || boundObj->GetFormID() != formID) {
+			if (!boundObj || boundObj->GetFormID() != formID || !data.second || !data.second->extraLists) {
 				continue;
 			}
-			totalCount += data.first;
+
+			std::vector<RE::ExtraDataList*> extraListSnapshot;
+			if (!CopyExtraListsSafe(data.second->extraLists, extraListSnapshot)) {
+				return {};
+			}
+
+			LogicalRowInventoryState state;
+			for (auto* extraData : extraListSnapshot) {
+				auto* uniqueData = GetByTypeSafe<RE::ExtraUniqueID>(extraData);
+				if (uniqueData && uniqueData->uniqueID == a_uniqueID) {
+					state.count += GetExtraListCountSafe(extraData);
+					state.hasPerInstanceModifiedMember =
+						state.hasPerInstanceModifiedMember || IsPerInstanceModifiedExtraData(extraData);
+				}
+			}
+			return state;
 		}
-		return totalCount;
+
+		return {};
 	}
 
 	bool ShouldBypassInstanceHandResolution(
 		const RE::TESObjectREFR::InventoryItemMap& a_inv,
 		RE::TESObjectWEAP* a_weapon,
-		RE::ExtraDataList* a_extraData)
+		std::uint16_t a_uniqueID)
 	{
-		return a_weapon &&
-		       IsPerInstanceModifiedExtraData(a_extraData) &&
-		       GetSameFormInventoryCount(a_inv, a_weapon) > 1;
-	}
-
-	Utils::Inventory::Hand GetEquippedHandByForm(RE::PlayerCharacter* a_player, RE::TESObjectWEAP* a_weapon)
-	{
-		if (!a_player || !a_weapon) {
-			return Utils::Inventory::Hand::None;
+		if (!a_weapon || a_uniqueID == 0) {
+			return false;
 		}
-
-		const RE::FormID formID = a_weapon->GetFormID();
-		const bool leftMatch = a_player->GetEquippedObject(true) &&
-		                       a_player->GetEquippedObject(true)->GetFormID() == formID;
-		const bool rightMatch = a_player->GetEquippedObject(false) &&
-		                        a_player->GetEquippedObject(false)->GetFormID() == formID;
-
-		if (leftMatch && rightMatch) {
-			return Utils::Inventory::Hand::Both;
-		}
-		if (leftMatch) {
-			return Utils::Inventory::Hand::Left;
-		}
-		if (rightMatch) {
-			return Utils::Inventory::Hand::Right;
-		}
-		return Utils::Inventory::Hand::None;
+		const auto state = GetLogicalRowInventoryState(a_inv, a_weapon, a_uniqueID);
+		return state.hasPerInstanceModifiedMember && state.count > 1;
 	}
 
 	std::uint64_t ResolveEquippedHandSignature(RE::Actor* a_actor, bool a_leftHand, RE::FormID a_expectedFormID)
@@ -594,7 +967,7 @@ namespace
 		if (!pc || !pc->Is3DLoaded()) {
 			return;
 		}
-		InvokeWithSehGuard([&]() { pc->DrawWeaponMagicHands(true); });
+		InvokeWithSehGuard([&]() { ActorVirtualCompat::DrawWeaponMagicHands(pc, true); });
 		logger::info(
 			"IWSCompat: requested draw restore after {} formId={:08X} uniqueID={} targetHand={}",
 			a_reason ? a_reason : "abort",
@@ -711,7 +1084,7 @@ namespace
 			replacingPending ? 1 : 0);
 
 		if (IsWeaponDrawnSafe(a_player)) {
-			InvokeWithSehGuard([&]() { a_player->DrawWeaponMagicHands(false); });
+			InvokeWithSehGuard([&]() { ActorVirtualCompat::DrawWeaponMagicHands(a_player, false); });
 			g_pendingIWSExactWeaponTransfer.lastSheathePulse = now;
 		}
 		return true;
@@ -744,7 +1117,7 @@ namespace
 
 			if (g_pendingIWSExactWeaponTransfer.lastSheathePulse == IWSClock::time_point{} ||
 				now - g_pendingIWSExactWeaponTransfer.lastSheathePulse >= kIWSCompatSheathePulseDelay) {
-				InvokeWithSehGuard([&]() { pc->DrawWeaponMagicHands(false); });
+				InvokeWithSehGuard([&]() { ActorVirtualCompat::DrawWeaponMagicHands(pc, false); });
 				g_pendingIWSExactWeaponTransfer.lastSheathePulse = now;
 			}
 			g_pendingIWSExactWeaponTransfer.notDrawnSince = {};
@@ -784,7 +1157,7 @@ namespace
 		const Utils::Inventory::Hand targetHand = GetTargetHand(g_pendingIWSExactWeaponTransfer.toRight);
 		if (sourceHand == targetHand) {
 			if (g_pendingIWSExactWeaponTransfer.restoreDrawn) {
-				InvokeWithSehGuard([&]() { pc->DrawWeaponMagicHands(true); });
+				InvokeWithSehGuard([&]() { ActorVirtualCompat::DrawWeaponMagicHands(pc, true); });
 			}
 			ClearPendingIWSExactWeaponTransfer("already_target_hand");
 			return;
@@ -819,7 +1192,9 @@ namespace
 			GetHandName(sourceHand),
 			GetHandName(targetHand));
 
-		aeMan->UnequipObject(pc, weapon, nullptr, 1, sourceSlot, false, true, true);
+		invState.exactExtraData = nullptr;
+		inv.clear();
+		InventorySnapshotCache::UnequipObject(aeMan, pc, weapon, nullptr, 1, sourceSlot, false, true, true);
 
 		RE::TESObjectREFR::InventoryItemMap postUnequipInv = pc->GetInventory();
 		ExactWeaponInventoryState postUnequipState = ResolveExactWeaponInventoryState(
@@ -841,13 +1216,514 @@ namespace
 			return;
 		}
 
-		aeMan->EquipObject(pc, weapon, postUnequipState.exactExtraData, 1, targetSlot);
+		InventorySnapshotCache::EquipObject(aeMan, pc, weapon, postUnequipState.exactExtraData, 1, targetSlot);
+		postUnequipState.exactExtraData = nullptr;
+		postUnequipInv.clear();
 
 		if (g_pendingIWSExactWeaponTransfer.restoreDrawn) {
-			InvokeWithSehGuard([&]() { pc->DrawWeaponMagicHands(true); });
+			InvokeWithSehGuard([&]() { ActorVirtualCompat::DrawWeaponMagicHands(pc, true); });
 		}
 
 		ClearPendingIWSExactWeaponTransfer("completed");
+	}
+}
+
+namespace LegacyWeaponRestore
+{
+	namespace
+	{
+		LegacyWeaponRestorePolicy::Topology GetRestoreTopology(
+			RE::TESObjectREFR::InventoryItemMap& a_inventory,
+			RE::TESObjectWEAP* a_weapon,
+			int a_sameFormCount)
+		{
+			using Topology = LegacyWeaponRestorePolicy::Topology;
+			switch (ClassifySameFormIndicatorTopology(a_inventory, a_weapon)) {
+			case SameFormIndicatorTopology::kUnambiguous:
+				return Topology::Unambiguous;
+			case SameFormIndicatorTopology::kMixedLogicalRows:
+				return Topology::MixedLogicalRows;
+			case SameFormIndicatorTopology::kUnknown:
+			default:
+				break;
+			}
+
+			// A raw form-level stack with no extra lists is positively plain even
+			// when it contains multiple equivalent copies.
+			if (a_sameFormCount > 0) {
+				auto* entry = FindInventoryEntryByForm(a_inventory, a_weapon->GetFormID());
+				if (entry && !entry->extraLists) {
+					return Topology::Unambiguous;
+				}
+			}
+			return Topology::Unknown;
+		}
+
+		struct LogicalRowMemberSnapshot
+		{
+			std::vector<LogicalRowMember> members;
+			bool enumerationReadable = false;
+			int unreadableMembers = 0;
+		};
+
+		LogicalRowMemberSnapshot CollectAllMembers(
+			RE::TESObjectREFR::InventoryItemMap& a_inventory,
+			RE::FormID a_formID)
+		{
+			LogicalRowMemberSnapshot snapshot;
+			auto* entry = FindInventoryEntryByForm(a_inventory, a_formID);
+			if (!entry) {
+				return snapshot;
+			}
+			if (!entry->extraLists) {
+				snapshot.enumerationReadable = true;
+				return snapshot;
+			}
+
+			std::vector<RE::ExtraDataList*> extraLists;
+			if (!CopyExtraListsSafe(entry->extraLists, extraLists)) {
+				return snapshot;
+			}
+			snapshot.enumerationReadable = true;
+			for (auto* extraData : extraLists) {
+				if (!extraData) {
+					++snapshot.unreadableMembers;
+					continue;
+				}
+				LogicalRowMember member;
+				member.extraData = extraData;
+				if (auto* uniqueData = GetByTypeSafe<RE::ExtraUniqueID>(extraData)) {
+					member.uniqueID = uniqueData->uniqueID;
+				}
+				member.countReadable = TryGetExtraListCount(extraData, member.count);
+				const bool readWorn = TryHasTypeSafe(extraData, RE::ExtraDataType::kWorn, member.wornRight);
+				const bool readWornLeft = TryHasTypeSafe(extraData, RE::ExtraDataType::kWornLeft, member.wornLeft);
+				member.wornStateReadable = readWorn && readWornLeft;
+				member.signatureReadable = TryBuildReadableLogicalRowSignature(extraData, member.signature);
+				snapshot.members.push_back(std::move(member));
+			}
+			return snapshot;
+		}
+
+		bool IsWornInHand(const LogicalRowMember& a_member, bool a_leftHand)
+		{
+			return a_member.wornStateReadable &&
+			       (a_leftHand ? a_member.wornLeft : (a_member.wornRight && !a_member.wornLeft));
+		}
+
+		bool IsEligibleForEquip(const LogicalRowMember& a_member, bool a_leftHand)
+		{
+			return a_member.wornStateReadable &&
+			       ((!a_member.wornRight && !a_member.wornLeft) || IsWornInHand(a_member, a_leftHand));
+		}
+
+		enum class GroupProofFailure
+		{
+			None,
+			UnreadablePopulation,
+			ConflictingLogicalRows,
+			WornWeaponNotAttributable
+		};
+
+		struct GroupEquivalentProof
+		{
+			LegacyWeaponRestorePolicy::GroupProofEvidence evidence;
+			std::string logicalRowSignature;
+			std::optional<std::size_t> eligibleMemberIndex;
+			GroupProofFailure failure = GroupProofFailure::UnreadablePopulation;
+
+			[[nodiscard]] bool IsValid(bool a_requireWornAttribution) const noexcept
+			{
+				return LegacyWeaponRestorePolicy::ProvesGroupEquivalent(
+					evidence, a_requireWornAttribution);
+			}
+		};
+
+		GroupEquivalentProof BuildGroupEquivalentProof(
+			const LogicalRowMemberSnapshot& a_snapshot,
+			int a_sameFormCount,
+			RE::FormID a_formID,
+			bool a_leftHand,
+			bool a_requireWornAttribution)
+		{
+			GroupEquivalentProof proof;
+			proof.evidence.sameFormCount = a_sameFormCount;
+			proof.evidence.unreadableMembers = a_snapshot.unreadableMembers;
+			if (!a_snapshot.enumerationReadable || a_sameFormCount <= 1) {
+				return proof;
+			}
+
+			std::string commonSignature;
+			for (std::size_t index = 0; index < a_snapshot.members.size(); ++index) {
+				const auto& member = a_snapshot.members[index];
+				if (!member.countReadable || !member.wornStateReadable || !member.signatureReadable) {
+					++proof.evidence.unreadableMembers;
+					continue;
+				}
+				if (member.count > a_sameFormCount - proof.evidence.representedCount) {
+					++proof.evidence.unreadableMembers;
+					continue;
+				}
+				proof.evidence.representedCount += member.count;
+				if (commonSignature.empty()) {
+					commonSignature = member.signature;
+					proof.evidence.distinctLogicalRows = 1;
+				} else if (commonSignature != member.signature) {
+					proof.evidence.distinctLogicalRows = 2;
+				}
+				if (IsEligibleForEquip(member, a_leftHand)) {
+					proof.evidence.eligibleLogicalCount += member.count;
+					if (!proof.eligibleMemberIndex.has_value()) {
+						proof.eligibleMemberIndex = index;
+					}
+				} else if ((member.wornRight || member.wornLeft) && member.count > 1) {
+					// One logical unit is occupied by the opposite hand. Any remaining
+					// fully-accounted units in the same equivalent row remain eligible,
+					// but require the existing proven form-level group authority.
+					proof.evidence.eligibleLogicalCount += member.count - 1;
+				}
+			}
+
+			if (proof.evidence.representedCount <= a_sameFormCount) {
+				proof.evidence.implicitCount = a_sameFormCount - proof.evidence.representedCount;
+			}
+			proof.evidence.eligibleLogicalCount += proof.evidence.implicitCount;
+			if (commonSignature.empty() && proof.evidence.implicitCount > 0) {
+				commonSignature = GetPlainLogicalRowSignature();
+				proof.evidence.distinctLogicalRows = 1;
+			}
+			proof.evidence.implicitMembersCompatible =
+				proof.evidence.implicitCount == 0 || commonSignature == GetPlainLogicalRowSignature();
+
+			if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+				if (auto* equipped = player->GetEquippedObject(a_leftHand)) {
+					proof.evidence.wornWeaponAttributable = equipped->GetFormID() == a_formID;
+				}
+			}
+			proof.logicalRowSignature = std::move(commonSignature);
+
+			if (proof.evidence.unreadableMembers != 0 ||
+				proof.evidence.representedCount + proof.evidence.implicitCount != a_sameFormCount) {
+				proof.failure = GroupProofFailure::UnreadablePopulation;
+			} else if (proof.evidence.distinctLogicalRows != 1 ||
+				!proof.evidence.implicitMembersCompatible) {
+				proof.failure = GroupProofFailure::ConflictingLogicalRows;
+			} else if (a_requireWornAttribution && !proof.evidence.wornWeaponAttributable) {
+				proof.failure = GroupProofFailure::WornWeaponNotAttributable;
+			} else {
+				proof.failure = GroupProofFailure::None;
+			}
+			return proof;
+		}
+
+		LegacyWeaponRestore::CaptureRejectionReason ToCaptureRejectionReason(GroupProofFailure a_failure)
+		{
+			using Reason = LegacyWeaponRestore::CaptureRejectionReason;
+			switch (a_failure) {
+			case GroupProofFailure::ConflictingLogicalRows:
+				return Reason::ConflictingLogicalRows;
+			case GroupProofFailure::WornWeaponNotAttributable:
+				return Reason::WornWeaponNotAttributable;
+			case GroupProofFailure::UnreadablePopulation:
+			default:
+				return Reason::UnreadablePopulation;
+			}
+		}
+	}
+
+	bool CaptureWornToken(
+		RE::TESObjectREFR::InventoryItemMap& a_inventory,
+		RE::TESObjectWEAP* a_weapon,
+		bool a_leftHand,
+		LegacyWeaponRestoreToken& a_outToken,
+		CaptureDiagnostic* a_outDiagnostic)
+	{
+		a_outToken.Clear();
+		if (a_outDiagnostic) {
+			*a_outDiagnostic = {};
+		}
+		if (!a_weapon) {
+			if (a_outDiagnostic) {
+				a_outDiagnostic->reason = CaptureRejectionReason::InvalidWeapon;
+			}
+			return false;
+		}
+
+		const int sameFormCount = GetSameFormInventoryCount(a_inventory, a_weapon);
+		if (a_outDiagnostic) {
+			a_outDiagnostic->sameFormCount = sameFormCount;
+		}
+		if (sameFormCount <= 0) {
+			if (a_outDiagnostic) {
+				a_outDiagnostic->reason = CaptureRejectionReason::NotInInventory;
+			}
+			return false;
+		}
+		const auto topology = GetRestoreTopology(a_inventory, a_weapon, sameFormCount);
+		if (a_outDiagnostic) {
+			a_outDiagnostic->topology = topology;
+		}
+		auto snapshot = CollectAllMembers(a_inventory, a_weapon->GetFormID());
+
+		const LogicalRowMember* wornMember = nullptr;
+		int wornMemberCount = 0;
+		for (const auto& member : snapshot.members) {
+			if (!IsWornInHand(member, a_leftHand)) {
+				continue;
+			}
+			++wornMemberCount;
+			if (!wornMember) {
+				wornMember = std::addressof(member);
+			}
+		}
+
+		if (!wornMember && sameFormCount == 1 && snapshot.members.size() == 1 &&
+			topology == LegacyWeaponRestorePolicy::Topology::Unambiguous) {
+			wornMember = std::addressof(snapshot.members.front());
+			wornMemberCount = 1;
+		}
+
+		a_outToken.formID = a_weapon->GetFormID();
+		if (wornMemberCount == 1 && wornMember && wornMember->signatureReadable &&
+			(wornMember->uniqueID != 0 ||
+				(sameFormCount == 1 && topology == LegacyWeaponRestorePolicy::Topology::Unambiguous))) {
+			a_outToken.uniqueID = wornMember->uniqueID;
+			a_outToken.logicalRowSignature = wornMember->signature;
+			a_outToken.rowKind = LegacyWeaponRestorePolicy::RowKind::Physical;
+			return true;
+		}
+
+		if (sameFormCount == 1 &&
+			topology == LegacyWeaponRestorePolicy::Topology::Unambiguous &&
+			snapshot.enumerationReadable && snapshot.members.empty()) {
+			a_outToken.rowKind = LegacyWeaponRestorePolicy::RowKind::PlainForm;
+			return true;
+		}
+
+		if (sameFormCount > 1) {
+			const auto groupProof = BuildGroupEquivalentProof(
+				snapshot, sameFormCount, a_weapon->GetFormID(), a_leftHand, true);
+			if (groupProof.IsValid(true)) {
+				a_outToken.uniqueID = 0;
+				a_outToken.logicalRowSignature = groupProof.logicalRowSignature;
+				a_outToken.rowKind = LegacyWeaponRestorePolicy::RowKind::GroupEquivalent;
+				if (a_outDiagnostic) {
+					a_outDiagnostic->topology = LegacyWeaponRestorePolicy::Topology::GroupEquivalent;
+				}
+				return true;
+			}
+			if (a_outDiagnostic) {
+				a_outDiagnostic->reason = ToCaptureRejectionReason(groupProof.failure);
+				a_outDiagnostic->topology =
+					groupProof.failure == GroupProofFailure::ConflictingLogicalRows ?
+					LegacyWeaponRestorePolicy::Topology::MixedLogicalRows : topology;
+			}
+		} else if (a_outDiagnostic) {
+			a_outDiagnostic->reason = wornMemberCount > 1 ?
+				CaptureRejectionReason::AmbiguousPhysicalMembers :
+				CaptureRejectionReason::UnreadablePopulation;
+		}
+
+		a_outToken.Clear();
+		return false;
+	}
+
+	DualHandCaptureReconciliation ReconcileDualHandSameFormCapture(
+		RE::TESObjectREFR::InventoryItemMap& a_inventory,
+		LegacyWeaponRestoreToken& a_leftToken,
+		LegacyWeaponRestoreToken& a_rightToken)
+	{
+		if (!a_leftToken.IsValid() || !a_rightToken.IsValid() ||
+			a_leftToken.formID == 0 || a_leftToken.formID != a_rightToken.formID) {
+			return DualHandCaptureReconciliation::Unchanged;
+		}
+
+		auto* weapon = RE::TESForm::LookupByID<RE::TESObjectWEAP>(a_leftToken.formID);
+		if (!weapon) {
+			return DualHandCaptureReconciliation::Unchanged;
+		}
+
+		const int sameFormCount = GetSameFormInventoryCount(a_inventory, weapon);
+		auto snapshot = CollectAllMembers(a_inventory, a_leftToken.formID);
+		const bool signaturesMatch =
+			!a_leftToken.logicalRowSignature.empty() &&
+			a_leftToken.logicalRowSignature == a_rightToken.logicalRowSignature;
+
+		auto findWornMemberIndex = [&](const LegacyWeaponRestoreToken& a_token, bool a_leftHand) {
+			std::optional<std::size_t> result;
+			for (std::size_t index = 0; index < snapshot.members.size(); ++index) {
+				const auto& member = snapshot.members[index];
+				if (!member.signatureReadable ||
+					member.signature != a_token.logicalRowSignature ||
+					!IsWornInHand(member, a_leftHand)) {
+					continue;
+				}
+				if (a_token.rowKind == LegacyWeaponRestorePolicy::RowKind::Physical &&
+					a_token.uniqueID != 0 && member.uniqueID != a_token.uniqueID) {
+					continue;
+				}
+				if (result.has_value()) {
+					return std::optional<std::size_t>{};
+				}
+				result = index;
+			}
+			return result;
+		};
+
+		const auto leftWorn = findWornMemberIndex(a_leftToken, true);
+		const auto rightWorn = findWornMemberIndex(a_rightToken, false);
+		const bool distinctWornMembersProven =
+			leftWorn.has_value() && rightWorn.has_value() && *leftWorn != *rightWorn;
+		const auto groupProof = BuildGroupEquivalentProof(
+			snapshot, sameFormCount, a_leftToken.formID, false, false);
+		const bool groupEquivalentProven =
+			groupProof.IsValid(false) && signaturesMatch &&
+			groupProof.logicalRowSignature == a_leftToken.logicalRowSignature;
+
+		const auto decision = LegacyWeaponRestorePolicy::DecideDualHandCapture({
+			a_leftToken.rowKind,
+			a_rightToken.rowKind,
+			a_leftToken.formID,
+			a_rightToken.formID,
+			a_leftToken.uniqueID,
+			a_rightToken.uniqueID,
+			signaturesMatch,
+			distinctWornMembersProven,
+			groupEquivalentProven
+		});
+		switch (decision) {
+		case LegacyWeaponRestorePolicy::DualHandCaptureDecision::PromoteBothToGroupEquivalent:
+			a_leftToken.uniqueID = 0;
+			a_leftToken.rowKind = LegacyWeaponRestorePolicy::RowKind::GroupEquivalent;
+			a_rightToken.uniqueID = 0;
+			a_rightToken.rowKind = LegacyWeaponRestorePolicy::RowKind::GroupEquivalent;
+			return DualHandCaptureReconciliation::PromotedToGroupEquivalent;
+		case LegacyWeaponRestorePolicy::DualHandCaptureDecision::RejectIndistinguishableCollision:
+			a_leftToken.Clear();
+			a_rightToken.Clear();
+			return DualHandCaptureReconciliation::RejectedUnsafeCollision;
+		case LegacyWeaponRestorePolicy::DualHandCaptureDecision::PreserveExactAuthority:
+		default:
+			return DualHandCaptureReconciliation::Unchanged;
+		}
+	}
+
+	bool ResolveLiveMember(
+		RE::TESObjectREFR::InventoryItemMap& a_inventory,
+		const LegacyWeaponRestoreToken& a_token,
+		bool a_leftHand,
+		LiveSelection& a_outSelection)
+	{
+		a_outSelection = {};
+		if (!a_token.IsValid()) {
+			return false;
+		}
+		auto* weapon = RE::TESForm::LookupByID<RE::TESObjectWEAP>(a_token.formID);
+		if (!weapon) {
+			return false;
+		}
+
+		const int sameFormCount = GetSameFormInventoryCount(a_inventory, weapon);
+		const auto topology = GetRestoreTopology(a_inventory, weapon, sameFormCount);
+		auto snapshot = CollectAllMembers(a_inventory, a_token.formID);
+		std::vector<const LogicalRowMember*> exactCandidates;
+		std::vector<const LogicalRowMember*> uidCandidates;
+		for (const auto& member : snapshot.members) {
+			if (!IsEligibleForEquip(member, a_leftHand)) {
+				continue;
+			}
+			const bool uidMatches = a_token.uniqueID == 0 || member.uniqueID == a_token.uniqueID;
+			if (uidMatches && member.signature == a_token.logicalRowSignature) {
+				exactCandidates.push_back(std::addressof(member));
+			}
+			if (a_token.uniqueID != 0 && member.uniqueID == a_token.uniqueID) {
+				uidCandidates.push_back(std::addressof(member));
+			}
+		}
+
+		bool groupEquivalentProven = false;
+		bool groupSignatureMatches = false;
+		bool groupFormLevelAllowed = false;
+		if (a_token.rowKind == LegacyWeaponRestorePolicy::RowKind::GroupEquivalent) {
+			const auto groupProof = BuildGroupEquivalentProof(
+				snapshot, sameFormCount, a_token.formID, a_leftHand, false);
+			groupEquivalentProven = groupProof.IsValid(false);
+			groupSignatureMatches =
+				groupEquivalentProven && groupProof.logicalRowSignature == a_token.logicalRowSignature;
+			groupFormLevelAllowed = LegacyWeaponRestorePolicy::AllowsGroupEquivalentFormLevel(
+				groupProof.evidence, groupSignatureMatches);
+		}
+
+		const LegacyWeaponRestorePolicy::Evidence evidence{
+			a_token.rowKind,
+			topology,
+			sameFormCount,
+			a_token.uniqueID,
+			static_cast<int>(exactCandidates.size()),
+			static_cast<int>(uidCandidates.size()),
+			groupEquivalentProven,
+			groupSignatureMatches,
+			groupFormLevelAllowed
+		};
+		a_outSelection.resolution = LegacyWeaponRestorePolicy::Decide(evidence);
+		switch (a_outSelection.resolution) {
+		case LegacyWeaponRestorePolicy::Resolution::ExactLogicalRow:
+			a_outSelection.extraData = exactCandidates.empty() ? nullptr : exactCandidates.front()->extraData;
+			return a_outSelection.extraData != nullptr;
+		case LegacyWeaponRestorePolicy::Resolution::UIDLineageFallback:
+			a_outSelection.extraData = uidCandidates.empty() ? nullptr : uidCandidates.front()->extraData;
+			return a_outSelection.extraData != nullptr;
+		case LegacyWeaponRestorePolicy::Resolution::PlainFormLevel:
+		case LegacyWeaponRestorePolicy::Resolution::GroupEquivalentFormLevel:
+			return true;
+		case LegacyWeaponRestorePolicy::Resolution::GroupEquivalentMember:
+			a_outSelection.extraData = exactCandidates.empty() ? nullptr : exactCandidates.front()->extraData;
+			return a_outSelection.extraData != nullptr;
+		case LegacyWeaponRestorePolicy::Resolution::None:
+		default:
+			return false;
+		}
+	}
+
+	bool MatchesWornMember(
+		RE::TESObjectREFR::InventoryItemMap& a_inventory,
+		const LegacyWeaponRestoreToken& a_token,
+		bool a_leftHand)
+	{
+		if (!a_token.IsValid()) {
+			return false;
+		}
+		auto* weapon = RE::TESForm::LookupByID<RE::TESObjectWEAP>(a_token.formID);
+		if (!weapon) {
+			return false;
+		}
+		const int sameFormCount = GetSameFormInventoryCount(a_inventory, weapon);
+		const auto topology = GetRestoreTopology(a_inventory, weapon, sameFormCount);
+		if (a_token.rowKind == LegacyWeaponRestorePolicy::RowKind::PlainForm) {
+			return sameFormCount == 1 && topology == LegacyWeaponRestorePolicy::Topology::Unambiguous;
+		}
+
+		const auto snapshot = CollectAllMembers(a_inventory, a_token.formID);
+		if (a_token.rowKind == LegacyWeaponRestorePolicy::RowKind::GroupEquivalent) {
+			const auto groupProof = BuildGroupEquivalentProof(
+				snapshot, sameFormCount, a_token.formID, a_leftHand, true);
+			return groupProof.IsValid(true) &&
+			       groupProof.logicalRowSignature == a_token.logicalRowSignature;
+		}
+		const LogicalRowMember* uidFallback = nullptr;
+		for (const auto& member : snapshot.members) {
+			if (!IsWornInHand(member, a_leftHand)) {
+				continue;
+			}
+			const bool uidMatches = a_token.uniqueID == 0 || member.uniqueID == a_token.uniqueID;
+			if (uidMatches && member.signature == a_token.logicalRowSignature) {
+				return true;
+			}
+			if (a_token.uniqueID != 0 && member.uniqueID == a_token.uniqueID) {
+				uidFallback = std::addressof(member);
+			}
+		}
+		return uidFallback != nullptr;
 	}
 }
 
@@ -946,10 +1822,15 @@ std::optional<bool> WheelItemWeapon::MatchesEquippedHandIndicator(
 	return MatchCleanSentinelHandIndicatorFromInventory(a_inv, weapon, a_handSignature, a_leftHand);
 }
 
+WheelItemWeapon::~WheelItemWeapon()
+{
+}
+
 WheelItemWeapon::WheelItemWeapon(RE::TESBoundObject* a_weapon, uint16_t a_uniqueID)
 {
 	this->_obj = a_weapon;
 	this->SetUniqueID(a_uniqueID);
+	this->_logicalRowSignature = CaptureLogicalRowSignature(a_weapon ? a_weapon->As<RE::TESObjectWEAP>() : nullptr, a_uniqueID);
 	// get weapon's texture
 	// TODO: add support for animated armory/2h mace
 	Texture::icon_image_type iconType = Texture::icon_image_type::sword_one_handed;
@@ -1024,52 +1905,43 @@ void WheelItemWeapon::ActivateItemSecondary()
 		weaponType == RE::WEAPON_TYPE::kTwoHandSword ||
 		weaponType == RE::WEAPON_TYPE::kTwoHandAxe;
 
-	const auto inv = pc->GetInventory();
-	const auto itemData = this->GetItemExtraDataAndCount(const_cast<RE::TESObjectREFR::InventoryItemMap&>(inv));
+	auto inv = pc->GetInventory();
+	const auto itemData = this->GetItemExtraDataAndCount(inv);
 	const int count = itemData.first;
 	RE::ExtraDataList* extraData = itemData.second;
 	const int sameFormCount = GetSameFormInventoryCount(inv, weapon);
-	const bool bypassInstanceHandResolution = ShouldBypassInstanceHandResolution(inv, weapon, extraData);
-	const Utils::Inventory::Hand equippedFormHand =
-		bypassInstanceHandResolution ? GetEquippedHandByForm(pc, weapon) : Utils::Inventory::Hand::None;
+	const bool bypassInstanceHandResolution = ShouldBypassInstanceHandResolution(inv, weapon, this->GetUniqueID());
+	const bool targetIsLeft = !isTwoHanded;
+	const bool exactLogicalRowInTargetHand = MatchesLogicalRowInHandFromInventory(
+		inv,
+		weapon,
+		this->_logicalRowSignature,
+		this->GetUniqueID() == 0,
+		targetIsLeft);
+	const auto* targetEquippedObject = pc->GetEquippedObject(targetIsLeft);
+	const bool unambiguousSingleFormFallback =
+		sameFormCount == 1 &&
+		targetEquippedObject &&
+		targetEquippedObject->GetFormID() == weapon->GetFormID();
+	const bool selectedLogicalRowInTargetHand =
+		exactLogicalRowInTargetHand || unambiguousSingleFormFallback;
 	if (MainWheelDebug::IsCategoryEnabled(MainWheelDebug::Category::Input)) {
 		MainWheelDebug::Log(
 			MainWheelDebug::Category::Input,
-			"WeaponActivateSecondary: formId={:08X} uniqueID={} count={} sameFormCount={} hasExtraData={} useHandFallback={} formHand={}",
+			"WeaponActivateSecondary: formId={:08X} uniqueID={} count={} sameFormCount={} hasExtraData={} useHandFallback={} logicalRowInTargetHand={}",
 			this->_obj ? this->_obj->GetFormID() : 0,
 			this->GetUniqueID(),
 			count,
 			sameFormCount,
 			extraData ? 1 : 0,
 			bypassInstanceHandResolution ? 1 : 0,
-			static_cast<int>(equippedFormHand));
+			selectedLogicalRowInTargetHand ? 1 : 0);
 	}
-	if (bypassInstanceHandResolution) {
-		if (equippedFormHand == Utils::Inventory::Hand::Left ||
-			(isTwoHanded && equippedFormHand == Utils::Inventory::Hand::Right) ||
-			equippedFormHand == Utils::Inventory::Hand::Both) {
-			if (isTwoHanded) {
-				unequipItem(Utils::Slot::GetRightHandSlot());
-			} else {
-				unequipItem(Utils::Slot::GetLeftHandSlot());
-			}
-		} else {
-			bool wasAlreadyDrawn = pc->AsActorState()->IsWeaponDrawn();
-			if (!equipItem(false)) {
-				return;
-			}
-			if (Config::WheelBehavior::AutoDrawOnUse) {
-				pc->DrawWeaponMagicHands(true);
-			} else if (!wasAlreadyDrawn) {
-				pc->DrawWeaponMagicHands(false);
-			} else {
-				pc->DrawWeaponMagicHands(true);
-			}
-		}
-		return;
-	}
-	Utils::Inventory::Hand equippedHand = Utils::Inventory::GetWeaponEquippedHand(pc, weapon, this->GetUniqueID(), true);
-	if (equippedHand == Utils::Inventory::Hand::Left || (isTwoHanded && equippedHand == Utils::Inventory::Hand::Right) || equippedHand == Utils::Inventory::Hand::Both) {
+	// Activation only needs scalar pre-state. Discard all inventory-owned pointers
+	// before delegating to an equip/unequip path that can mutate the inventory.
+	extraData = nullptr;
+	inv.clear();
+	if (selectedLogicalRowInTargetHand) {
 		if (isTwoHanded) {
 			unequipItem(Utils::Slot::GetRightHandSlot());  // note: 2 handed weapons need to be unequipped from the right hand slot to be truly unequipped.
 		} else {
@@ -1087,10 +1959,10 @@ void WheelItemWeapon::ActivateItemSecondary()
 			// Only sheathe if the player was NOT already in combat.
 			// If they were already drawn, maintain combat stance for smooth weapon swapping.
 			if (!wasAlreadyDrawn) {
-				pc->DrawWeaponMagicHands(false);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
 			} else {
 				// Force re-draw to maintain combat flow during weapon swap
-				pc->DrawWeaponMagicHands(true);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 			}
 		}
 	}
@@ -1115,47 +1987,42 @@ void WheelItemWeapon::ActivateItemPrimary()
 	if (TransformWheelManager::ShouldBlockStaffActivation(weapon, "EquipPrimary")) {
 		return;
 	}
-	const auto inv = pc->GetInventory();
-	const auto itemData = this->GetItemExtraDataAndCount(const_cast<RE::TESObjectREFR::InventoryItemMap&>(inv));
+	auto inv = pc->GetInventory();
+	const auto itemData = this->GetItemExtraDataAndCount(inv);
 	const int count = itemData.first;
 	RE::ExtraDataList* extraData = itemData.second;
 	const int sameFormCount = GetSameFormInventoryCount(inv, weapon);
-	const bool bypassInstanceHandResolution = ShouldBypassInstanceHandResolution(inv, weapon, extraData);
-	const Utils::Inventory::Hand equippedFormHand =
-		bypassInstanceHandResolution ? GetEquippedHandByForm(pc, weapon) : Utils::Inventory::Hand::None;
+	const bool bypassInstanceHandResolution = ShouldBypassInstanceHandResolution(inv, weapon, this->GetUniqueID());
+	const bool exactLogicalRowInTargetHand = MatchesLogicalRowInHandFromInventory(
+		inv,
+		weapon,
+		this->_logicalRowSignature,
+		this->GetUniqueID() == 0,
+		false);
+	const auto* targetEquippedObject = pc->GetEquippedObject(false);
+	const bool unambiguousSingleFormFallback =
+		sameFormCount == 1 &&
+		targetEquippedObject &&
+		targetEquippedObject->GetFormID() == weapon->GetFormID();
+	const bool selectedLogicalRowInTargetHand =
+		exactLogicalRowInTargetHand || unambiguousSingleFormFallback;
 	if (MainWheelDebug::IsCategoryEnabled(MainWheelDebug::Category::Input)) {
 		MainWheelDebug::Log(
 			MainWheelDebug::Category::Input,
-			"WeaponActivatePrimary: formId={:08X} uniqueID={} count={} sameFormCount={} hasExtraData={} useHandFallback={} formHand={}",
+			"WeaponActivatePrimary: formId={:08X} uniqueID={} count={} sameFormCount={} hasExtraData={} useHandFallback={} logicalRowInTargetHand={}",
 			this->_obj ? this->_obj->GetFormID() : 0,
 			this->GetUniqueID(),
 			count,
 			sameFormCount,
 			extraData ? 1 : 0,
 			bypassInstanceHandResolution ? 1 : 0,
-			static_cast<int>(equippedFormHand));
+			selectedLogicalRowInTargetHand ? 1 : 0);
 	}
-	if (bypassInstanceHandResolution) {
-		if (equippedFormHand == Utils::Inventory::Hand::Right ||
-			equippedFormHand == Utils::Inventory::Hand::Both) {
-			unequipItem(Utils::Slot::GetRightHandSlot());
-		} else {
-			bool wasAlreadyDrawn = pc->AsActorState()->IsWeaponDrawn();
-			if (!equipItem(true)) {
-				return;
-			}
-			if (Config::WheelBehavior::AutoDrawOnUse) {
-				pc->DrawWeaponMagicHands(true);
-			} else if (!wasAlreadyDrawn) {
-				ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
-			} else {
-				ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
-			}
-		}
-		return;
-	}
-	Utils::Inventory::Hand equippedHand = Utils::Inventory::GetWeaponEquippedHand(pc, weapon, this->GetUniqueID(), true);
-	if (equippedHand == Utils::Inventory::Hand::Right || equippedHand == Utils::Inventory::Hand::Both) {
+	// Activation only needs scalar pre-state. Discard all inventory-owned pointers
+	// before delegating to an equip/unequip path that can mutate the inventory.
+	extraData = nullptr;
+	inv.clear();
+	if (selectedLogicalRowInTargetHand) {
 		unequipItem(Utils::Slot::GetRightHandSlot());
 	} else {
 		// Check if player was already in combat (weapon/magic drawn) BEFORE equipping
@@ -1186,6 +2053,9 @@ void WheelItemWeapon::SerializeIntoJsonObj(nlohmann::json& a_json)
 	if (this->GetUniqueID() == 0) {
 		a_json["formLevelStack"] = true;
 	}
+	if (!this->_logicalRowSignature.empty()) {
+		a_json["logicalRowSignature"] = this->_logicalRowSignature;
+	}
 }
 
 
@@ -1197,27 +2067,75 @@ bool WheelItemWeapon::equipItem(bool a_toRight)
 		if (!pc || !pc->Is3DLoaded()) {
 			return true;
 		}
-		RE::TESObjectREFR::InventoryItemMap inv = pc->GetInventory();
-		auto itemData = this->GetItemExtraDataAndCount(inv);
-		int count = itemData.first;
-		RE::ExtraDataList* extraData = itemData.second;
 		auto* weapon = this->_obj ? this->_obj->As<RE::TESObjectWEAP>() : nullptr;
-		if (!weapon) {
-			return true;
-		}
-		const int sameFormCount = GetSameFormInventoryCount(inv, weapon);
-		const bool bypassInstanceHandResolution = ShouldBypassInstanceHandResolution(inv, weapon, extraData);
-		if (count <= 0) {  // nothing to equip
+		auto* equipManager = RE::ActorEquipManager::GetSingleton();
+		if (!weapon || !equipManager) {
 			return true;
 		}
 
-		const bool allowVanillaSentinelGroupedFallback =
-			Wheeler::GetMutableInventoryCompatProfile() == Wheeler::MutableInventoryCompatProfile::Vanilla &&
-			this->GetUniqueID() == 0 &&
-			!bypassInstanceHandResolution &&
-			IsOneHandedWeaponForCompat(weapon) &&
-			sameFormCount >= 2 &&
-			this->CanUseGroupedEquipFallback(inv, extraData, sameFormCount);
+		RE::TESObjectREFR::InventoryItemMap inv;
+		int count = 0;
+		RE::ExtraDataList* extraData = nullptr;
+		int sameFormCount = 0;
+		bool bypassInstanceHandResolution = false;
+		bool allowVanillaSentinelGroupedFallback = false;
+		std::uint64_t groupedPreLogicalSignatureDigest = 0;
+
+		// Resolve a physical member only from the current live generation. Callers
+		// clear the map and pointer before every mutation, then invoke this again.
+		const auto resolveFreshPhysicalMember = [&]() {
+			extraData = nullptr;
+			inv.clear();
+			if (!Utils::Inventory::TryGetInventorySnapshot(pc, inv, "WheelItemWeapon::equipItem")) {
+				return false;
+			}
+
+			auto itemData = this->GetItemExtraDataAndCount(inv);
+			count = itemData.first;
+			extraData = itemData.second;
+			sameFormCount = GetSameFormInventoryCount(inv, weapon);
+			bypassInstanceHandResolution = ShouldBypassInstanceHandResolution(inv, weapon, this->GetUniqueID());
+			if (count <= 0) {
+				return false;
+			}
+
+			if (bypassInstanceHandResolution) {
+				if (this->_logicalRowSignature.empty() && extraData) {
+					this->_logicalRowSignature = BuildLogicalRowSignature(extraData);
+				}
+				auto resolution = ResolveLogicalRowMember(
+					inv,
+					weapon->GetFormID(),
+					this->GetUniqueID(),
+					this->_logicalRowSignature,
+					a_toRight,
+					false);
+				if (!resolution.chosen) {
+					return false;
+				}
+				extraData = resolution.chosen;
+				count = resolution.logicalCount;
+			}
+
+			allowVanillaSentinelGroupedFallback =
+				Wheeler::GetMutableInventoryCompatProfile() == Wheeler::MutableInventoryCompatProfile::Vanilla &&
+				this->GetUniqueID() == 0 &&
+				!bypassInstanceHandResolution &&
+				IsOneHandedWeaponForCompat(weapon) &&
+				sameFormCount >= 2 &&
+				this->CanUseGroupedEquipFallback(inv, extraData, sameFormCount);
+			return true;
+		};
+
+		if (!resolveFreshPhysicalMember()) {
+			logger::warn(
+				"WeaponEquip: no safe live physical member formId={:08X} uniqueID={} targetHand={}; operation suppressed",
+				weapon->GetFormID(),
+				this->GetUniqueID(),
+				a_toRight ? "right" : "left");
+			return true;
+		}
+
 		if (QueueIWSExactSingleWeaponTransfer(
 				pc,
 				weapon,
@@ -1230,15 +2148,53 @@ bool WheelItemWeapon::equipItem(bool a_toRight)
 			return false;
 		}
 
-		bool usedGroupedFallback = false;
 		if (!bypassInstanceHandResolution && count < 2 && !allowVanillaSentinelGroupedFallback) {  // we have less than 2, meaning we can't dual-wield
 			Utils::Inventory::Hand hand = Utils::Inventory::GetWeaponEquippedHand(pc, this->_obj->As<RE::TESObjectWEAP>(), this->GetUniqueID());
 			if ((hand == Utils::Inventory::Hand::Right && !a_toRight) || (hand == Utils::Inventory::Hand::Left && a_toRight)) {  // in opposite hands, simply swap l/r
-			auto oppositeSlot = a_toRight ? Utils::Slot::GetLeftHandSlot() : Utils::Slot::GetRightHandSlot();                    // first, clean the slot with item
-			RE::ActorEquipManager::GetSingleton()->UnequipObject(pc, this->_obj, nullptr, 1, oppositeSlot, false, true, true);
+				auto oppositeSlot = a_toRight ? Utils::Slot::GetLeftHandSlot() : Utils::Slot::GetRightHandSlot();  // first, clean the slot with item
+				extraData = nullptr;
+				inv.clear();
+				InventorySnapshotCache::UnequipObject(equipManager, pc, this->_obj, nullptr, 1, oppositeSlot, false, true, true);
+				if (!resolveFreshPhysicalMember()) {
+					logger::warn(
+						"WeaponEquip: post-unequip live resolve failed formId={:08X} uniqueID={} targetHand={}; operation suppressed",
+						weapon->GetFormID(),
+						this->GetUniqueID(),
+						a_toRight ? "right" : "left");
+					return true;
+				}
 			}
-		} else if (allowVanillaSentinelGroupedFallback || this->CanUseGroupedEquipFallback(inv, extraData, count)) {
-			// Safe only when every same-form instance in inventory belongs to the same logical stack group.
+		}
+
+		if (this->_obj->As<RE::TESObjectWEAP>()->IsCrossbow() || this->_obj->As<RE::TESObjectWEAP>()->IsBow()) {  // clean up both slots
+			logger::debug("[HandMemoryDiag] BowLikeEquipCleanup formId={:08X} kind={} targetHand={} leftBefore={:08X} rightBefore={:08X} uniqueID={} groupedFallback={} vanillaSentinelFallback={} sameFormCount={}",
+				this->_obj ? this->_obj->GetFormID() : 0,
+				GetWeaponKindName(this->_obj->As<RE::TESObjectWEAP>()),
+				a_toRight ? "RIGHT" : "LEFT",
+				pc->GetEquippedObject(true) ? pc->GetEquippedObject(true)->GetFormID() : 0,
+				pc->GetEquippedObject(false) ? pc->GetEquippedObject(false)->GetFormID() : 0,
+				this->GetUniqueID(),
+				0,
+				allowVanillaSentinelGroupedFallback ? 1 : 0,
+				sameFormCount);
+			extraData = nullptr;
+			inv.clear();
+			Utils::Slot::CleanSlot(pc, Utils::Slot::GetLeftHandSlot());
+			Utils::Slot::CleanSlot(pc, Utils::Slot::GetRightHandSlot());
+			if (!resolveFreshPhysicalMember()) {
+				logger::warn(
+					"WeaponEquip: post-slot-cleanup live resolve failed formId={:08X} uniqueID={}; operation suppressed",
+					weapon->GetFormID(),
+					this->GetUniqueID());
+				return true;
+			}
+		}
+
+		bool usedGroupedFallback = false;
+		if (!bypassInstanceHandResolution &&
+		    (allowVanillaSentinelGroupedFallback || this->CanUseGroupedEquipFallback(inv, extraData, count))) {
+			// Safe only when every same-form instance in the fresh snapshot belongs to
+			// the same logical stack group.
 			extraData = nullptr;
 			usedGroupedFallback = true;
 		}
@@ -1256,22 +2212,11 @@ bool WheelItemWeapon::equipItem(bool a_toRight)
 				a_toRight ? "right" : "left",
 				bypassInstanceHandResolution ? 1 : 0);
 		}
-		if (this->_obj->As<RE::TESObjectWEAP>()->IsCrossbow() || this->_obj->As<RE::TESObjectWEAP>()->IsBow()) {  // clean up both slots
-			logger::info("[HandMemoryDiag] BowLikeEquipCleanup formId={:08X} kind={} targetHand={} leftBefore={:08X} rightBefore={:08X} uniqueID={} groupedFallback={} vanillaSentinelFallback={} sameFormCount={}",
-				this->_obj ? this->_obj->GetFormID() : 0,
-				GetWeaponKindName(this->_obj->As<RE::TESObjectWEAP>()),
-				a_toRight ? "RIGHT" : "LEFT",
-				pc->GetEquippedObject(true) ? pc->GetEquippedObject(true)->GetFormID() : 0,
-				pc->GetEquippedObject(false) ? pc->GetEquippedObject(false)->GetFormID() : 0,
-				this->GetUniqueID(),
-				usedGroupedFallback ? 1 : 0,
-				allowVanillaSentinelGroupedFallback ? 1 : 0,
-				sameFormCount);
-			Utils::Slot::CleanSlot(pc, Utils::Slot::GetLeftHandSlot());
-			Utils::Slot::CleanSlot(pc, Utils::Slot::GetRightHandSlot());
-		}
+
 		auto slot = a_toRight ? Utils::Slot::GetRightHandSlot() : Utils::Slot::GetLeftHandSlot();
-		RE::ActorEquipManager::GetSingleton()->EquipObject(pc, _obj, extraData, 1, slot);
+		InventorySnapshotCache::EquipObject(equipManager, pc, _obj, extraData, 1, slot);
+		extraData = nullptr;
+		inv.clear();
 	} catch (const std::exception& e) {
 		logger::error("Error while equipping weapon: {}", e.what());
 	}
@@ -1289,7 +2234,42 @@ void WheelItemWeapon::unequipItem(const RE::BGSEquipSlot* a_slot)
 		if (!aeMan) {
 			return;
 		}
-		aeMan->UnequipObject(pc, this->_obj, nullptr, 1, a_slot);
+		auto* weapon = this->_obj ? this->_obj->As<RE::TESObjectWEAP>() : nullptr;
+		RE::ExtraDataList* extraData = nullptr;
+		bool handAware = false;
+		bool targetRight = a_slot == Utils::Slot::GetRightHandSlot();
+		RE::TESObjectREFR::InventoryItemMap inv;
+		if (weapon) {
+			if (!Utils::Inventory::TryGetInventorySnapshot(pc, inv, "WheelItemWeapon::unequipItem")) {
+				return;
+			}
+			auto itemData = this->GetItemExtraDataAndCount(inv);
+			handAware = ShouldBypassInstanceHandResolution(inv, weapon, this->GetUniqueID());
+			if (handAware) {
+				if (this->_logicalRowSignature.empty() && itemData.second) {
+					this->_logicalRowSignature = BuildLogicalRowSignature(itemData.second);
+				}
+				auto resolution = ResolveLogicalRowMember(
+					inv,
+					weapon->GetFormID(),
+					this->GetUniqueID(),
+					this->_logicalRowSignature,
+					targetRight,
+					true);
+				if (!resolution.chosen) {
+					logger::warn(
+						"WeaponUnequip: no safe live physical member formId={:08X} storedUID={} targetHand={}; operation suppressed",
+						weapon->GetFormID(),
+						this->GetUniqueID(),
+						targetRight ? "right" : "left");
+					return;
+				}
+				extraData = resolution.chosen;
+			}
+		}
+		InventorySnapshotCache::UnequipObject(aeMan, pc, this->_obj, extraData, 1, a_slot);
+		extraData = nullptr;
+		inv.clear();
 	} catch (const std::exception& e) {
 		logger::error("Error while unequip item: {}", e.what());
 	}

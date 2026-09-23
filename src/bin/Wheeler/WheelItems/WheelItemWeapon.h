@@ -1,6 +1,10 @@
 #pragma once
 #include "WheelItemMutable.h"
+#include "LegacyWeaponRestore.h"
 #include "bin/Animation/TimeColorInterpolator.h"
+
+#include <string>
+#include <utility>
 
 class TimeColorInterpolator;
 class WheelItemWeapon : public WheelItemMutable 
@@ -13,10 +17,7 @@ public:
 	bool IsAvailable(RE::TESObjectREFR::InventoryItemMap& a_inv) override;
 	WheelItemWeapon(RE::TESBoundObject* a_weapon, uint16_t a_uniqueID);
 
-	~WheelItemWeapon()
-	{
-		// wheelitemmutable's destructor will remove it from the manager
-	};
+	~WheelItemWeapon();
 	void ActivateItemSecondary() override;
 	void ActivateItemPrimary() override;
 	virtual const char* GetItemTypeName() const override { return ITEM_TYPE_STR; }
@@ -27,6 +28,7 @@ public:
 		bool a_leftHand) const override;
 	
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
+	void RestoreLogicalRowSignature(std::string a_signature) { _logicalRowSignature = std::move(a_signature); }
 
 
 	static inline const char* ITEM_TYPE_STR = "WheelItemWeapon";
@@ -36,4 +38,5 @@ private:
 	// Returns false when activation was safely deferred and owns post-equip draw restoration.
 	bool equipItem(bool a_toRight = true);
 	void unequipItem(const RE::BGSEquipSlot* a_slot);
+	std::string _logicalRowSignature;
 };
