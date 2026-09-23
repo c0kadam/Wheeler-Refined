@@ -1,4 +1,5 @@
 #include "AmmoWheel.h"
+#include "AmmoRangedWeaponPoisonPresentationPolicy.h"
 #include "AmmoWheelReskin.h"
 #include "AmmoWheelReskinUnified.h"
 #include "bin/API/WheelerAPI.h"
@@ -8,6 +9,7 @@
 #include "bin/Rendering/Drawer.h"
 #include "bin/Rendering/ResolutionScaleContext.h"
 #include "bin/Rendering/TextureManager.h"
+#include "bin/Texts.h"
 #include "bin/UserInput/Controls.h"
 #include "bin/Utilities/InventorySnapshotCache.h"
 #include "bin/Utilities/Utils.h"
@@ -29,7 +31,7 @@ static const char* AMMO_KID_INI_PATH = "Data\\SKSE\\Plugins\\wheeler\\AMMO_KID.i
 namespace
 {
 	InventorySnapshotCache g_ammoWheelInventorySnapshot;
-	constexpr double kAmmoWheelInventorySnapshotIntervalSeconds = 0.25;
+	constexpr double kAmmoWheelDerivedInventoryRefreshIntervalSeconds = 0.25;
 	constexpr double kAmmoWheelMountedMomentumAssistSeconds = 1.00;
 	constexpr float kAmmoWheelMountedMinimumSlowScale = 0.35f;
 	constexpr float kAmmoDamageEpsilon = 0.01f;
@@ -125,6 +127,73 @@ namespace
 			out.pop_back();
 		}
 		return out;
+	}
+
+	template <class Fn>
+	bool InvokeAmmoRangedPoisonRead(Fn&& a_fn)
+	{
+#if defined(_MSC_VER)
+		__try {
+			a_fn();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+#else
+		try {
+			a_fn();
+			return true;
+		} catch (...) {
+			return false;
+		}
+#endif
+	}
+
+	template <class TContainer>
+	bool CopyAmmoRangedPoisonExtraLists(
+		TContainer* a_extraLists, std::vector<RE::ExtraDataList*>& a_out)
+	{
+		if (!a_extraLists) {
+			return false;
+		}
+		return InvokeAmmoRangedPoisonRead([&]() {
+			for (auto* list : *a_extraLists) {
+				a_out.push_back(list);
+			}
+		});
+	}
+
+	AmmoRangedWeaponPoisonPresentationPolicy::WeaponKind ClassifyAmmoRangedPoisonWeapon(
+		const RE::TESObjectWEAP* a_weapon)
+	{
+		using AmmoRangedWeaponPoisonPresentationPolicy::WeaponKind;
+		if (!a_weapon) {
+			return WeaponKind::kNone;
+		}
+		switch (a_weapon->GetWeaponType()) {
+		case RE::WEAPON_TYPE::kBow:
+			return WeaponKind::kBow;
+		case RE::WEAPON_TYPE::kCrossbow:
+			return WeaponKind::kCrossbow;
+		default:
+			return WeaponKind::kOther;
+		}
+	}
+
+	bool IsAmmoRangedPoisonNameUsable(const char* a_text)
+	{
+		if (!a_text || a_text[0] == '\0') {
+			return false;
+		}
+		std::string compact;
+		for (const unsigned char ch : std::string_view(a_text)) {
+			if (std::isalnum(ch)) {
+				compact.push_back(static_cast<char>(std::tolower(ch)));
+			}
+		}
+		return !compact.empty() && compact != "null" &&
+		       compact.find("missingname") == std::string::npos &&
+		       compact.find("missingitem") == std::string::npos;
 	}
 
 	const char* GetResolutionFixModeName(Config::ResolutionFix::Mode mode)
@@ -2438,6 +2507,8 @@ void AmmoWheel::InvalidateRuntimeCaches()
 	_centerPanelStableHeight = 0.0f;
 	_centerPanelStableConfigRevision = 0;
 	_centerPanelStableViewport = { 0, 0 };
+	_rangedWeaponPoisonPresentation = RangedWeaponPoisonPresentation{};
+	++_rangedWeaponPoisonRevision;
 	_damageRebuildMsAccum = 0.0;
 	_damageRebuildCount = 0;
 	_labelRebuildMsAccum = 0.0;
@@ -2466,6 +2537,182 @@ void AmmoWheel::InvalidateRuntimeCaches()
 	}
 }
 
+AmmoWheel::RangedWeaponPoisonPresentation AmmoWheel::ResolveRangedWeaponPoisonPresentation(
+	RE::PlayerCharacter* a_player,
+	const RE::TESObjectREFR::InventoryItemMap& a_inventory) const
+{
+	using namespace AmmoRangedWeaponPoisonPresentationPolicy;
+
+	if (!a_player) {
+		return {};
+	}
+
+	RE::TESObjectWEAP* rightWeapon = nullptr;
+	RE::TESObjectWEAP* leftWeapon = nullptr;
+	RE::FormID rightFormID = 0;
+	RE::FormID leftFormID = 0;
+	WeaponKind rightKind = WeaponKind::kNone;
+	WeaponKind leftKind = WeaponKind::kNone;
+	bool scalarComplete = false;
+	const bool scalarReadable = InvokeAmmoRangedPoisonRead([&]() {
+		auto* rightForm = a_player->GetEquippedObject(false);
+		auto* leftForm = a_player->GetEquippedObject(true);
+		rightWeapon = rightForm ? rightForm->As<RE::TESObjectWEAP>() : nullptr;
+		leftWeapon = leftForm ? leftForm->As<RE::TESObjectWEAP>() : nullptr;
+		rightFormID = rightWeapon ? rightWeapon->GetFormID() : 0;
+		leftFormID = leftWeapon ? leftWeapon->GetFormID() : 0;
+		rightKind = ClassifyAmmoRangedPoisonWeapon(rightWeapon);
+		leftKind = ClassifyAmmoRangedPoisonWeapon(leftWeapon);
+		scalarComplete = true;
+	});
+	if (!scalarReadable || !scalarComplete) {
+		return {};
+	}
+
+	RE::TESObjectWEAP* rangedWeapon = nullptr;
+	WeaponKind rangedKind = WeaponKind::kNone;
+	RE::FormID rangedFormID = 0;
+	if (IsRanged(rightKind)) {
+		rangedWeapon = rightWeapon;
+		rangedKind = rightKind;
+		rangedFormID = rightFormID;
+	} else if (IsRanged(leftKind)) {
+		rangedWeapon = leftWeapon;
+		rangedKind = leftKind;
+		rangedFormID = leftFormID;
+	}
+	if (!rangedWeapon || rangedFormID == 0) {
+		return {};
+	}
+
+	// A physical bow/crossbow may be visible through both hand queries. A distinct
+	// opposite-hand weapon makes ownership ambiguous and therefore fails closed.
+	const RE::FormID oppositeFormID = rangedWeapon == rightWeapon ? leftFormID : rightFormID;
+	if (oppositeFormID != 0 && oppositeFormID != rangedFormID) {
+		return {};
+	}
+
+	Evidence evidence{};
+	evidence.weaponKind = rangedKind;
+	evidence.weaponFormID = rangedFormID;
+
+	const auto inventoryIt = a_inventory.find(rangedWeapon);
+	if (inventoryIt == a_inventory.end() || inventoryIt->second.first <= 0 ||
+	    !inventoryIt->second.second) {
+		return {};
+	}
+
+	RE::InventoryEntryData* entry = inventoryIt->second.second.get();
+	decltype(entry->extraLists) extraLists = nullptr;
+	if (!InvokeAmmoRangedPoisonRead([&]() { extraLists = entry->extraLists; }) || !extraLists) {
+		return {};
+	}
+
+	std::vector<RE::ExtraDataList*> extraListSnapshot;
+	if (!CopyAmmoRangedPoisonExtraLists(extraLists, extraListSnapshot)) {
+		return {};
+	}
+
+	std::vector<MemberEvidence> members;
+	members.reserve(extraListSnapshot.size());
+	for (auto* extraList : extraListSnapshot) {
+		MemberEvidence member{};
+		bool complete = false;
+		const bool guarded = extraList && InvokeAmmoRangedPoisonRead([&]() {
+			const bool hasWorn = extraList->HasType(RE::ExtraDataType::kWorn);
+			const bool hasWornLeft = extraList->HasType(RE::ExtraDataType::kWornLeft);
+			member.wornLeft = hasWornLeft;
+			member.wornRight = hasWorn && !hasWornLeft;
+
+			// Poison is read only from a candidate equipped physical member. An
+			// unequipped same-form sibling can never contribute poison evidence.
+			if (member.wornRight || member.wornLeft) {
+				member.hasPoison = extraList->HasType(RE::ExtraDataType::kPoison);
+				if (member.hasPoison) {
+					const auto* extraPoison = extraList->GetByType<RE::ExtraPoison>();
+					if (!extraPoison) {
+						return;
+					}
+					member.poisonCount = extraPoison->count;
+					member.poisonPointerValid = extraPoison->poison != nullptr;
+					if (extraPoison->poison) {
+						member.poisonFormID = extraPoison->poison->GetFormID();
+					}
+				}
+			}
+			complete = true;
+		});
+		member.readable = guarded && complete;
+		members.push_back(member);
+	}
+
+	evidence.inventoryReadable = true;
+	evidence.members = members;
+	RE::FormID rightFormIDAfter = 0;
+	RE::FormID leftFormIDAfter = 0;
+	bool stableComplete = false;
+	const bool stableReadable = InvokeAmmoRangedPoisonRead([&]() {
+		auto* rightForm = a_player->GetEquippedObject(false);
+		auto* leftForm = a_player->GetEquippedObject(true);
+		auto* right = rightForm ? rightForm->As<RE::TESObjectWEAP>() : nullptr;
+		auto* left = leftForm ? leftForm->As<RE::TESObjectWEAP>() : nullptr;
+		rightFormIDAfter = right ? right->GetFormID() : 0;
+		leftFormIDAfter = left ? left->GetFormID() : 0;
+		stableComplete = true;
+	});
+	evidence.equippedStateStable = stableReadable && stableComplete &&
+	                               rightFormIDAfter == rightFormID &&
+	                               leftFormIDAfter == leftFormID;
+
+	const auto resolved = Resolve(evidence);
+	if (!resolved.targetResolved) {
+		return {};
+	}
+
+	RangedWeaponPoisonPresentation presentation{};
+	presentation.targetResolved = true;
+	presentation.weaponFormID = resolved.weaponFormID;
+	if (resolved.poisonFormID == 0) {
+		return presentation;
+	}
+
+	bool poisonComplete = false;
+	const bool poisonReadable = InvokeAmmoRangedPoisonRead([&]() {
+		auto* poison = RE::TESForm::LookupByID<RE::AlchemyItem>(resolved.poisonFormID);
+		if (!poison || poison->GetFormID() != resolved.poisonFormID) {
+			return;
+		}
+		const char* rawName = poison->GetName();
+		if (!IsAmmoRangedPoisonNameUsable(rawName)) {
+			return;
+		}
+		presentation.poisonFormID = resolved.poisonFormID;
+		presentation.poisonName = NormalizeCenterDescriptionText(rawName);
+		poisonComplete = !presentation.poisonName.empty();
+	});
+	return poisonReadable && poisonComplete ? presentation : RangedWeaponPoisonPresentation{};
+}
+
+void AmmoWheel::UpdateRangedWeaponPoisonPresentation(
+	RE::PlayerCharacter* a_player,
+	const RE::TESObjectREFR::InventoryItemMap& a_inventory,
+	bool a_inventoryReadable,
+	bool a_refreshDue)
+{
+	if (a_inventoryReadable && !a_refreshDue) {
+		return;
+	}
+
+	const RangedWeaponPoisonPresentation next = a_inventoryReadable ?
+		ResolveRangedWeaponPoisonPresentation(a_player, a_inventory) :
+		RangedWeaponPoisonPresentation{};
+	if (next == _rangedWeaponPoisonPresentation) {
+		return;
+	}
+	_rangedWeaponPoisonPresentation = next;
+	++_rangedWeaponPoisonRevision;
+}
+
 void AmmoWheel::EnsureCenterFieldOrderCache()
 {
 	if (_centerFieldOrderRevision == _configRevision && !_centerFieldOrderCache.empty()) {
@@ -2474,6 +2721,7 @@ void AmmoWheel::EnsureCenterFieldOrderCache()
 
 	_centerFieldOrderCache.clear();
 	std::string orderStr = Config::AmmoWheel::CenterFields::Order;
+	bool hasKnownCenterField = false;
 	size_t start = 0;
 	while (start <= orderStr.size()) {
 		size_t comma = orderStr.find(',', start);
@@ -2486,7 +2734,14 @@ void AmmoWheel::EnsureCenterFieldOrderCache()
 		if (left != std::string::npos && right != std::string::npos) {
 			token = token.substr(left, right - left + 1);
 			if (!token.empty()) {
-				_centerFieldOrderCache.push_back(token);
+				const bool knownCenterField =
+					token == "Name" || token == "Damage" || token == "Poison" ||
+					token == "Type" || token == "Count" || token == "Source";
+				hasKnownCenterField = hasKnownCenterField || knownCenterField;
+				if (!knownCenterField ||
+					std::find(_centerFieldOrderCache.begin(), _centerFieldOrderCache.end(), token) == _centerFieldOrderCache.end()) {
+					_centerFieldOrderCache.push_back(token);
+				}
 			}
 		}
 
@@ -2497,7 +2752,19 @@ void AmmoWheel::EnsureCenterFieldOrderCache()
 	}
 
 	if (_centerFieldOrderCache.empty()) {
-		_centerFieldOrderCache = { "Name", "Damage", "Type", "Count", "Source" };
+		_centerFieldOrderCache = { "Name", "Damage", "Poison", "Type", "Count", "Source" };
+	}
+
+	// Legacy custom orders stay authoritative, except that an enabled Poison field
+	// is inserted once without rewriting the user's INI.
+	if (Config::AmmoWheel::CenterFields::ShowPoison && hasKnownCenterField &&
+		std::find(_centerFieldOrderCache.begin(), _centerFieldOrderCache.end(), "Poison") == _centerFieldOrderCache.end()) {
+		const auto damageIt = std::find(_centerFieldOrderCache.begin(), _centerFieldOrderCache.end(), "Damage");
+		if (damageIt != _centerFieldOrderCache.end()) {
+			_centerFieldOrderCache.insert(damageIt + 1, "Poison");
+		} else {
+			_centerFieldOrderCache.emplace_back("Poison");
+		}
 	}
 
 	_centerFieldOrderRevision = _configRevision;
@@ -2821,6 +3088,7 @@ bool AmmoWheel::RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs)
 		_centerPanelCache.ammoID == ammoID &&
 		_centerPanelCache.configRevision == _configRevision &&
 		_centerPanelCache.damageRevision == _damageCacheRevision &&
+		_centerPanelCache.rangedWeaponPoisonRevision == _rangedWeaponPoisonRevision &&
 		_centerPanelCache.viewport.x == viewport.x &&
 		_centerPanelCache.viewport.y == viewport.y) {
 		return false;
@@ -2834,6 +3102,7 @@ bool AmmoWheel::RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs)
 	cache.ammoID = ammoID;
 	cache.configRevision = _configRevision;
 	cache.damageRevision = _damageCacheRevision;
+	cache.rangedWeaponPoisonRevision = _rangedWeaponPoisonRevision;
 	cache.viewport = viewport;
 	cache.wheelCenterAtBuild = a_wheelCenter;
 
@@ -2887,6 +3156,7 @@ bool AmmoWheel::RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs)
 		}
 	}
 
+	bool poisonLineEmitted = false;
 	for (const auto& field : _centerFieldOrderCache) {
 		if (field == "Name" && Config::AmmoWheel::CenterFields::ShowName) {
 			if (Config::AmmoWheel::EnableWordWrap) {
@@ -2902,6 +3172,13 @@ bool AmmoWheel::RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs)
 		} else if (field == "Damage" && Config::AmmoWheel::CenterFields::ShowDamage) {
 			cache.textLines.emplace_back(fmt::format("Damage: {}", cache.roundedDamageValue), cache.infoFontSize);
 			cache.isDamageLine.push_back(true);
+		} else if (field == "Poison" && Config::AmmoWheel::CenterFields::ShowPoison &&
+			_rangedWeaponPoisonPresentation.HasActivePoison()) {
+			cache.textLines.emplace_back(fmt::format("{}: {}",
+				Texts::GetText(Texts::TextType::AmmoWheelWeaponPoisonLabel),
+				_rangedWeaponPoisonPresentation.poisonName), cache.infoFontSize);
+			cache.isDamageLine.push_back(false);
+			poisonLineEmitted = true;
 		} else if (field == "Type" && Config::AmmoWheel::CenterFields::ShowType) {
 			cache.textLines.emplace_back(fmt::format("Type: {}", ammoType), cache.infoFontSize);
 			cache.isDamageLine.push_back(false);
@@ -2976,6 +3253,7 @@ bool AmmoWheel::RebuildCenterPanelCache(ImVec2 a_wheelCenter, DrawArgs)
 	const int nameLineBudget = Config::AmmoWheel::CenterFields::ShowName ? (std::max)(1, Config::AmmoWheel::CenterTextMaxLines) : 0;
 	int infoLineBudget = 0;
 	if (Config::AmmoWheel::CenterFields::ShowDamage) { infoLineBudget++; }
+	if (poisonLineEmitted) { infoLineBudget++; }
 	if (Config::AmmoWheel::CenterFields::ShowType) { infoLineBudget++; }
 	if (Config::AmmoWheel::CenterFields::ShowCount) { infoLineBudget++; }
 	if (Config::AmmoWheel::CenterFields::ShowSource) { infoLineBudget++; }
@@ -3119,7 +3397,7 @@ void AmmoWheel::RefreshAmmoList()
 		_ammoEntries.push_back(entry);
 	}
 
-	// ========== MULTI-CRITERIA SORTING SYSTEM ==========
+	// ========== MULTI-CRITERIA SORTING ==========
 	// Sort keys: 0=None, 1=Count, 2=Power, 3=Type, 4=Favorites
 	auto getSortValue = [](const AmmoEntry& entry, int sortKey) -> int {
 		switch (sortKey) {
@@ -3413,7 +3691,7 @@ void AmmoWheel::TryOpen()
 			resolutionContext.Update();
 			const auto& state = resolutionContext.GetState();
 			const char* mapping = state.active ? "Config::OffsetAmmoWheelSizingToViewport" : "None";
-			logger::info("[ResolutionFix] AmmoWheel open: display {}x{}, game {}x{}, scaleX={:.3f}, scaleY={:.3f}, uniform={:.3f}, mode={}, mapping={}",
+			logger::debug("[ResolutionFix] AmmoWheel open: display {}x{}, game {}x{}, scaleX={:.3f}, scaleY={:.3f}, uniform={:.3f}, mode={}, mapping={}",
 				state.displayW, state.displayH, state.gameW, state.gameH,
 				state.scaleX, state.scaleY, state.uniformScale,
 				GetResolutionFixModeName(Config::ResolutionFix::ModeSetting), mapping);
@@ -3483,7 +3761,7 @@ void AmmoWheel::UpdateCursorPosMouse(float a_deltaX, float a_deltaY)
 		return;
 	}
 
-	// TASK 1: Apply unified deadzone + smoothing filter for mouse
+	// Apply the unified deadzone and smoothing filter for mouse input
 	float dt = ImGui::GetIO().DeltaTime;
 	
 	// Configure filter from config
@@ -3517,7 +3795,7 @@ void AmmoWheel::UpdateCursorPosGamepad(float a_x, float a_y)
 		return;
 	}
 
-	// TASK 1: Apply unified deadzone + smoothing filter for gamepad
+	// Apply the unified deadzone and smoothing filter for gamepad input
 	float dt = ImGui::GetIO().DeltaTime;
 	
 	// Configure filter from config
@@ -3597,7 +3875,7 @@ void AmmoWheel::ActivateHoveredAmmo()
 	_activationConsumed = true;
 
 	// Equip the selected ammo
-	equipManager->EquipObject(player, entry.ammo);
+	InventorySnapshotCache::EquipObject(equipManager, player, entry.ammo);
 	
 	// Remember this selection for next time
 	_lastSelectedIndex = _hoveredIndex;
@@ -3638,13 +3916,18 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 	}
 
 	InventorySnapshotCache::Stats invStats{};
-	RE::TESObjectREFR::InventoryItemMap& imap = g_ammoWheelInventorySnapshot.Get(
+	RE::TESObjectREFR::InventoryItemMap imap;
+	g_ammoWheelInventorySnapshot.CaptureFresh(
 		player,
 		true,
 		Config::AmmoWheel::Performance::InventorySnapshotIntervalSeconds > 0.0f ?
 			Config::AmmoWheel::Performance::InventorySnapshotIntervalSeconds :
-			static_cast<float>(kAmmoWheelInventorySnapshotIntervalSeconds),
+			static_cast<float>(kAmmoWheelDerivedInventoryRefreshIntervalSeconds),
+		imap,
 		&invStats);
+	const bool inventoryCaptured = invStats.capturedFreshThisCall;
+	UpdateRangedWeaponPoisonPresentation(
+		player, imap, inventoryCaptured, invStats.refreshDerivedDataThisCall);
 	
 	// Get currently equipped ammo FormID for selection highlighting (derived each frame)
 	RE::FormID equippedAmmoID = getEquippedAmmoFormID();
@@ -3658,7 +3941,7 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 	float startAngle = getStartAngleRad();
 	float slotAngle = arcAngle / static_cast<float>(numEntries);
 
-	if (!_damageCacheValid || invStats.refreshedThisCall) {
+	if (!_damageCacheValid || invStats.refreshDerivedDataThisCall) {
 		const auto damageStart = std::chrono::steady_clock::now();
 		if (RebuildDamageCache(imap)) {
 			const auto damageEnd = std::chrono::steady_clock::now();
@@ -3965,7 +4248,7 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 		if (!drewBorderRing) {
 			if (borderInner > 0.0f && borderOuter > borderInner && (borderOuter - borderInner) >= 1.0f) {
 				ImU32 borderInnerColor, borderOuterColor;
-				// TASK 1: Use border color override if enabled
+				// Use the border color override when enabled
 				if (Config::AmmoWheel::BorderColorOverrideEnabled) {
 					borderInnerColor = Config::AmmoWheel::BorderColorComputed;
 					// Outer color is slightly darker version of inner
@@ -4129,9 +4412,9 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 		if (Config::AmmoWheel::Debug::LogPerf) {
 			const auto reskinPerf = reskinSystem.ConsumePerfStats();
 			logger::info(
-				"[Perf][AmmoWheel] invRefreshMs={:.2f} invRefreshCount={} damageRebuildMs={:.2f} damageRebuildCount={} labelRebuildMs={:.2f} labelRebuildCount={} centerRebuildMs={:.2f} centerRebuildCount={} reskinDrawTargetMs={:.2f} reskinDrawTargetCalls={} reskinGetTextureMs={:.2f} reskinGetTextureCalls={} texCacheHit={} texCacheMiss={} interval={:.2f}",
-				invStats.lastRefreshMs,
-				invStats.refreshCountThisWindow,
+				"[Perf][AmmoWheel] invCaptureMs={:.2f} invCaptureCount={} damageRebuildMs={:.2f} damageRebuildCount={} labelRebuildMs={:.2f} labelRebuildCount={} centerRebuildMs={:.2f} centerRebuildCount={} reskinDrawTargetMs={:.2f} reskinDrawTargetCalls={} reskinGetTextureMs={:.2f} reskinGetTextureCalls={} texCacheHit={} texCacheMiss={} derivedInterval={:.2f} mutationGeneration={}",
+				invStats.lastCaptureMs,
+				invStats.captureCountThisWindow,
 				_damageRebuildMsAccum,
 				_damageRebuildCount,
 				_labelRebuildMsAccum,
@@ -4144,7 +4427,8 @@ void AmmoWheel::draw(DrawArgs a_drawArgs)
 				reskinPerf.getTextureCalls,
 				reskinPerf.textureCacheHits,
 				reskinPerf.textureCacheMisses,
-				invStats.refreshIntervalSeconds);
+				invStats.derivedRefreshIntervalSeconds,
+				invStats.mutationGeneration);
 		} else {
 			// Keep counters bounded even when perf logging is disabled.
 			(void)reskinSystem.ConsumePerfStats();
@@ -4443,7 +4727,7 @@ void AmmoWheel::drawSlot(int a_index, ImVec2 a_center, bool a_hovered, float a_i
 					}
 				}
 				
-				// TASK 3: Hover indicator - no blink, just show if hovered
+				// Hover indicator: show while hovered without blinking
 				if (drawHovered && a_hovered && Config::AmmoWheel::Skin::EnableHoveredIndicator && hovInd.Enabled) {
 					float radius = a_outerRadius + hovInd.RadiusOffsetPx;
 					float startOff = hovInd.StartAngleOffsetDeg * (IM_PI / 180.0f);
@@ -6090,7 +6374,7 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 		return;
 	}
 
-	// ========== ENHANCED POPUP ANIMATION ==========
+	// ========== POPUP ANIMATION ==========
 	// Use time-based animation with configurable durations
 	float deltaTime = ImGui::GetIO().DeltaTime;
 	float hoverInSpeed = Config::AmmoWheel::PopupAnim::Enabled ? (1000.0f / Config::AmmoWheel::PopupAnim::HoverInMs) : Config::AmmoWheel::PopupAnimationSpeed;
@@ -6421,7 +6705,7 @@ void AmmoWheel::drawHoverPopup(ImVec2 a_wheelCenter, DrawArgs a_drawArgs)
 		}
 	};
 	
-	// TASK 5: Draw circular bubble background
+	// Draw the circular bubble background
 	// PopupAnim::BackgroundOpacity is applied as a user multiplier on top of theme/custom color alpha
 	float popupOpacityMult = Config::AmmoWheel::PopupAnim::BackgroundOpacity;  // User slider (0.0-1.0)
 	
@@ -7269,7 +7553,7 @@ float AmmoWheel::getStartAngleRad() const
 	return Config::AmmoWheel::ArcStartAngle * (IM_PI / 180.0f);
 }
 
-// ========== TASK 2: Adaptive center panel positioning ==========
+// ========== Adaptive center panel positioning ==========
 ImVec2 AmmoWheel::calculateCenterPanelPosition(ImVec2 a_wheelCenter) const
 {
 	float arcSpan = getArcAngleRad();
@@ -7318,7 +7602,7 @@ ImVec2 AmmoWheel::calculateCenterPanelPosition(ImVec2 a_wheelCenter) const
 	return biasedCenter;
 }
 
-// ========== TASK 3: Multi-line text wrapping for slot labels ==========
+// ========== Multi-line text wrapping for slot labels ==========
 TextLayout AmmoWheel::wrapTextForSlot(const char* text, float maxWidth, float fontSize, int maxLines)
 {
 	TextLayout result;
@@ -7614,7 +7898,7 @@ void AmmoWheel::ResetNavigationFilters()
 	}
 }
 
-// ========== TASK 1: Mouse button handling - block attack when wheel open ==========
+// ========== Mouse button handling: block attack when the wheel is open ==========
 bool AmmoWheel::HandleMouseButton(int button, bool pressed, bool fromGamepad)
 {
 	if (!IsOpen()) {
@@ -7680,7 +7964,7 @@ bool AmmoWheel::HandleMouseButton(int button, bool pressed, bool fromGamepad)
 			if (player && equipManager) {
 				auto currentAmmo = player->GetCurrentAmmo();
 				if (currentAmmo) {
-					equipManager->UnequipObject(player, currentAmmo);
+					InventorySnapshotCache::UnequipObject(equipManager, player, currentAmmo);
 					logger::info("AmmoWheel: Unequipped ammo via RMB");
 				}
 			}

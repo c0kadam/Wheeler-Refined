@@ -18,6 +18,7 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponActiveVisualVerificati
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponLiveVisualStatusVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/GroupedPoisonLineageDiagnosticVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/GroupedPoisonPresentationAliasVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/AmmoRangedWeaponPoisonPresentationVerification\\.cpp$")
 
 # Explicitly include newly added capability helpers (guards against stale glob caches).
 list(APPEND SOURCE_FILES
@@ -296,6 +297,13 @@ target_compile_definitions(wheeler_grouped_poison_presentation_alias_verificatio
 target_include_directories(wheeler_grouped_poison_presentation_alias_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
 if(MSVC)
 	target_compile_options(wheeler_grouped_poison_presentation_alias_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(wheeler_ammo_ranged_weapon_poison_presentation_verification EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/AmmoRangedWeaponPoisonPresentationVerification.cpp")
+target_compile_features(wheeler_ammo_ranged_weapon_poison_presentation_verification PRIVATE cxx_std_23)
+if(MSVC)
+	target_compile_options(wheeler_ammo_ranged_weapon_poison_presentation_verification PRIVATE "/utf-8" "/permissive-")
 endif()
 
 target_precompile_headers(

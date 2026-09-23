@@ -99,6 +99,8 @@ namespace
 			return "PoisonAlreadyApplied";
 		case Texts::TextType::PoisonSafeResolutionFailed:
 			return "PoisonSafeResolutionFailed";
+		case Texts::TextType::AmmoWheelWeaponPoisonLabel:
+			return "AmmoWheelWeaponPoisonLabel";
 		default:
 			return "";
 		}

@@ -29,6 +29,7 @@ EditHintNavToggleGamepad = Left Stick Button for keybind hints
 InsufficientMagickaForInstantCast = Not enough magicka for instant cast.
 PoisonAlreadyApplied = The current weapon is already poisoned.
 PoisonSafeResolutionFailed = Wheeler: Unable to safely apply poison to the equipped weapon.
+AmmoWheelWeaponPoisonLabel = Poison
 
 ; Notifications
 WheelBehaviorDefaultsSaved = Wheeler: Wheel Behavior defaults saved.
