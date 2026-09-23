@@ -1,7 +1,19 @@
 # Wheeler Refined
 
 <p align="center">
+  <img src="images/refined/wheeler-refined-hero.jpg" alt="Wheeler Refined" width="100%">
+</p>
+
+<p align="center">
   A stability and feature overhaul of dTry/D7ry's radial quick-action menu for Skyrim Special Edition and Anniversary Edition.
+</p>
+
+<p align="center">
+  <a href="https://www.nexusmods.com/skyrimspecialedition/mods/167380"><img alt="Nexus Mods" src="https://img.shields.io/badge/Nexus%20Mods-Download-DA8E35?logo=nexusmods&logoColor=white"></a>
+  <a href="https://github.com/c0kadam/Wheeler-Refined/tags"><img alt="Current source version" src="https://img.shields.io/github/v/tag/c0kadam/Wheeler-Refined?label=source%20version"></a>
+  <a href="#building-from-source"><img alt="Build from source" src="https://img.shields.io/badge/build-from%20source-2F81F7"></a>
+  <a href="https://github.com/c0kadam/Wheeler-Refined/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/c0kadam/Wheeler-Refined"></a>
+  <a href="LICENSE"><img alt="GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-3DA639"></a>
 </p>
 
 > [!IMPORTANT]
@@ -17,11 +29,45 @@ This is an independent derivative project. It is not an official continuation an
 
 | Area | Refined experience |
 | --- | --- |
-| Stability | Safer inventory snapshots, weapon restoration, transformed-state handling, and input behavior. |
+| Stability | Safer inventory and action snapshots, same-form weapon restoration, transformed-state handling, and input behavior. |
 | Main Wheel | Configurable wheels, slots, direct actions, hand indicators, Release to Use, and save-specific persistence. |
-| Ammo Wheel | A separate inventory-driven wheel for arrows and bolts with layouts, sorting, low-ammo feedback, and optional poison information. |
-| Transform Wheel | Managed wheels for transformed states, with configurable Werewolf, Vampire Lord, Lich, and generic form matching. |
-| Integrations | Optional dMenu NG, Inventory Injector, OStim, and Action Hotkeys Bridge support. |
+| Controller and mouse input | Configurable Favorites and Quick Favorites workflows, controller and mouse paths, input pass-through, and dMenu-driven behavior. |
+| Ammo Wheel | A separate inventory-driven wheel for arrows and bolts with layouts, sorting, low-ammo feedback, reskin support, and optional poison information. |
+| Transform Wheel | Managed wheels for Werewolf, Vampire Lord, configured Lich forms, and configured generic transformations, with Lich safeguards. |
+| Direct actions | Configurable direct actions and Release to Use provide deliberate activation paths. |
+| Readable feedback | Hand state, activation progress, selected ammo, low-ammo feedback, and optional poison presentation. |
+| Expanded item support | Ingredient items and configured Favorites and Quick Favorites workflows alongside the core wheel item types. |
+| dMenu configuration | Update-safe factory defaults and in-game control of behavior, layouts, sorting, indicators, and appearance. |
+| Integrations | Optional dMenu NG, Inventory Injector, OStim, Action Hotkeys Bridge, and External Wheeler API support. |
+
+## Integration overview
+
+Integrations extend Wheeler Refined when their companion mod or API is present; none is required for core wheel interaction.
+
+| Integration | Type/default | Purpose | Configuration/documentation |
+| --- | --- | --- | --- |
+| I4 / Inventory Injector | Optional runtime integration; enabled in factory defaults | Uses Inventory Injector metadata and rendering for richer item icons, labels, and colors while retaining Wheeler fallbacks. | [I4.defaults.ini](Data/SKSE/Plugins/wheeler/I4.defaults.ini) |
+| Action Hotkeys Bridge | Optional runtime integration; disabled | Mirrors configured Action Hotkeys slots into managed Wheeler wheels and supports native API hotkeys. | [ActionHotkeysBridge.defaults.ini](Data/SKSE/Plugins/wheeler/ActionHotkeysBridge.defaults.ini) · [API sample](tools/action_hotkeys_bridge_api_sample/README.md) |
+| OStim | Optional runtime integration; disabled | Adds a configurable scene-control wheel with navigation, position browsing, previews, and restoration behavior. | [OStimIntegration.defaults.ini](Data/SKSE/Plugins/wheeler/OStimIntegration.defaults.ini) |
+| External Wheeler API | Developer API; available after Wheeler initializes | Lets SKSE plugins manage transient wheels, entries, form items, external hotkeys, and supported callbacks. | [API overview](docs/API_INTEGRATION_SUMMARY.md) · [Logging reference](docs/API_LOGGING_REFERENCE.md) |
+
+## Screenshots
+
+### Main Wheel scaling
+
+![Before-and-after comparison of Wheeler Refined automatic scaling](images/refined/main-wheel-scaling.png)
+
+### Ammo Wheel
+
+![Ammo Wheel displaying arrows and bolts around the player](images/refined/ammo-wheel.png)
+
+### dMenu customization
+
+![Wheeler Refined Ammo Wheel settings inside dMenu](images/refined/dmenu-customization.png)
+
+### Low-ammo feedback
+
+![Low-ammo warning displayed on an Ammo Wheel slot](images/refined/low-ammo-indicator.png)
 
 ## Installation
 
@@ -34,6 +80,17 @@ Use the [Wheeler Refined Nexus page](https://www.nexusmods.com/skyrimspecialedit
 - [Wheeler - Quick Action Wheel of Skyrim](https://www.nexusmods.com/skyrimspecialedition/mods/97345). Wheeler Refined relies on the original package and assets for normal runtime installation.
 - The current release of [dMenu NG](https://www.nexusmods.com/skyrimspecialedition/mods/166751).
 - Wheeler Refined.
+
+### Recommended or conditional
+
+- [Dragonborn Reskin - Wheeler](https://www.nexusmods.com/skyrimspecialedition/mods/100043) is an optional visual reskin recommended by the author and used while many improvements were developed.
+- Install [Skyrim Souls and Wheeler Slow Time Fix](https://www.nexusmods.com/skyrimspecialedition/mods/174828) when using Skyrim Souls.
+- [Typing Mode](https://www.nexusmods.com/skyrimspecialedition/mods/164851) can help when text input conflicts with other menus.
+- [Ammo Wheel Reskin SHULDOVAH - Wheeler Refined](https://www.nexusmods.com/skyrimspecialedition/mods/176631) is a concept visual reskin for Wheeler Refined's Ammo Wheel.
+
+#### Ammo Wheel Reskin SHULDOVAH preview
+
+![Ammo Wheel Reskin SHULDOVAH](images/refined/shuldovahAmmoWheel.jpg)
 
 ### Normal mod-manager order
 
@@ -106,17 +163,18 @@ cmake --preset vs2022-windows -B build-public `
 cmake --build build-public --config Release --target wheeler
 ```
 
-The DLL is produced at `build-public/src/Release/wheeler.dll`. See [BUILDING.md](BUILDING.md) for setup and no-deployment build guidance.
+The DLL is produced at `build-public/src/Release/wheeler.dll`. See the [build requirements above](#building-from-source) for setup and no-deployment build guidance.
 
 ## Developer Documentation
 
-- [Build guide](BUILDING.md)
+- [Build from source](#building-from-source)
 - [Contributing](CONTRIBUTING.md)
 - [API integration summary](docs/API_INTEGRATION_SUMMARY.md)
 - [API logging reference](docs/API_LOGGING_REFERENCE.md)
 - [Input compatibility](docs/INPUT_COMPATIBILITY.md)
 - [Ammo Wheel reskin manual](docs/Reskin_Manual_AmmoWheel.md)
 - [Action Hotkeys bridge API sample](tools/action_hotkeys_bridge_api_sample/README.md)
+- [Wheeler Preview Tool](tools/wheeler_preview/README.md)
 
 ## License and Attribution
 
