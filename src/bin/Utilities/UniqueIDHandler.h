@@ -14,7 +14,7 @@ public:
 	static void EnsureXListUniqueness(RE::ExtraDataList*& a_extraList);
 	static std::uint16_t RetagXListUniqueID(RE::ExtraDataList* a_extraList);
 
-	// Compatibility shims for newer call sites that remain outside the weapon rollback scope.
+	// Compatibility shims for newer call sites outside the weapon restore path.
 	static bool ShouldBypassInventoryHooks();
 	static void QueuePostLoadInventoryRepair(std::string_view a_reason = {});
 };

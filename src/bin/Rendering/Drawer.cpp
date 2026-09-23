@@ -207,9 +207,6 @@ void Drawer::draw_text_block(float a_x, float a_y, std::string& a_text, ImU32 a_
 
 
 
-// Derived from LamasTinyHUD's texture drawing implementation at revision
-// dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited through
-// original Wheeler and subsequently adapted for Wheeler Refined.
 void Drawer::draw_texture(ID3D11ShaderResourceView* a_texture,
 	ImVec2 a_center,
 	float a_offset_x,
