@@ -5,6 +5,14 @@
 #include <optional>
 #include <vector>
 
+struct OStimTrackerSnapshot
+{
+	OStimAvailabilityInfo availability{};
+	std::optional<OStimSceneInfo> sceneInfo{};
+	std::vector<OStimPositionInfo> positions{};
+	std::uint64_t revision = 0;
+};
+
 class OStimStateTracker
 {
 public:
@@ -15,6 +23,7 @@ public:
 
 	static OStimAvailabilityInfo GetAvailability();
 	static bool IsSceneActive();
+	static OStimTrackerSnapshot GetSnapshot();
 	static std::optional<OStimSceneInfo> GetCurrentSceneInfo();
 	static std::vector<OStimPositionInfo> GetAvailablePositions();
 	static bool CanDispatchByCooldown(OStimActionKind a_action);

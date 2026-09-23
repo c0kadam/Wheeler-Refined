@@ -630,9 +630,12 @@ namespace
 WheelItemOStimAction::WheelItemOStimAction(OStimActionPayload a_payload) :
 	_payload(std::move(a_payload))
 {
-	_label = _payload.displayName.empty() ?
+	const std::string nativeLabel = _payload.displayName.empty() ?
 		std::string(OStimIntegration::GetActionLabel(_payload.kind)) :
 		_payload.displayName;
+	_label = _payload.kind == OStimActionKind::SelectSpecificPosition ?
+		BuildOStimSceneActionPresentationLabel(_payload.semantic, nativeLabel) :
+		nativeLabel;
 	const auto resolvedIcon = ResolveActionIcon(_payload);
 	_texture = resolvedIcon.image;
 	_usesCustomManagedIcon = resolvedIcon.usedCustomManagedIcon;
@@ -737,9 +740,9 @@ std::string WheelItemOStimAction::BuildDescription() const
 	case OStimActionKind::OpenPositionBrowser:
 		return "Browse scene-compatible OStim positions.";
 	case OStimActionKind::OpenPositionSubmenu:
-		return "Open a nested OStim position browser for this branch.";
+		return "Legacy OStim browser action; no longer generated.";
 	case OStimActionKind::ReturnToPositionBrowserParent:
-		return "Return to the previous OStim browser level.";
+		return "Legacy OStim browser action; no longer generated.";
 	case OStimActionKind::ReturnToControlWheel:
 		return "Return to the OStim control wheel.";
 	case OStimActionKind::StopScene:
@@ -749,14 +752,11 @@ std::string WheelItemOStimAction::BuildDescription() const
 	case OStimActionKind::DecreaseSpeed:
 		return "Decrease OStim animation speed.";
 	case OStimActionKind::NextPosition:
-		return "Travel to the next cached OStim position.";
+		return "Legacy OStim position action; no longer generated.";
 	case OStimActionKind::PreviousPosition:
-		return "Travel to the previous cached OStim position.";
+		return "Legacy OStim position action; no longer generated.";
 	case OStimActionKind::SelectSpecificPosition:
-		if (_payload.category.empty()) {
-			return _payload.sceneID;
-		}
-		return fmt::format("{}\n{}", _payload.category, _payload.sceneID);
+		return BuildOStimSceneSemanticGuidance(_payload.semantic);
 	case OStimActionKind::OpenControlWheel:
 		return "Open the managed OStim control wheel.";
 	case OStimActionKind::NextStage:

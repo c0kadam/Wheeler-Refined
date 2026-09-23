@@ -64,7 +64,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     // State
-    static char dataRoot[512] = "C:\\workBench\\dMenu-Dev\\wheeler-dev\\Data"; 
+    static char dataRoot[512] = "Data"; 
     static int numSlots = 8;
     static int hoveredSlot = 0;
     

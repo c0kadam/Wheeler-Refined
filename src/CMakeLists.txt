@@ -40,16 +40,33 @@ list(APPEND SOURCE_FILES
 	"${SOURCE_DIR}/bin/Integrations/ActionHotkeysBridge.h"
 	"${SOURCE_DIR}/bin/Integrations/OStimBridge.cpp"
 	"${SOURCE_DIR}/bin/Integrations/OStimBridge.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimAutoModePolicy.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimConfigPolicy.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimSceneActionClosePolicy.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimUnifiedWheelModel.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimNGSceneAPI.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimNGSceneAPI.h"
 	"${SOURCE_DIR}/bin/Integrations/OStimNGThreadAPI.cpp"
 	"${SOURCE_DIR}/bin/Integrations/OStimNGThreadAPI.h"
 	"${SOURCE_DIR}/bin/Integrations/OStimIntegration.cpp"
 	"${SOURCE_DIR}/bin/Integrations/OStimIntegration.h"
 	"${SOURCE_DIR}/bin/Integrations/OStimPreviewResolver.cpp"
 	"${SOURCE_DIR}/bin/Integrations/OStimPreviewResolver.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimSceneSemantic.h"
 	"${SOURCE_DIR}/bin/Integrations/OStimStateTracker.cpp"
 	"${SOURCE_DIR}/bin/Integrations/OStimStateTracker.h"
 	"${SOURCE_DIR}/bin/Integrations/OStimTypes.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimUndressVisualRefresh.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimUndressVisualRefresh.h"
 )
+
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimNavigationModelVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimSceneSemanticVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimAutoModeVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimUnifiedWheelVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimClosePolicyVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimConfigVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Integrations/OStimUndressVisualRefreshVerification\\.cpp$")
 
 # ? SourceFile ???????????(????????????)
 foreach(fileItem ${SOURCE_FILES})       
@@ -149,6 +166,8 @@ find_package(imgui REQUIRED)
 
 find_package(Freetype REQUIRED)
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 
 
 target_link_libraries(
@@ -158,9 +177,107 @@ target_link_libraries(
 		xbyak::xbyak
 		imgui::imgui
 		Freetype::Freetype
+		nlohmann_json::nlohmann_json
 		ole32
 		windowscodecs
 )
+
+add_executable(
+	wheeler_ostim_navigation_model_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimNavigationModelVerification.cpp"
+)
+target_compile_features(wheeler_ostim_navigation_model_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_navigation_model_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+if(MSVC)
+	target_compile_options(wheeler_ostim_navigation_model_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_ostim_scene_semantic_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimSceneSemanticVerification.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimSceneSemantic.h"
+)
+target_compile_features(wheeler_ostim_scene_semantic_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_scene_semantic_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+target_link_libraries(wheeler_ostim_scene_semantic_verification PRIVATE nlohmann_json::nlohmann_json)
+if(MSVC)
+	target_compile_options(wheeler_ostim_scene_semantic_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_custom_target(
+	wheeler_ostim_thread_zero_policy_verification
+	COMMAND "${CMAKE_COMMAND}"
+		"-DNATIVE_API_SOURCE:FILEPATH=${SOURCE_DIR}/bin/Integrations/OStimNGThreadAPI.cpp"
+		"-DINTEGRATION_SOURCE:FILEPATH=${SOURCE_DIR}/bin/Integrations/OStimIntegration.cpp"
+		-P "${SOURCE_DIR}/cmake/OStimThreadZeroPolicyVerification.cmake"
+	COMMENT "Verifying that native OStim thread ID zero is not rejected"
+	VERBATIM
+)
+
+add_executable(
+	wheeler_ostim_auto_mode_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimAutoModeVerification.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimAutoModePolicy.h"
+)
+target_compile_features(wheeler_ostim_auto_mode_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_auto_mode_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+if(MSVC)
+	target_compile_options(wheeler_ostim_auto_mode_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_ostim_unified_wheel_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimUnifiedWheelVerification.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimUnifiedWheelModel.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimAutoModePolicy.h"
+)
+target_compile_features(wheeler_ostim_unified_wheel_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_unified_wheel_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+if(MSVC)
+	target_compile_options(wheeler_ostim_unified_wheel_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_ostim_close_policy_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimClosePolicyVerification.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimSceneActionClosePolicy.h"
+	"${SOURCE_DIR}/bin/Integrations/OStimUnifiedWheelModel.h"
+)
+target_compile_features(wheeler_ostim_close_policy_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_close_policy_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+if(MSVC)
+	target_compile_options(wheeler_ostim_close_policy_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_ostim_config_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimConfigVerification.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimConfigPolicy.h"
+)
+target_compile_features(wheeler_ostim_config_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_config_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+target_link_libraries(wheeler_ostim_config_verification PRIVATE nlohmann_json::nlohmann_json)
+if(MSVC)
+	target_compile_options(wheeler_ostim_config_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_ostim_undress_visual_refresh_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Integrations/OStimUndressVisualRefreshVerification.cpp"
+	"${SOURCE_DIR}/bin/Integrations/OStimUndressVisualRefresh.h"
+)
+target_compile_features(wheeler_ostim_undress_visual_refresh_verification PRIVATE cxx_std_23)
+target_include_directories(wheeler_ostim_undress_visual_refresh_verification PRIVATE "${SOURCE_DIR}/bin/Integrations")
+if(MSVC)
+	target_compile_options(wheeler_ostim_undress_visual_refresh_verification PRIVATE "/utf-8" "/permissive-")
+endif()
 
 add_executable(
 	wheeler_transient_lifecycle_verification

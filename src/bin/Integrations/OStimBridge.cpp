@@ -303,6 +303,14 @@ bool OStimBridge::IsQuestAvailable()
 OStimAvailabilityInfo OStimBridge::GetAvailability()
 {
 	OStimAvailabilityInfo result{};
+	result.hasNativeThreadAPI = OStimNGThreadAPI::IsAvailable();
+	if (result.hasNativeThreadAPI) {
+		result.available = true;
+		result.apiVersion = s_cachedApiVersion.load(std::memory_order_acquire);
+		result.reason = "NativeThreadAPI";
+		return result;
+	}
+
 	if (!ResolveQuest()) {
 		result.reason = "QuestMissing";
 		return result;
@@ -313,29 +321,23 @@ OStimAvailabilityInfo OStimBridge::GetAvailability()
 	}
 
 	result.hasDatabase = HasBoundScript(kDatabaseScriptName);
-	result.hasNativeThreadAPI = OStimNGThreadAPI::IsAvailable();
-
 	int apiVersion = 0;
 	if (!GetAPIInteger("GetAPIVersion", apiVersion)) {
 		apiVersion = s_cachedApiVersion.load(std::memory_order_acquire);
-		if (apiVersion <= 0 && !result.hasNativeThreadAPI) {
+		if (apiVersion <= 0) {
 			result.reason = "APICallFailed";
 			return result;
 		}
 
 		result.available = true;
 		result.apiVersion = apiVersion;
-		result.reason = result.hasNativeThreadAPI ?
-			(result.hasDatabase ? "OK.NativeThreadAPI" : "DatabaseScriptMissing.NativeThreadAPI") :
-			(result.hasDatabase ? "OK" : "DatabaseScriptMissing");
+		result.reason = result.hasDatabase ? "LegacyPapyrus" : "LegacyPapyrus.DatabaseScriptMissing";
 		return result;
 	}
 
 	result.available = true;
 	result.apiVersion = apiVersion;
-	result.reason = result.hasNativeThreadAPI ?
-		(result.hasDatabase ? "OK.NativeThreadAPI" : "DatabaseScriptMissing.NativeThreadAPI") :
-		(result.hasDatabase ? "OK" : "DatabaseScriptMissing");
+	result.reason = result.hasDatabase ? "LegacyPapyrus" : "LegacyPapyrus.DatabaseScriptMissing";
 	s_cachedApiVersion.store(apiVersion, std::memory_order_release);
 	return result;
 }
@@ -661,14 +663,7 @@ std::optional<OStimSceneInfo> OStimBridge::GetCurrentSceneInfo()
 	}
 
 	if (availability.hasNativeThreadAPI) {
-		if (auto info = OStimNGThreadAPI::GetCurrentSceneInfo(); info.has_value()) {
-			info->apiVersion = availability.apiVersion;
-			BlendPapyrusSceneInfo(*info);
-			if (info->participantCount <= 0) {
-				info->participantCount = static_cast<int>(info->participants.size());
-			}
-			return info;
-		}
+		return std::nullopt;
 	}
 
 	auto* quest = ResolveQuest();
@@ -722,17 +717,13 @@ std::vector<OStimPositionInfo> OStimBridge::GetCandidatePositions(bool a_preferC
 	if (!availability.available) {
 		return positions;
 	}
+	if (availability.hasNativeThreadAPI) {
+		return positions;
+	}
 
 	const auto scene = GetCurrentSceneInfo();
 	if (!scene || scene->participantCount <= 0) {
 		return positions;
-	}
-
-	if (availability.hasNativeThreadAPI) {
-		positions = OStimNGThreadAPI::GetNavigationPositions(*scene);
-		if (!positions.empty()) {
-			return positions;
-		}
 	}
 
 	if (availability.hasDatabase) {
