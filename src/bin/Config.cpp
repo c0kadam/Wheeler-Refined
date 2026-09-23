@@ -407,7 +407,9 @@ namespace
 			{ "VampireLordForm", "HiddenSpellTokens" },
 			{ "LichForm", "SpellTokens" },
 			{ "LichForm", "ExitSpellTokens" },
-			{ "LichForm", "AdditionalSpellFormIDs" }
+			{ "LichForm", "AdditionalSpellFormIDs" },
+			{ "LichForm", "HiddenSpellFormIDs" },
+			{ "LichForm", "HiddenSpellTokens" }
 		};
 
 		for (const auto& entry : keys) {
@@ -946,7 +948,7 @@ namespace
 		std::string vampireLordFormExitSpellTokens{ "Revert,Revert Form,Change Form" };
 		std::string vampireLordFormAdditionalSpellFormIDs{ "Skyrim.esm|0x000C4DE1" };
 		std::string vampireLordFormHiddenSpellFormIDs{ "Dawnguard.esm|0x0000BFED,Dawnguard.esm|0x00013EC9" };
-		std::string vampireLordFormHiddenSpellTokens{ "Vampiric Drain" };
+		std::string vampireLordFormHiddenSpellTokens{ "Vampiric Drain,Unbind Slot" };
 		bool vampireLordFormDebugLog{ false };
 		bool lichFormEnabled{ true };
 		std::string lichFormMode{ "Overlay" };
@@ -958,12 +960,15 @@ namespace
 		bool lichFormHideGear{ true };
 		bool lichFormBlockStaffSwapping{ true };
 		bool lichFormSuppressDirectCast{ true };
+		bool lichFormBlockHiddenSpellActivation{ true };
 		std::string lichFormRaceEditorIDContains{ "Lich,Necro,UCL" };
 		std::string lichFormRaceKeywords{};
 		std::string lichFormRaceFormIDs{};
-		std::string lichFormSpellTokens{ "Death Grip,Ice Coffin,Dark Conduit,Revert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal" };
+		std::string lichFormSpellTokens{ "Necrotic Rejuvenation,Sacrifice Thrall,Bane of Life,Ice Coffin,Seed Of Pestilence,Poison Shroud,Mind Flay,Enslave Mind,Enslave Undead,Mass Reanimate,World Of Corpses,Summon Diilonthur,True Sight,Devour Soul,Dark Conduit,Revert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal" };
 		std::string lichFormExitSpellTokens{ "Revert,NecroRevert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal" };
 		std::string lichFormAdditionalSpellFormIDs{};
+		std::string lichFormHiddenSpellFormIDs{};
+		std::string lichFormHiddenSpellTokens{};
 		bool lichFormDebugLog{ false };
 		bool actionHotkeysBridgeEnabled{ true };
 		std::string actionHotkeysBridgeSourceIniPath{ R"(Data\SKSE\Plugins\ActionHotkeys.ini)" };
@@ -1297,12 +1302,15 @@ namespace
 		       a.lichFormHideGear == b.lichFormHideGear &&
 		       a.lichFormBlockStaffSwapping == b.lichFormBlockStaffSwapping &&
 		       a.lichFormSuppressDirectCast == b.lichFormSuppressDirectCast &&
+		       a.lichFormBlockHiddenSpellActivation == b.lichFormBlockHiddenSpellActivation &&
 		       a.lichFormRaceEditorIDContains == b.lichFormRaceEditorIDContains &&
 		       a.lichFormRaceKeywords == b.lichFormRaceKeywords &&
 		       a.lichFormRaceFormIDs == b.lichFormRaceFormIDs &&
 		       a.lichFormSpellTokens == b.lichFormSpellTokens &&
 		       a.lichFormExitSpellTokens == b.lichFormExitSpellTokens &&
 		       a.lichFormAdditionalSpellFormIDs == b.lichFormAdditionalSpellFormIDs &&
+		       a.lichFormHiddenSpellFormIDs == b.lichFormHiddenSpellFormIDs &&
+		       a.lichFormHiddenSpellTokens == b.lichFormHiddenSpellTokens &&
 		       a.lichFormDebugLog == b.lichFormDebugLog &&
 
 		       a.cooldownsEnabled == b.cooldownsEnabled &&
@@ -1674,12 +1682,15 @@ namespace
 		GetBoolValue(ini, "LichForm", "HideGear", snapshot.lichFormHideGear);
 		GetBoolValue(ini, "LichForm", "BlockStaffSwapping", snapshot.lichFormBlockStaffSwapping);
 		GetBoolValue(ini, "LichForm", "SuppressDirectCast", snapshot.lichFormSuppressDirectCast);
+		GetBoolValue(ini, "LichForm", "BlockHiddenSpellActivation", snapshot.lichFormBlockHiddenSpellActivation);
 		GetStringValue(ini, "LichForm", "RaceEditorIDContains", snapshot.lichFormRaceEditorIDContains);
 		GetStringValue(ini, "LichForm", "RaceKeywords", snapshot.lichFormRaceKeywords);
 		GetStringValue(ini, "LichForm", "RaceFormIDs", snapshot.lichFormRaceFormIDs);
 		GetStringValue(ini, "LichForm", "SpellTokens", snapshot.lichFormSpellTokens);
 		GetStringValue(ini, "LichForm", "ExitSpellTokens", snapshot.lichFormExitSpellTokens);
 		GetStringValue(ini, "LichForm", "AdditionalSpellFormIDs", snapshot.lichFormAdditionalSpellFormIDs);
+		GetStringValue(ini, "LichForm", "HiddenSpellFormIDs", snapshot.lichFormHiddenSpellFormIDs);
+		GetStringValue(ini, "LichForm", "HiddenSpellTokens", snapshot.lichFormHiddenSpellTokens);
 		GetBoolValue(ini, "LichForm", "DebugLog", snapshot.lichFormDebugLog);
 		GetBoolValue(ini, "WheelBehavior.ActionHotkeysBridge", "Enabled", snapshot.actionHotkeysBridgeEnabled);
 		GetStringValue(ini, "WheelBehavior.ActionHotkeysBridge", "SourceIniPath", snapshot.actionHotkeysBridgeSourceIniPath);
@@ -2129,12 +2140,15 @@ namespace
 		Config::WheelBehavior::TransformWheels::LichForm::HideGear = snapshot.lichFormHideGear;
 		Config::WheelBehavior::TransformWheels::LichForm::BlockStaffSwapping = snapshot.lichFormBlockStaffSwapping;
 		Config::WheelBehavior::TransformWheels::LichForm::SuppressDirectCast = snapshot.lichFormSuppressDirectCast;
+		Config::WheelBehavior::TransformWheels::LichForm::BlockHiddenSpellActivation = snapshot.lichFormBlockHiddenSpellActivation;
 		Config::WheelBehavior::TransformWheels::LichForm::RaceEditorIDContains = snapshot.lichFormRaceEditorIDContains;
 		Config::WheelBehavior::TransformWheels::LichForm::RaceKeywords = snapshot.lichFormRaceKeywords;
 		Config::WheelBehavior::TransformWheels::LichForm::RaceFormIDs = snapshot.lichFormRaceFormIDs;
 		Config::WheelBehavior::TransformWheels::LichForm::SpellTokens = snapshot.lichFormSpellTokens;
 		Config::WheelBehavior::TransformWheels::LichForm::ExitSpellTokens = snapshot.lichFormExitSpellTokens;
 		Config::WheelBehavior::TransformWheels::LichForm::AdditionalSpellFormIDs = snapshot.lichFormAdditionalSpellFormIDs;
+		Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellFormIDs = snapshot.lichFormHiddenSpellFormIDs;
+		Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellTokens = snapshot.lichFormHiddenSpellTokens;
 		Config::WheelBehavior::TransformWheels::LichForm::DebugLog = snapshot.lichFormDebugLog;
 		Config::Cooldowns::Enabled = snapshot.cooldownsEnabled;
 		Config::Cooldowns::ShowTimer = snapshot.cooldownsShowTimer;
@@ -2420,12 +2434,15 @@ namespace
 		out.SetBoolValue("LichForm", "HideGear", snapshot.lichFormHideGear);
 		out.SetBoolValue("LichForm", "BlockStaffSwapping", snapshot.lichFormBlockStaffSwapping);
 		out.SetBoolValue("LichForm", "SuppressDirectCast", snapshot.lichFormSuppressDirectCast);
+		out.SetBoolValue("LichForm", "BlockHiddenSpellActivation", snapshot.lichFormBlockHiddenSpellActivation);
 		out.SetValue("LichForm", "RaceEditorIDContains", snapshot.lichFormRaceEditorIDContains.c_str());
 		out.SetValue("LichForm", "RaceKeywords", snapshot.lichFormRaceKeywords.c_str());
 		out.SetValue("LichForm", "RaceFormIDs", snapshot.lichFormRaceFormIDs.c_str());
 		out.SetValue("LichForm", "SpellTokens", snapshot.lichFormSpellTokens.c_str());
 		out.SetValue("LichForm", "ExitSpellTokens", snapshot.lichFormExitSpellTokens.c_str());
 		out.SetValue("LichForm", "AdditionalSpellFormIDs", snapshot.lichFormAdditionalSpellFormIDs.c_str());
+		out.SetValue("LichForm", "HiddenSpellFormIDs", snapshot.lichFormHiddenSpellFormIDs.c_str());
+		out.SetValue("LichForm", "HiddenSpellTokens", snapshot.lichFormHiddenSpellTokens.c_str());
 		out.SetBoolValue("LichForm", "DebugLog", snapshot.lichFormDebugLog);
 		out.SetBoolValue("Styling.HoverDelay", "Enabled", snapshot.hoverDelayEnabled);
 		out.SetDoubleValue("Styling.HoverDelay", "Radius", snapshot.hoverDelayRadius);
@@ -3839,12 +3856,15 @@ static void ReadWheelBehaviorConfigFromIni(const CSimpleIniA& ini)
 	GetBoolValue(ini, "LichForm", "HideGear", Config::WheelBehavior::TransformWheels::LichForm::HideGear);
 	GetBoolValue(ini, "LichForm", "BlockStaffSwapping", Config::WheelBehavior::TransformWheels::LichForm::BlockStaffSwapping);
 	GetBoolValue(ini, "LichForm", "SuppressDirectCast", Config::WheelBehavior::TransformWheels::LichForm::SuppressDirectCast);
+	GetBoolValue(ini, "LichForm", "BlockHiddenSpellActivation", Config::WheelBehavior::TransformWheels::LichForm::BlockHiddenSpellActivation);
 	GetStringValue(ini, "LichForm", "RaceEditorIDContains", Config::WheelBehavior::TransformWheels::LichForm::RaceEditorIDContains);
 	GetStringValue(ini, "LichForm", "RaceKeywords", Config::WheelBehavior::TransformWheels::LichForm::RaceKeywords);
 	GetStringValue(ini, "LichForm", "RaceFormIDs", Config::WheelBehavior::TransformWheels::LichForm::RaceFormIDs);
 	GetStringValue(ini, "LichForm", "SpellTokens", Config::WheelBehavior::TransformWheels::LichForm::SpellTokens);
 	GetStringValue(ini, "LichForm", "ExitSpellTokens", Config::WheelBehavior::TransformWheels::LichForm::ExitSpellTokens);
 	GetStringValue(ini, "LichForm", "AdditionalSpellFormIDs", Config::WheelBehavior::TransformWheels::LichForm::AdditionalSpellFormIDs);
+	GetStringValue(ini, "LichForm", "HiddenSpellFormIDs", Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellFormIDs);
+	GetStringValue(ini, "LichForm", "HiddenSpellTokens", Config::WheelBehavior::TransformWheels::LichForm::HiddenSpellTokens);
 	GetBoolValue(ini, "LichForm", "DebugLog", Config::WheelBehavior::TransformWheels::LichForm::DebugLog);
 
 	// Gamepad navigation behavior (main wheel only)

@@ -1065,7 +1065,7 @@ namespace Config
 				inline std::string AdditionalSpellFormIDs = "Skyrim.esm|0x000C4DE1";
 				// VL-only hidden magic forms; accepts SpellItem and TESShout forms.
 				inline std::string HiddenSpellFormIDs = "Dawnguard.esm|0x0000BFED,Dawnguard.esm|0x00013EC9";
-				inline std::string HiddenSpellTokens = "Vampiric Drain";
+				inline std::string HiddenSpellTokens = "Vampiric Drain,Unbind Slot";
 				inline bool DebugLog = false;
 			}
 
@@ -1088,15 +1088,18 @@ namespace Config
 				inline bool HideGear = true;
 				inline bool BlockStaffSwapping = true;
 				inline bool SuppressDirectCast = true;
+				inline bool BlockHiddenSpellActivation = true;
 				inline std::string RaceEditorIDContains = "Lich,Necro,UCL";
 				inline std::string RaceKeywords = "";
 				inline std::string RaceFormIDs = "";
 				// Conservative Lich kit tokens. Add broader lich-themed combat spells manually via SpellTokens or AdditionalSpellFormIDs if desired.
-				inline std::string SpellTokens = "Death Grip,Ice Coffin,Dark Conduit,Revert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal";
+				inline std::string SpellTokens = "Necrotic Rejuvenation,Sacrifice Thrall,Bane of Life,Ice Coffin,Seed Of Pestilence,Poison Shroud,Mind Flay,Enslave Mind,Enslave Undead,Mass Reanimate,World Of Corpses,Summon Diilonthur,True Sight,Devour Soul,Dark Conduit,Revert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal";
 				// Exit/revert tokens always allowed when transform guard is active.
 				inline std::string ExitSpellTokens = "Revert,NecroRevert,Revert Form,Return to Human,Human Form,Mortal Form,Return to Mortal";
 				// Optional comma-separated FormIDs for upgraded lich spells that do not expose stable tokens.
 				inline std::string AdditionalSpellFormIDs = "";
+				inline std::string HiddenSpellFormIDs = "";
+				inline std::string HiddenSpellTokens = "";
 				inline bool DebugLog = false;
 			}
 		}

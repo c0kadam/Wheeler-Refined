@@ -8,15 +8,8 @@ This document covers Lich integration for:
 
 Implementation target is the existing generic transform subsystem, extended with a Lich policy (overlay/replace/disabled), transform guard, and config-driven detection.
 
-## Source Analysis (Local Files)
-Analyzed scripts from locally available source drops for:
-- Undeath Classical Lichdom
-- Undeath Immersive Lichdom SSE
-- Classical Lichdom - Vampiric
-
-Important note:
-- In the provided folders, no `.esp/.esm/.esl` files were present (script-only source drop).
-- Plugin mapping was derived from folder/package naming and script namespaces.
+## Source Analysis
+This integration is based on the public scripts and package conventions used by the supported Undeath variants. Plugin mapping follows the relevant package naming and script namespaces.
 
 ### Classical Lichdom: state detection and lifecycle
 Primary scripts:
