@@ -1696,11 +1696,11 @@ std::shared_ptr<WheelItem> WheelItemFactory::MakeWheelItemFromMenuHovered()
 			LogBindingDecision("InventoryMenu", boundObj, caps, decision.chosenType, decision.reason);
 			return WithMissingCategory(decision.item, boundObj);
 		} else if (ui->IsMenuOpen(RE::MagicMenu::MENU_NAME)) {
-			auto* magMenu = static_cast<RE::MagicMenu*>(ui->GetMenu(RE::MagicMenu::MENU_NAME).get());
+			auto magMenu = ui->GetMenu<RE::MagicMenu>();
 			if (!magMenu) {
 				return nullptr;
 			}
-			RE::TESForm* form = Utils::Inventory::GetSelectedFormInMagicMenu(magMenu);
+			RE::TESForm* form = Utils::Inventory::GetSelectedFormInMagicMenu(magMenu.get());
 			if (!form) {
 				return nullptr;
 			}

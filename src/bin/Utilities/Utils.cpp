@@ -5,8 +5,6 @@
 
 namespace
 {
-	// CommonLibSSE-NG 6.7 requires a live GFxMovieView to construct RE::ItemCard,
-	// but the native description function still accepts the pre-6.7 ItemCard layout.
 	struct LegacyItemCard
 	{
 		RE::GFxValue obj;
@@ -464,7 +462,23 @@ namespace Utils
 		}
 		RE::TESForm* GetSelectedFormInMagicMenu(RE::MagicMenu* a_magMen)
 		{
-			if (a_magMen) {
+			if (!a_magMen) {
+				return nullptr;
+			}
+
+			// Vanilla MagicMenu exposes its authoritative selection through the native
+			// MagicItemList.  This path is independent of the loaded SWF hierarchy.
+			RE::MagicItemList* itemList = a_magMen->GetRuntimeData().itemList;
+			if (itemList) {
+				if (RE::MagicItemList::Item* selectedItem = itemList->GetSelectedItem();
+					selectedItem && selectedItem->data.baseForm) {
+					return selectedItem->data.baseForm;
+				}
+			}
+
+			// Compatibility fallback for UI replacements that retain the historical
+			// inventory-list GFx path.
+			if (a_magMen->uiMovie) {
 				RE::GFxValue result;
 				a_magMen->uiMovie->GetVariable(&result, "_root.Menu_mc.inventoryLists.itemList.selectedEntry.formId");
 				if (result.GetType() == RE::GFxValue::ValueType::kNumber) {
@@ -730,6 +744,13 @@ namespace Utils
 	}
 }
 
+void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, RE::BSString& a_buf)
+{
+	LegacyItemCard card;
+	using func_t = void* (*)(LegacyItemCard*, RE::MagicItem*, RE::BSString&);
+	static REL::Relocation<func_t> func{ RELOCATION_ID(51022, 51900) };
+	func(&card, a_magicItem, a_buf);
+}
 static void stripMagicItemDescriptionFormatCode(std::string& a_description)
 {
 	if (a_description.empty()) {
@@ -960,14 +981,6 @@ static void stripSurvivalModeItemCardText(std::string& a_description)
 	if (changed) {
 		trimDescriptionEdges(a_description);
 	}
-}
-
-void Utils::Magic::GetMagicItemDescription(RE::MagicItem* a_magicItem, RE::BSString& a_buf)
-{
-	LegacyItemCard card;
-	using func_t = void* (*)(LegacyItemCard*, RE::MagicItem*, RE::BSString&);
-	static REL::Relocation<func_t> func{ RELOCATION_ID(51022, 51900) };
-	func(&card, a_magicItem, a_buf);
 }
 
 /// <summary>

@@ -4,13 +4,14 @@ set(AHB_SAMPLE_REPO_ROOT "${PROJECT_SOURCE_DIR}")
 add_library(
 	WheelerBridgeApiSample
 	SHARED
+	EXCLUDE_FROM_ALL
 	"${AHB_SAMPLE_ROOT}/main.cpp"
 )
 
 target_compile_features(
 	WheelerBridgeApiSample
 	PRIVATE
-		cxx_std_23
+		cxx_std_20
 )
 
 target_include_directories(
@@ -43,16 +44,3 @@ target_link_libraries(
 		CommonLibSSE::CommonLibSSE
 )
 
-if("${COPY_OUTPUT}")
-	add_custom_command(
-		TARGET WheelerBridgeApiSample
-		POST_BUILD
-		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-			"$<TARGET_FILE:WheelerBridgeApiSample>"
-			"${CompiledPluginsPath}/SKSE/Plugins/"
-		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-			"${AHB_SAMPLE_REPO_ROOT}/Data/SKSE/Plugins/WheelerBridgeApiSample.ini"
-			"${CompiledPluginsPath}/SKSE/Plugins/"
-		VERBATIM
-	)
-endif()

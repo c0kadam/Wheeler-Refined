@@ -60,8 +60,8 @@ namespace HookValidation
 			return false;
 		}
 
-		// Phase B verified structural signatures only for Skyrim 1.7.99.
-		// Preserve the historical opcode-only validation on older runtimes.
+		// Structural validation is applied to the Skyrim 1.7.99 hook layout.
+		// Other supported runtimes retain opcode validation.
 		if (!IsSkyrim1799()) {
 			return true;
 		}

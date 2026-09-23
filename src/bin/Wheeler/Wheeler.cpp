@@ -17,6 +17,7 @@
 #include "Wheel.h"
 #include "Wheeler.h"
 #include "TransformWheelManager.h"
+#include "bin/Utilities/ActorVirtualCompat.h"
 #include <RE/B/BookMenu.h>
 
 
@@ -1691,9 +1692,9 @@ namespace
 
 		if (restoredSpellThisFrame) {
 			if (clearedIgnoredLeft || clearedIgnoredRight) {
-				pc->DrawWeaponMagicHands(false);
+				ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
 			}
-			pc->DrawWeaponMagicHands(true);
+			ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 		}
 
 		if (g_handMemory.memLeft == 0 && g_handMemory.memRight == 0) {
@@ -5365,7 +5366,7 @@ void Wheeler::ProcessPendingActions()
 					now - _spellHoldLastRetryPulseTime >= (kSpellHoldRetryPulseIntervalSec * 0.80)) {
 					if (auto* retryPc = RE::PlayerCharacter::GetSingleton(); retryPc) {
 						// Reassert draw state while retrying synthetic cast start pulses.
-						retryPc->DrawWeaponMagicHands(true);
+						ActorVirtualCompat::DrawWeaponMagicHands(retryPc, true);
 					}
 					auto* controls = RE::PlayerControls::GetSingleton();
 					auto* userEvents = RE::UserEvents::GetSingleton();
@@ -6218,8 +6219,8 @@ void Wheeler::ProcessPendingActions()
 									}
 
 									// Force a full sheathe->draw cycle to unwind residual 2H combat graph state.
-									pc->DrawWeaponMagicHands(false);
-									pc->DrawWeaponMagicHands(true);
+									ActorVirtualCompat::DrawWeaponMagicHands(pc, false);
+									ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 									logger::info("[SpellPipe] single-hand 2H-unwind forced sheathe->draw cycle hand={}",
 										GetTargetHandName(pending.hand));
 
@@ -6401,7 +6402,7 @@ void Wheeler::ProcessPendingActions()
 							// If draw transition is needed, enforce a short settle window before dispatch.
 							pending.requiredEquipBeforeCast = true;
 							pending.postEquipWarmupFramesRemaining = (std::max)(pending.postEquipWarmupFramesRemaining, kPostEquipSettleFrameBudget);
-							pc->DrawWeaponMagicHands(true);
+							ActorVirtualCompat::DrawWeaponMagicHands(pc, true);
 						}
 
 						if (equipReady &&
