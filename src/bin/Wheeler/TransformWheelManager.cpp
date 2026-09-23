@@ -46,6 +46,15 @@ namespace
 	constexpr RE::FormID kVampireLordPowerFormID = 0x0000283B;
 	constexpr RE::FormID kVampireLordForcedDrainFormID = 0x00019AD5;
 	constexpr RE::FormID kVampireLordSpellsPowersFormListID = 0x00019AD9;
+	constexpr std::array<RE::FormID, 5> kVampireLordRaiseDeadRelativeFormIDs{
+		0x0000BA54,
+		0x00013EC8,
+		0x00013EC9,
+		0x00013ECA,
+		0x00013ECB
+	};
+	constexpr std::uint32_t kVampireLordModeDebounceSamples = 3;
+	constexpr double kVampireLordModeDebounceSeconds = 0.100;
 	constexpr const char* kWerewolfRaceEditorId = "WerewolfBeastRace";
 	constexpr const char* kVampireLordRaceEditorId = "DLC1VampireBeastRace";
 	constexpr const char* kWerewolfWheelId = "Wheel_Werewolf";
@@ -144,6 +153,208 @@ namespace
 		BloodMagic = 2
 	};
 
+	enum class VampireLordModeObservationStatus : std::uint8_t
+	{
+		Candidate = 0,
+		InitialTransform,
+		GraphUnavailableOrMixed,
+		ActorUnsettled,
+		DirectCastActive
+	};
+
+	struct VampireLordModeDebounceState
+	{
+		VampireLordCombatMode candidate = VampireLordCombatMode::Unknown;
+		std::uint32_t samples = 0;
+		double since = 0.0;
+	};
+
+	constexpr std::optional<VampireLordCombatMode> ObserveVampireLordModeCandidate(
+		VampireLordModeDebounceState& state,
+		VampireLordCombatMode candidate,
+		double now,
+		bool acceptSample)
+	{
+		if (!acceptSample || candidate == VampireLordCombatMode::Unknown) {
+			state = {};
+			return std::nullopt;
+		}
+		if (candidate != state.candidate) {
+			state.candidate = candidate;
+			state.samples = 1;
+			state.since = now;
+			return std::nullopt;
+		}
+
+		if (state.samples < kVampireLordModeDebounceSamples) {
+			++state.samples;
+		}
+		if (state.samples >= kVampireLordModeDebounceSamples &&
+			(now - state.since) >= kVampireLordModeDebounceSeconds) {
+			return candidate;
+		}
+		return std::nullopt;
+	}
+
+	constexpr bool IsVampireLordRaiseDeadRelativeID(RE::FormID relativeID)
+	{
+		for (const auto familyID : kVampireLordRaiseDeadRelativeFormIDs) {
+			if (relativeID == familyID) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	template <class Range>
+	constexpr bool ContainsFormID(const Range& forms, RE::FormID formID)
+	{
+		for (const auto candidate : forms) {
+			if (candidate == formID) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	template <class CandidateRange, class EquippedRange, class KnownRange>
+	constexpr RE::FormID SelectVampireLordRaiseDeadRepresentative(
+		const CandidateRange& candidates,
+		const EquippedRange& equipped,
+		RE::FormID previous,
+		const KnownRange& known,
+		bool directCastActive)
+	{
+		if (!directCastActive) {
+			for (const auto formID : equipped) {
+				if (ContainsFormID(candidates, formID)) {
+					return formID;
+				}
+			}
+		}
+		if (previous != 0 && ContainsFormID(candidates, previous)) {
+			return previous;
+		}
+		for (const auto formID : known) {
+			if (ContainsFormID(candidates, formID)) {
+				return formID;
+			}
+		}
+		for (const auto formID : candidates) {
+			return formID;
+		}
+		return 0;
+	}
+
+	constexpr bool VerifyVampireLordModeDebouncePolicy()
+	{
+		VampireLordModeDebounceState state;
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::BloodMagic, 0.000, true)) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::BloodMagic, 0.050, true)) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::BloodMagic, 0.100, true) != VampireLordCombatMode::BloodMagic) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::Melee, 0.200, true)) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::BloodMagic, 0.210, true) ||
+			state.candidate != VampireLordCombatMode::BloodMagic || state.samples != 1) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::Unknown, 0.250, true) || state.samples != 0) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::Melee, 0.300, false) || state.samples != 0) {
+			return false;
+		}
+		if (ObserveVampireLordModeCandidate(state, VampireLordCombatMode::Melee, 0.400, true) ||
+			ObserveVampireLordModeCandidate(state, VampireLordCombatMode::Melee, 0.450, true) ||
+			ObserveVampireLordModeCandidate(state, VampireLordCombatMode::Melee, 0.510, true) != VampireLordCombatMode::Melee) {
+			return false;
+		}
+		return true;
+	}
+
+	constexpr bool VerifyVampireLordRaiseDeadPolicy()
+	{
+		constexpr std::array<RE::FormID, 2> candidates{ 0x0000BA54, 0x00013ECA };
+		constexpr std::array<RE::FormID, 1> equipped{ 0x00013ECA };
+		constexpr std::array<RE::FormID, 1> known{ 0x0000BA54 };
+		constexpr std::array<RE::FormID, 0> none{};
+		return SelectVampireLordRaiseDeadRepresentative(candidates, equipped, 0x0000BA54, known, false) == 0x00013ECA &&
+			SelectVampireLordRaiseDeadRepresentative(candidates, none, 0x00013ECA, known, false) == 0x00013ECA &&
+			SelectVampireLordRaiseDeadRepresentative(candidates, equipped, 0x0000BA54, known, true) == 0x0000BA54 &&
+			SelectVampireLordRaiseDeadRepresentative(candidates, none, 0, known, false) == 0x0000BA54 &&
+			SelectVampireLordRaiseDeadRepresentative(candidates, none, 0, none, false) == 0x0000BA54 &&
+			IsVampireLordRaiseDeadRelativeID(0x00013ECB) &&
+			!IsVampireLordRaiseDeadRelativeID(0x00ABCDEF);
+	}
+
+	static_assert(VerifyVampireLordModeDebouncePolicy());
+	static_assert(VerifyVampireLordRaiseDeadPolicy());
+
+	struct VampireLordModeDiagnosticForm
+	{
+		RE::FormID formID = 0;
+		std::uint32_t formType = 0;
+		std::int32_t weaponType = -1;
+		std::int32_t spellType = -1;
+		std::int32_t castingType = -1;
+		std::string editorID;
+		std::string name;
+		std::string source;
+
+		bool operator==(const VampireLordModeDiagnosticForm&) const = default;
+	};
+
+	template <class T>
+	struct VampireLordModeDiagnosticGraphValue
+	{
+		bool queried = false;
+		T value{};
+
+		bool operator==(const VampireLordModeDiagnosticGraphValue&) const = default;
+	};
+
+	struct VampireLordModeDiagnosticSnapshot
+	{
+		VampireLordCombatMode rawMode = VampireLordCombatMode::Unknown;
+		VampireLordCombatMode handObjectMode = VampireLordCombatMode::Unknown;
+		VampireLordCombatMode effectiveMode = VampireLordCombatMode::Unknown;
+		VampireLordCombatMode debounceCandidate = VampireLordCombatMode::Unknown;
+		VampireLordModeObservationStatus observationStatus = VampireLordModeObservationStatus::GraphUnavailableOrMixed;
+		VampireLordModeDiagnosticForm left;
+		VampireLordModeDiagnosticForm right;
+		VampireLordModeDiagnosticForm selectedPower;
+		VampireLordModeDiagnosticForm race;
+		bool actorStateAvailable = false;
+		std::uint32_t weaponState = 0;
+		std::uint32_t attackState = 0;
+		std::uint32_t lifeState = 0;
+		bool weaponDrawn = false;
+		bool inCombat = false;
+		bool actorSettled = false;
+		bool directCastActive = false;
+		VampireLordModeDiagnosticGraphValue<std::uint32_t> leftCasterState;
+		VampireLordModeDiagnosticGraphValue<std::uint32_t> rightCasterState;
+		VampireLordModeDiagnosticGraphValue<bool> equipOK;
+		VampireLordModeDiagnosticGraphValue<bool> attackReady;
+		VampireLordModeDiagnosticGraphValue<bool> leftMagicReady;
+		VampireLordModeDiagnosticGraphValue<bool> rightMagicReady;
+		VampireLordModeDiagnosticGraphValue<bool> leftHand;
+		VampireLordModeDiagnosticGraphValue<bool> rightHand;
+		VampireLordModeDiagnosticGraphValue<int> leftHandType;
+		VampireLordModeDiagnosticGraphValue<int> rightHandType;
+		VampireLordModeDiagnosticGraphValue<int> leftHandEquipped;
+		VampireLordModeDiagnosticGraphValue<int> rightHandEquipped;
+
+		bool operator==(const VampireLordModeDiagnosticSnapshot&) const = default;
+	};
+
 	struct LichConfigCache
 	{
 		bool initialized = false;
@@ -160,14 +371,17 @@ namespace
 		bool hideGear = false;
 		bool blockStaffSwapping = true;
 		bool suppressDirectCast = true;
+		bool blockHiddenSpellActivation = true;
 		bool debugLog = false;
 		bool hasAnyMatchers = false;
 		std::vector<std::string> raceEditorIdContains;
 		std::vector<std::string> raceKeywords;
 		std::unordered_set<RE::FormID> raceFormIDs;
 		std::unordered_set<RE::FormID> additionalSpellFormIDs;
+		std::unordered_set<RE::FormID> hiddenSpellFormIDs;
 		std::vector<std::string> spellTokens;
 		std::vector<std::string> exitSpellTokens;
+		std::vector<std::string> hiddenSpellTokens;
 	};
 
 	struct PendingTransform
@@ -218,8 +432,13 @@ namespace
 	static std::unordered_set<RE::FormID> s_vampireLordSessionSpellForms;
 	static std::unordered_set<RE::FormID> s_vampireLordLoggedRejectedEquippedForms;
 	static VampireLordCombatMode s_lastVampireLordCombatMode = VampireLordCombatMode::Unknown;
+	static VampireLordModeDebounceState s_vampireLordModeDebounce;
 	static bool s_loggedVampireLordUnknownHold = false;
 	static std::unordered_set<std::uint64_t> s_loggedVampireLordModeHiddenForms;
+	static std::optional<VampireLordModeDiagnosticSnapshot> s_lastVampireLordModeDiagnosticSnapshot;
+	static RE::FormID s_vampireLordRaiseDeadRepresentative = 0;
+	static std::uint64_t s_lastVampireLordRaiseDeadLogSignature = 0;
+	static bool s_hasVampireLordRaiseDeadLogSignature = false;
 	static std::vector<RE::FormID> s_lichStableSpellOrder;
 	static std::unordered_set<RE::FormID> s_loggedLichRaceMatches;
 	static std::vector<std::string> s_knownGenericWheelIds{ std::string(kGenericWheelIdFallback) };
@@ -1468,6 +1687,171 @@ namespace
 		return IsTransformKitSpell(spell, TransformState::VampireLord);
 	}
 
+	bool IsVampireLordRaiseDeadFamilySpell(RE::SpellItem* spell)
+	{
+		if (!spell || !EqualsIgnoreCase(GetSourceFileName(spell), kDawnguardPlugin)) {
+			return false;
+		}
+		return IsVampireLordRaiseDeadRelativeID(spell->GetFormID() & 0x00FFFFFF);
+	}
+
+	bool IsVampireLordRaiseDeadFamilyForm(RE::FormID formID)
+	{
+		return IsVampireLordRaiseDeadFamilySpell(RE::TESForm::LookupByID<RE::SpellItem>(formID));
+	}
+
+	template <class Range>
+	void AppendEligibleVampireLordRaiseDeadForms(const Range& forms, std::vector<RE::FormID>& out)
+	{
+		for (const auto formID : forms) {
+			auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(formID);
+			if (IsVampireLordRaiseDeadFamilySpell(spell) && IsTrustedVampireLordWheelSpell(spell)) {
+				out.push_back(formID);
+			}
+		}
+	}
+
+	void SortUniqueFormIDs(std::vector<RE::FormID>& forms)
+	{
+		std::sort(forms.begin(), forms.end());
+		forms.erase(std::unique(forms.begin(), forms.end()), forms.end());
+	}
+
+	void NormalizeVampireLordRaiseDeadSet(
+		std::unordered_set<RE::FormID>& forms,
+		RE::FormID representative)
+	{
+		for (auto it = forms.begin(); it != forms.end();) {
+			if (IsVampireLordRaiseDeadFamilyForm(*it) && *it != representative) {
+				it = forms.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	void NormalizeVampireLordRaiseDeadForms(
+		std::vector<RE::FormID>& forms,
+		RE::FormID representative)
+	{
+		forms.erase(std::remove_if(forms.begin(), forms.end(), [&](RE::FormID formID) {
+			return IsVampireLordRaiseDeadFamilyForm(formID) && formID != representative;
+		}), forms.end());
+	}
+
+	std::string FormatVampireLordRaiseDeadRejectedForms(
+		const std::vector<RE::FormID>& candidates,
+		RE::FormID representative)
+	{
+		std::string result;
+		for (const auto formID : candidates) {
+			if (formID == representative) {
+				continue;
+			}
+			char buffer[16]{};
+			std::snprintf(buffer, sizeof(buffer), "%08X", formID);
+			if (!result.empty()) {
+				result.push_back(',');
+			}
+			result.append(buffer);
+		}
+		return result;
+	}
+
+	std::uint64_t HashVampireLordRaiseDeadSelection(
+		const std::vector<RE::FormID>& candidates,
+		RE::FormID representative)
+	{
+		std::uint64_t hash = 1469598103934665603ull;
+		auto mix = [&](std::uint64_t value) {
+			hash ^= value;
+			hash *= 1099511628211ull;
+		};
+		mix(representative);
+		for (const auto formID : candidates) {
+			mix(formID);
+		}
+		return hash;
+	}
+
+	void NormalizeVampireLordRaiseDeadFamily(
+		std::unordered_set<RE::FormID>& candidateSpells,
+		RE::PlayerCharacter* pc,
+		const std::unordered_set<RE::FormID>& currentAllSpells)
+	{
+		std::vector<RE::FormID> candidates;
+		AppendEligibleVampireLordRaiseDeadForms(candidateSpells, candidates);
+		AppendEligibleVampireLordRaiseDeadForms(s_vampireLordSessionSpellForms, candidates);
+		if (s_pendingTransform.active && s_pendingTransform.state == TransformState::VampireLord) {
+			AppendEligibleVampireLordRaiseDeadForms(s_pendingTransform.latchedForms, candidates);
+		}
+
+		std::vector<RE::FormID> equipped;
+		if (pc) {
+			for (const bool isLeft : { true, false }) {
+				auto* equippedForm = pc->GetEquippedObject(isLeft);
+				auto* spell = equippedForm ? equippedForm->As<RE::SpellItem>() : nullptr;
+				if (IsVampireLordRaiseDeadFamilySpell(spell) && IsTrustedVampireLordWheelSpell(spell)) {
+					equipped.push_back(spell->GetFormID());
+				}
+			}
+		}
+		candidates.insert(candidates.end(), equipped.begin(), equipped.end());
+
+		std::vector<RE::FormID> known;
+		AppendEligibleVampireLordRaiseDeadForms(currentAllSpells, known);
+		candidates.insert(candidates.end(), known.begin(), known.end());
+		SortUniqueFormIDs(candidates);
+		SortUniqueFormIDs(equipped);
+		SortUniqueFormIDs(known);
+
+		const RE::FormID previous = s_vampireLordRaiseDeadRepresentative;
+		const bool directCastActive = Wheeler::IsDirectCastPipelineActiveForHandMemory();
+		const RE::FormID representative = SelectVampireLordRaiseDeadRepresentative(
+			candidates,
+			equipped,
+			previous,
+			known,
+			directCastActive);
+
+		const char* source = "none";
+		if (representative != 0) {
+			if (!directCastActive && ContainsFormID(equipped, representative)) {
+				source = "equipped";
+			} else if (representative == previous) {
+				source = "session";
+			} else if (ContainsFormID(known, representative)) {
+				source = "known";
+			} else {
+				source = "deterministic";
+			}
+		}
+
+		s_vampireLordRaiseDeadRepresentative = representative;
+		NormalizeVampireLordRaiseDeadSet(candidateSpells, representative);
+		if (representative != 0) {
+			candidateSpells.insert(representative);
+		}
+		NormalizeVampireLordRaiseDeadSet(s_vampireLordSessionSpellForms, representative);
+		if (s_pendingTransform.active && s_pendingTransform.state == TransformState::VampireLord) {
+			NormalizeVampireLordRaiseDeadSet(s_pendingTransform.latchedForms, representative);
+		}
+
+		const std::uint64_t signature = HashVampireLordRaiseDeadSelection(candidates, representative);
+		if ((s_vampireLordConfigCache.debugLog || Config::WheelBehavior::TransformWheels::DebugLog) &&
+			(!s_hasVampireLordRaiseDeadLogSignature || signature != s_lastVampireLordRaiseDeadLogSignature)) {
+			logger::info(
+				"TransformWheels: [VampireLordRaiseDead] selected={:08X} source={} rejected={} directCast={} candidates={}",
+				representative,
+				source,
+				FormatVampireLordRaiseDeadRejectedForms(candidates, representative),
+				directCastActive,
+				candidates.size());
+		}
+		s_lastVampireLordRaiseDeadLogSignature = signature;
+		s_hasVampireLordRaiseDeadLogSignature = true;
+	}
+
 	bool IsVampireLordMeleeHandObject(RE::TESForm* form)
 	{
 		if (!form) {
@@ -1505,7 +1889,7 @@ namespace
 		return form && form->As<RE::SpellItem>() != nullptr;
 	}
 
-	VampireLordCombatMode GetVampireLordCombatMode(RE::PlayerCharacter* pc)
+	VampireLordCombatMode GetVampireLordHandObjectMode(RE::PlayerCharacter* pc)
 	{
 		if (!pc) {
 			return VampireLordCombatMode::Unknown;
@@ -1524,18 +1908,277 @@ namespace
 		return VampireLordCombatMode::Unknown;
 	}
 
-	VampireLordCombatMode GetEffectiveVampireLordCombatMode(RE::PlayerCharacter* pc)
+	VampireLordCombatMode GetVampireLordCombatMode(RE::PlayerCharacter* pc)
 	{
-		const VampireLordCombatMode rawMode = GetVampireLordCombatMode(pc);
-		if (rawMode != VampireLordCombatMode::Unknown) {
-			return rawMode;
+		if (!pc) {
+			return VampireLordCombatMode::Unknown;
+		}
+		auto* fixedStrings = RE::FixedStrings::GetSingleton();
+		if (!fixedStrings) {
+			return VampireLordCombatMode::Unknown;
 		}
 
-		// Vampire Lord scripts can briefly clear both hands while the player is still
-		// in the Ctrl-toggled melee stance. Do not let that transient Unknown state
-		// repopulate hand-cast Blood Magic entries; keep the last confirmed VL mode
-		// until a real hand spell or melee hand object confirms the next mode.
-		return s_lastVampireLordCombatMode;
+		bool leftMagicReady = false;
+		bool rightMagicReady = false;
+		if (!pc->GetGraphVariableBool(fixedStrings->bMLh_Ready, leftMagicReady) ||
+			!pc->GetGraphVariableBool(fixedStrings->bMRh_Ready, rightMagicReady)) {
+			return VampireLordCombatMode::Unknown;
+		}
+		if (leftMagicReady && rightMagicReady) {
+			return VampireLordCombatMode::BloodMagic;
+		}
+		if (!leftMagicReady && !rightMagicReady) {
+			return VampireLordCombatMode::Melee;
+		}
+		return VampireLordCombatMode::Unknown;
+	}
+
+	VampireLordCombatMode GetEffectiveVampireLordCombatMode(RE::PlayerCharacter* pc)
+	{
+		return pc ? s_lastVampireLordCombatMode : VampireLordCombatMode::Unknown;
+	}
+
+	bool IsVampireLordHandCasterSettled(RE::MagicCaster* caster)
+	{
+		if (!caster) {
+			return false;
+		}
+		const auto state = caster->state.get();
+		return state == RE::MagicCaster::State::kNone ||
+			state == RE::MagicCaster::State::kReady;
+	}
+
+	bool IsVampireLordActorSettledForModeObservation(RE::PlayerCharacter* pc)
+	{
+		if (!pc) {
+			return false;
+		}
+		auto* actorState = pc->AsActorState();
+		if (!actorState ||
+			actorState->GetWeaponState() != RE::WEAPON_STATE::kDrawn ||
+			actorState->GetAttackState() != RE::ATTACK_STATE_ENUM::kNone) {
+			return false;
+		}
+
+		return IsVampireLordHandCasterSettled(
+				   pc->GetMagicCaster(RE::MagicSystem::CastingSource::kLeftHand)) &&
+			IsVampireLordHandCasterSettled(
+				pc->GetMagicCaster(RE::MagicSystem::CastingSource::kRightHand));
+	}
+
+	const char* ToString(VampireLordModeObservationStatus status)
+	{
+		switch (status) {
+		case VampireLordModeObservationStatus::Candidate:
+			return "candidate";
+		case VampireLordModeObservationStatus::InitialTransform:
+			return "initial_transform";
+		case VampireLordModeObservationStatus::GraphUnavailableOrMixed:
+			return "graph_unavailable_or_mixed";
+		case VampireLordModeObservationStatus::ActorUnsettled:
+			return "actor_unsettled";
+		case VampireLordModeObservationStatus::DirectCastActive:
+			return "direct_cast_active";
+		default:
+			return "unknown";
+		}
+	}
+
+	VampireLordModeDiagnosticForm DescribeVampireLordModeDiagnosticForm(RE::TESForm* form)
+	{
+		VampireLordModeDiagnosticForm result;
+		if (!form) {
+			return result;
+		}
+
+		result.formID = form->GetFormID();
+		result.formType = static_cast<std::uint32_t>(form->GetFormType());
+		result.editorID = form->GetFormEditorID() ? form->GetFormEditorID() : "";
+		result.name = form->GetName() ? form->GetName() : "";
+		result.source = GetSourceFileName(form);
+		if (auto* weapon = form->As<RE::TESObjectWEAP>()) {
+			result.weaponType = static_cast<std::int32_t>(weapon->GetWeaponType());
+		}
+		if (auto* spell = form->As<RE::SpellItem>()) {
+			result.spellType = static_cast<std::int32_t>(spell->GetSpellType());
+			result.castingType = static_cast<std::int32_t>(spell->GetCastingType());
+		}
+		return result;
+	}
+
+	VampireLordModeDiagnosticSnapshot CaptureVampireLordModeDiagnosticSnapshot(
+		RE::PlayerCharacter* pc,
+		VampireLordCombatMode rawMode,
+		VampireLordCombatMode effectiveMode,
+		VampireLordCombatMode debounceCandidate,
+		VampireLordModeObservationStatus observationStatus,
+		bool actorSettled,
+		bool directCastActive)
+	{
+		VampireLordModeDiagnosticSnapshot snapshot;
+		snapshot.rawMode = rawMode;
+		snapshot.effectiveMode = effectiveMode;
+		snapshot.debounceCandidate = debounceCandidate;
+		snapshot.observationStatus = observationStatus;
+		snapshot.actorSettled = actorSettled;
+		snapshot.directCastActive = directCastActive;
+		if (!pc) {
+			return snapshot;
+		}
+		snapshot.handObjectMode = GetVampireLordHandObjectMode(pc);
+
+		snapshot.left = DescribeVampireLordModeDiagnosticForm(pc->GetEquippedObject(true));
+		snapshot.right = DescribeVampireLordModeDiagnosticForm(pc->GetEquippedObject(false));
+		snapshot.selectedPower = DescribeVampireLordModeDiagnosticForm(pc->GetActorRuntimeData().selectedPower);
+		snapshot.race = DescribeVampireLordModeDiagnosticForm(pc->GetRace());
+		snapshot.inCombat = pc->IsInCombat();
+
+		if (auto* actorState = pc->AsActorState()) {
+			snapshot.actorStateAvailable = true;
+			snapshot.weaponState = static_cast<std::uint32_t>(actorState->GetWeaponState());
+			snapshot.attackState = static_cast<std::uint32_t>(actorState->GetAttackState());
+			snapshot.lifeState = static_cast<std::uint32_t>(actorState->GetLifeState());
+			snapshot.weaponDrawn = actorState->IsWeaponDrawn();
+		}
+
+		if (auto* fixedStrings = RE::FixedStrings::GetSingleton()) {
+			snapshot.equipOK.queried = pc->GetGraphVariableBool(fixedStrings->bEquipOK, snapshot.equipOK.value);
+			snapshot.attackReady.queried = pc->GetGraphVariableBool(fixedStrings->isAttackReady, snapshot.attackReady.value);
+			snapshot.leftMagicReady.queried = pc->GetGraphVariableBool(fixedStrings->bMLh_Ready, snapshot.leftMagicReady.value);
+			snapshot.rightMagicReady.queried = pc->GetGraphVariableBool(fixedStrings->bMRh_Ready, snapshot.rightMagicReady.value);
+			snapshot.leftHand.queried = pc->GetGraphVariableBool(fixedStrings->bLeftHand, snapshot.leftHand.value);
+			snapshot.rightHand.queried = pc->GetGraphVariableBool(fixedStrings->bRightHand, snapshot.rightHand.value);
+			snapshot.leftHandType.queried = pc->GetGraphVariableInt(fixedStrings->iLeftHandType, snapshot.leftHandType.value);
+			snapshot.rightHandType.queried = pc->GetGraphVariableInt(fixedStrings->iRightHandType, snapshot.rightHandType.value);
+			snapshot.leftHandEquipped.queried = pc->GetGraphVariableInt(fixedStrings->iLeftHandEquipped, snapshot.leftHandEquipped.value);
+			snapshot.rightHandEquipped.queried = pc->GetGraphVariableInt(fixedStrings->iRightHandEquipped, snapshot.rightHandEquipped.value);
+		}
+		if (auto* caster = pc->GetMagicCaster(RE::MagicSystem::CastingSource::kLeftHand)) {
+			snapshot.leftCasterState.queried = true;
+			snapshot.leftCasterState.value = static_cast<std::uint32_t>(caster->state.get());
+		}
+		if (auto* caster = pc->GetMagicCaster(RE::MagicSystem::CastingSource::kRightHand)) {
+			snapshot.rightCasterState.queried = true;
+			snapshot.rightCasterState.value = static_cast<std::uint32_t>(caster->state.get());
+		}
+		return snapshot;
+	}
+
+	void UpdateVampireLordModeDiagnostics(
+		RE::PlayerCharacter* pc,
+		VampireLordCombatMode rawMode,
+		VampireLordCombatMode effectiveMode,
+		VampireLordCombatMode debounceCandidate,
+		std::uint32_t debounceSamples,
+		double debounceSince,
+		double now,
+		VampireLordModeObservationStatus observationStatus,
+		bool actorSettled,
+		bool directCastActive,
+		bool initial)
+	{
+		if (!pc || !(s_vampireLordConfigCache.debugLog || Config::WheelBehavior::TransformWheels::DebugLog)) {
+			s_lastVampireLordModeDiagnosticSnapshot.reset();
+			return;
+		}
+
+		auto snapshot = CaptureVampireLordModeDiagnosticSnapshot(
+			pc,
+			rawMode,
+			effectiveMode,
+			debounceCandidate,
+			observationStatus,
+			actorSettled,
+			directCastActive);
+		const bool firstSnapshot = initial || !s_lastVampireLordModeDiagnosticSnapshot.has_value();
+		if (!firstSnapshot && snapshot == *s_lastVampireLordModeDiagnosticSnapshot) {
+			return;
+		}
+
+		const auto& left = snapshot.left;
+		const auto& right = snapshot.right;
+		const auto& power = snapshot.selectedPower;
+		const auto& race = snapshot.race;
+		logger::info(
+			"TransformWheels: [VampireLordModeDiag] event={} raw={} handRaw={} effective={} candidate={} debounceSamples={} debounceMs={:.1f} observation={} directCast={} settled={} "
+			"left[id={:08X} type={} weaponType={} spellType={} castingType={} edid='{}' name='{}' source='{}'] "
+			"right[id={:08X} type={} weaponType={} spellType={} castingType={} edid='{}' name='{}' source='{}'] "
+			"selected[id={:08X} type={} weaponType={} spellType={} castingType={} edid='{}' name='{}' source='{}'] "
+			"race[id={:08X} type={} edid='{}' name='{}' source='{}'] "
+			"actor[stateQuery={} weaponState={} attackState={} lifeState={} weaponDrawn={} inCombat={} leftCaster={}/{} rightCaster={}/{}] "
+			"graph[bEquipOk={}/{} attackReady={}/{} bMLhReady={}/{} bMRhReady={}/{} bLeftHand={}/{} bRightHand={}/{} "
+			"iLeftHandType={}/{} iRightHandType={}/{} iLeftHandEquipped={}/{} iRightHandEquipped={}/{}]",
+			firstSnapshot ? "initial" : "changed",
+			ToString(snapshot.rawMode),
+			ToString(snapshot.handObjectMode),
+			ToString(snapshot.effectiveMode),
+			ToString(snapshot.debounceCandidate),
+			debounceSamples,
+			(debounceSamples != 0) ? (std::max)(0.0, (now - debounceSince) * 1000.0) : 0.0,
+			ToString(snapshot.observationStatus),
+			snapshot.directCastActive,
+			snapshot.actorSettled,
+			left.formID,
+			left.formType,
+			left.weaponType,
+			left.spellType,
+			left.castingType,
+			left.editorID,
+			left.name,
+			left.source,
+			right.formID,
+			right.formType,
+			right.weaponType,
+			right.spellType,
+			right.castingType,
+			right.editorID,
+			right.name,
+			right.source,
+			power.formID,
+			power.formType,
+			power.weaponType,
+			power.spellType,
+			power.castingType,
+			power.editorID,
+			power.name,
+			power.source,
+			race.formID,
+			race.formType,
+			race.editorID,
+			race.name,
+			race.source,
+			snapshot.actorStateAvailable,
+			snapshot.weaponState,
+			snapshot.attackState,
+			snapshot.lifeState,
+			snapshot.weaponDrawn,
+			snapshot.inCombat,
+			snapshot.leftCasterState.queried,
+			snapshot.leftCasterState.value,
+			snapshot.rightCasterState.queried,
+			snapshot.rightCasterState.value,
+			snapshot.equipOK.queried,
+			snapshot.equipOK.value,
+			snapshot.attackReady.queried,
+			snapshot.attackReady.value,
+			snapshot.leftMagicReady.queried,
+			snapshot.leftMagicReady.value,
+			snapshot.rightMagicReady.queried,
+			snapshot.rightMagicReady.value,
+			snapshot.leftHand.queried,
+			snapshot.leftHand.value,
+			snapshot.rightHand.queried,
+			snapshot.rightHand.value,
+			snapshot.leftHandType.queried,
+			snapshot.leftHandType.value,
+			snapshot.rightHandType.queried,
+			snapshot.rightHandType.value,
+			snapshot.leftHandEquipped.queried,
+			snapshot.leftHandEquipped.value,
+			snapshot.rightHandEquipped.queried,
+			snapshot.rightHandEquipped.value);
+
+		s_lastVampireLordModeDiagnosticSnapshot = std::move(snapshot);
 	}
 
 	bool ShouldHideVampireLordSpellForCombatMode(RE::SpellItem* spell, RE::PlayerCharacter* pc, const char* source)
@@ -1593,6 +2236,9 @@ namespace
 
 	void ClearVampireLordSessionSpells(const char* reason)
 	{
+		s_vampireLordRaiseDeadRepresentative = 0;
+		s_lastVampireLordRaiseDeadLogSignature = 0;
+		s_hasVampireLordRaiseDeadLogSignature = false;
 		if (s_vampireLordSessionSpellForms.empty()) {
 			s_vampireLordLoggedRejectedEquippedForms.clear();
 			return;
@@ -1612,7 +2258,8 @@ namespace
 		std::size_t removed = 0;
 		for (auto it = s_vampireLordSessionSpellForms.begin(); it != s_vampireLordSessionSpellForms.end();) {
 			auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(*it);
-			if (!IsTrustedVampireLordWheelSpell(spell)) {
+			if (!IsTrustedVampireLordWheelSpell(spell) ||
+				(IsVampireLordRaiseDeadFamilySpell(spell) && *it != s_vampireLordRaiseDeadRepresentative)) {
 				it = s_vampireLordSessionSpellForms.erase(it);
 				++removed;
 				continue;
@@ -1626,6 +2273,10 @@ namespace
 	{
 		auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(formId);
 		if (!IsTrustedVampireLordWheelSpell(spell)) {
+			return false;
+		}
+		if (IsVampireLordRaiseDeadFamilySpell(spell) &&
+			formId != s_vampireLordRaiseDeadRepresentative) {
 			return false;
 		}
 		const bool inserted = s_vampireLordSessionSpellForms.insert(formId).second;
@@ -4063,6 +4714,7 @@ namespace
 		candidateSpells.insert(equippedTransformSpells.begin(), equippedTransformSpells.end());
 		candidateSpells.insert(raceSpells.begin(), raceSpells.end());
 		if (state == TransformState::VampireLord) {
+			NormalizeVampireLordRaiseDeadFamily(candidateSpells, pc, currentAllSpells);
 			// Sacrosanct and similar overhauls can expose VL perk spells only while they
 			// are currently equipped. Once a spell is positively recognized as VL kit,
 			// keep it for this Vampire Lord session without adding/removing player spells.
@@ -4284,6 +4936,9 @@ namespace
 					trimmedBySafetyCap = trimmedBySafetyCap || trimmedLatchedBySafetyCap;
 				}
 			}
+		}
+		if (state == TransformState::VampireLord) {
+			NormalizeVampireLordRaiseDeadForms(forms, s_vampireLordRaiseDeadRepresentative);
 		}
 		filterMajorTransformEntries("latched");
 		filterVampireLordModeHiddenEntries("latched");
@@ -5018,13 +5673,61 @@ namespace
 				s_loggedVampireLordModeHiddenForms.clear();
 			}
 			s_lastVampireLordCombatMode = VampireLordCombatMode::Unknown;
+			s_vampireLordModeDebounce = {};
 			s_loggedVampireLordUnknownHold = false;
+			s_lastVampireLordModeDiagnosticSnapshot.reset();
 			return;
 		}
 
 		RefreshVampireLordConfigCache();
-		const VampireLordCombatMode mode = GetVampireLordCombatMode(pc);
-		if (mode == VampireLordCombatMode::Unknown &&
+		if (stateJustChanged) {
+			s_lastVampireLordCombatMode = VampireLordCombatMode::Unknown;
+			s_vampireLordModeDebounce = {};
+			s_loggedVampireLordUnknownHold = false;
+			s_loggedVampireLordModeHiddenForms.clear();
+		}
+
+		const VampireLordCombatMode rawMode = GetVampireLordCombatMode(pc);
+		const bool directCastActive = Wheeler::IsDirectCastPipelineActiveForHandMemory();
+		const bool actorSettled = IsVampireLordActorSettledForModeObservation(pc);
+		VampireLordModeObservationStatus observationStatus = VampireLordModeObservationStatus::Candidate;
+		if (stateJustChanged) {
+			observationStatus = VampireLordModeObservationStatus::InitialTransform;
+		} else if (directCastActive) {
+			observationStatus = VampireLordModeObservationStatus::DirectCastActive;
+		} else if (rawMode == VampireLordCombatMode::Unknown) {
+			observationStatus = VampireLordModeObservationStatus::GraphUnavailableOrMixed;
+		} else if (!actorSettled) {
+			observationStatus = VampireLordModeObservationStatus::ActorUnsettled;
+		}
+
+		const bool acceptSample = observationStatus == VampireLordModeObservationStatus::Candidate;
+		const VampireLordCombatMode previousMode = s_lastVampireLordCombatMode;
+		const auto confirmedMode = ObserveVampireLordModeCandidate(
+			s_vampireLordModeDebounce,
+			rawMode,
+			now,
+			acceptSample);
+		const bool modeChanged = confirmedMode.has_value() && *confirmedMode != previousMode;
+		if (modeChanged) {
+			s_lastVampireLordCombatMode = *confirmedMode;
+			s_loggedVampireLordModeHiddenForms.clear();
+		}
+
+		UpdateVampireLordModeDiagnostics(
+			pc,
+			rawMode,
+			s_lastVampireLordCombatMode,
+			s_vampireLordModeDebounce.candidate,
+			s_vampireLordModeDebounce.samples,
+			s_vampireLordModeDebounce.since,
+			now,
+			observationStatus,
+			actorSettled,
+			directCastActive,
+			stateJustChanged);
+
+		if (rawMode == VampireLordCombatMode::Unknown &&
 			s_lastVampireLordCombatMode != VampireLordCombatMode::Unknown) {
 			if (!s_loggedVampireLordUnknownHold &&
 				(s_vampireLordConfigCache.debugLog || Config::WheelBehavior::TransformWheels::DebugLog)) {
@@ -5037,22 +5740,20 @@ namespace
 					right ? right->GetFormID() : 0);
 				s_loggedVampireLordUnknownHold = true;
 			}
-			return;
+		} else if (rawMode != VampireLordCombatMode::Unknown) {
+			s_loggedVampireLordUnknownHold = false;
 		}
-		if (mode == s_lastVampireLordCombatMode) {
+		if (!modeChanged) {
 			return;
 		}
 
-		const VampireLordCombatMode previousMode = s_lastVampireLordCombatMode;
-		s_lastVampireLordCombatMode = mode;
-		s_loggedVampireLordUnknownHold = false;
 		if (s_vampireLordConfigCache.debugLog || Config::WheelBehavior::TransformWheels::DebugLog) {
 			RE::TESForm* left = pc ? pc->GetEquippedObject(true) : nullptr;
 			RE::TESForm* right = pc ? pc->GetEquippedObject(false) : nullptr;
 			logger::info(
 				"TransformWheels: [VampireLordMode] mode changed {} -> {} left={:08X} right={:08X}",
 				ToString(previousMode),
-				ToString(mode),
+				ToString(s_lastVampireLordCombatMode),
 				left ? left->GetFormID() : 0,
 				right ? right->GetFormID() : 0);
 		}
@@ -5108,8 +5809,10 @@ void TransformWheelManager::Update()
 		s_switchedToTransform = false;
 		s_lastState = currentState;
 		s_lastVampireLordCombatMode = VampireLordCombatMode::Unknown;
+		s_vampireLordModeDebounce = {};
 		s_loggedVampireLordUnknownHold = false;
 		s_loggedVampireLordModeHiddenForms.clear();
+		s_lastVampireLordModeDiagnosticSnapshot.reset();
 		s_lastGenericRaceContext = 0;
 		s_activeGenericRaceContext = 0;
 		return;
@@ -5226,8 +5929,13 @@ void TransformWheelManager::Reset()
 	s_vampireLordSessionSpellForms.clear();
 	s_vampireLordLoggedRejectedEquippedForms.clear();
 	s_lastVampireLordCombatMode = VampireLordCombatMode::Unknown;
+	s_vampireLordModeDebounce = {};
 	s_loggedVampireLordUnknownHold = false;
 	s_loggedVampireLordModeHiddenForms.clear();
+	s_lastVampireLordModeDiagnosticSnapshot.reset();
+	s_vampireLordRaiseDeadRepresentative = 0;
+	s_lastVampireLordRaiseDeadLogSignature = 0;
+	s_hasVampireLordRaiseDeadLogSignature = false;
 	s_lichStableSpellOrder.clear();
 	s_loggedLichRaceMatches.clear();
 	s_lichConfigCache = {};
