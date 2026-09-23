@@ -26,6 +26,7 @@ public:
 		RE::FormID a_handFormID,
 		std::uint64_t a_handSignature,
 		bool a_leftHand) const override;
+	WeaponPresentationHandState GetTransientDrawOnlyHandPresentation() const override;
 	
 	virtual void SerializeIntoJsonObj(nlohmann::json& a_json) override;
 	void RestoreLogicalRowSignature(std::string a_signature) { _logicalRowSignature = std::move(a_signature); }
@@ -33,10 +34,16 @@ public:
 
 	static inline const char* ITEM_TYPE_STR = "WheelItemWeapon";
 	static void ProcessIWSCompatTransfer();
+	static void ProcessGroupedPoisonLineageDiagnostic();
+	static void ResetTransientStateForLifecycle();
+	static void CancelTransientStateInCurrentWorld();
 
 private:
 	// Returns false when activation was safely deferred and owns post-equip draw restoration.
 	bool equipItem(bool a_toRight = true);
 	void unequipItem(const RE::BGSEquipSlot* a_slot);
 	std::string _logicalRowSignature;
+	std::uint64_t _runtimePresentationSlotID = 0;
+	int _drawOnlyPresentationFrame = -1;
+	WeaponPresentationHandState _drawOnlyHandPresentation{};
 };

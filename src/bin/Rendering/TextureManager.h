@@ -1,9 +1,6 @@
 #pragma once
 #include <d3d11.h>
-
-// Texture/Image mapping and image-loading structure derived from LamasTinyHUD
-// revision dd1794c46b1f87cbf04a5d60968facbed0605d02 (GNU GPL v3), inherited
-// through original Wheeler and subsequently adapted for Wheeler Refined.
+// stole from lama's tinyhud
 
 #include <filesystem>
 #include <map>
@@ -73,6 +70,7 @@ public:
 		destruction_shock,
 		restoration,
 		poison_default,
+		weapon_enchanted,
 		armor_heavy_shield,
 		armor_light_shield,
 		armor_light_chest,
@@ -224,6 +222,7 @@ private:
 		{ R"(destruction_shock.svg)", icon_image_type::destruction_shock },
 		{ R"(restoration.svg)", icon_image_type::restoration },
 		{ R"(poison_default.svg)", icon_image_type::poison_default },
+		{ R"(weapon_enchanted.svg)", icon_image_type::weapon_enchanted },
 		// armors
 		// armor with ratings
 		{ R"(armor_light_chest.svg)", icon_image_type::armor_light_chest },

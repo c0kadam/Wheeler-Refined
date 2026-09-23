@@ -7,10 +7,19 @@
 #include "bin/Wheeler/MainWheelDebug.h"
 #include "bin/Wheeler/TransformWheelManager.h"
 #include "bin/Wheeler/Wheeler.h"
+#include "GroupedPoisonLineageDiagnosticPolicy.h"
+#include "GroupedPoisonPresentationAliasPolicy.h"
+#include "WeaponLiveVisualStatusPolicy.h"
+#include "WeaponActiveVisualPolicy.h"
+#include "WeaponHandIndicatorPresentationPolicy.h"
+#include "WeaponPoisonPresentationPolicy.h"
+#include <limits>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <tuple>
 #include <string_view>
 
 namespace
@@ -186,11 +195,11 @@ namespace
 	{
 		a_outCount = 0;
 		if (!a_list) {
-			return std::nullopt;
+			return false;
 		}
 		int count = 0;
 		if (!InvokeWithSehGuard([&]() { count = a_list->GetCount(); }) || count <= 0) {
-			return std::nullopt;
+			return false;
 		}
 		a_outCount = count;
 		return true;
@@ -269,7 +278,7 @@ namespace
 	{
 		a_outSignature.clear();
 		if (!a_extraData) {
-			return std::nullopt;
+			return false;
 		}
 
 		constexpr std::array signatureTypes{
@@ -293,7 +302,6 @@ namespace
 			case RE::ExtraDataType::kHealth:
 				if (!GetByTypeSafe<RE::ExtraHealth>(a_extraData)) return false;
 				break;
-		bool foundRequestedHandWorn = false;
 			case RE::ExtraDataType::kEnchantment:
 				if (!GetByTypeSafe<RE::ExtraEnchantment>(a_extraData)) return false;
 				break;
@@ -478,6 +486,867 @@ namespace
 
 	int GetSameFormInventoryCount(const RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon);
 
+	bool TryReadPoisonPresentationMember(
+		RE::ExtraDataList* a_list, WeaponPoisonPresentationPolicy::MemberEvidence& a_member)
+	{
+		bool complete = false;
+		const bool guarded = InvokeWithSehGuard([&]() {
+			if (!TryGetExtraListCount(a_list, a_member.count)) return;
+			bool hasUID = false;
+			if (!TryHasTypeSafe(a_list, RE::ExtraDataType::kUniqueID, hasUID) ||
+			    !TryHasTypeSafe(a_list, RE::ExtraDataType::kPoison, a_member.hasPoison)) return;
+			if (hasUID) {
+				const auto* uid = a_list->GetByType<RE::ExtraUniqueID>();
+				if (!uid) return;
+				a_member.uniqueID = uid->uniqueID;
+			}
+			if (a_member.hasPoison) {
+				const auto* extra = a_list->GetByType<RE::ExtraPoison>();
+				if (!extra) return;
+				a_member.poisonCount = extra->count;
+				a_member.poisonPointerValid = extra->poison != nullptr;
+				if (extra->poison) a_member.poisonFormID = extra->poison->GetFormID();
+			}
+			complete = true;
+		});
+		a_member.readable = guarded && complete;
+		return a_member.readable;
+	}
+
+	WeaponPoisonPresentationPolicy::WeaponPoisonPresentation ResolveWeaponPoisonPresentation(
+		const RE::TESObjectREFR::InventoryItemMap& a_inv, RE::FormID a_weaponFormID, std::uint16_t a_uid)
+	{
+		using namespace WeaponPoisonPresentationPolicy;
+		if (a_weaponFormID == 0) return {};
+		int sameFormCount = 0;
+		std::vector<MemberEvidence> members;
+		bool complete = false;
+		const bool guarded = InvokeWithSehGuard([&]() {
+			for (const auto& [object, data] : a_inv) {
+				if (!object || object->GetFormID() != a_weaponFormID) continue;
+				if (data.first < 0 || data.first > (std::numeric_limits<int>::max)() - sameFormCount) return;
+				sameFormCount += data.first;
+				if (data.first == 0) continue;
+				if (!data.second) return;
+				if (!data.second->extraLists) continue;  // Implicit quantity is not poison evidence.
+				std::vector<RE::ExtraDataList*> lists;
+				if (!CopyExtraListsSafe(data.second->extraLists, lists)) return;
+				for (auto* list : lists) {
+					MemberEvidence member;
+					if (!TryReadPoisonPresentationMember(list, member)) return;
+					members.push_back(member);
+				}
+			}
+			complete = true;
+		});
+		const auto result = Resolve(sameFormCount, a_uid, guarded && complete, members);
+		if (!result.safelyResolved) return {};
+		bool validForm = false;
+		const bool lookupReadable = InvokeWithSehGuard([&]() {
+			const auto* poison = RE::TESForm::LookupByID<RE::AlchemyItem>(result.poisonFormID);
+			validForm = poison && poison->GetFormID() == result.poisonFormID;
+		});
+		return ValidateForm(result, lookupReadable && validForm);
+	}
+
+	std::string AppendWeaponPoisonHighlightText(
+		std::string a_existing, const WeaponPoisonPresentationPolicy::WeaponPoisonPresentation& a_poison)
+	{
+		if (!a_poison.safelyResolved) return a_existing;
+		std::string name;
+		std::string effects;
+		bool complete = false;
+		const bool guarded = InvokeWithSehGuard([&]() {
+			auto* poison = RE::TESForm::LookupByID<RE::AlchemyItem>(a_poison.poisonFormID);
+			if (!poison || poison->GetFormID() != a_poison.poisonFormID) return;
+			const char* rawName = poison->GetName();
+			if (!IsPlaceholderName(rawName)) name = rawName;
+			// Do not require another bottle in inventory, including for crafted forms.
+			Utils::Magic::GetMagicItemDescription(poison, effects);
+			complete = true;
+		});
+		if (!guarded || !complete) return a_existing;
+		return WeaponPoisonPresentationPolicy::AppendDescription(std::move(a_existing), name, effects);
+	}
+
+	bool TryReadLiveVisualStatusMember(
+		RE::ExtraDataList* a_extraData,
+		WeaponLiveVisualStatusPolicy::MemberEvidence& a_outMember)
+	{
+		if (!a_extraData || !TryGetExtraListCount(a_extraData, a_outMember.count)) {
+			return false;
+		}
+
+		bool hasUniqueID = false;
+		if (!TryHasTypeSafe(a_extraData, RE::ExtraDataType::kUniqueID, hasUniqueID)) {
+			return false;
+		}
+		if (hasUniqueID) {
+			auto* uniqueID = GetByTypeSafe<RE::ExtraUniqueID>(a_extraData);
+			if (!uniqueID) {
+				return false;
+			}
+			a_outMember.uniqueID = uniqueID->uniqueID;
+		}
+
+		bool hasPoison = false;
+		if (!TryHasTypeSafe(a_extraData, RE::ExtraDataType::kPoison, hasPoison)) {
+			return false;
+		}
+		if (hasPoison) {
+			auto* poison = GetByTypeSafe<RE::ExtraPoison>(a_extraData);
+			if (!poison) {
+				return false;
+			}
+			a_outMember.poisoned = poison->poison != nullptr && poison->count > 0;
+		}
+
+		bool hasEnchantment = false;
+		if (!TryHasTypeSafe(a_extraData, RE::ExtraDataType::kEnchantment, hasEnchantment)) {
+			return false;
+		}
+		if (hasEnchantment) {
+			auto* enchantment = GetByTypeSafe<RE::ExtraEnchantment>(a_extraData);
+			if (!enchantment) {
+				return false;
+			}
+			a_outMember.extraEnchanted = enchantment->enchantment != nullptr;
+		}
+
+		a_outMember.statusReadable = true;
+		return true;
+	}
+
+	WeaponLiveVisualStatusPolicy::WeaponLiveVisualStatus ResolveWeaponLiveVisualStatus(
+		RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::TESObjectWEAP* a_weapon,
+		std::uint16_t a_storedUniqueID)
+	{
+		using namespace WeaponLiveVisualStatusPolicy;
+
+		if (!a_weapon) {
+			return {};
+		}
+
+		std::vector<MemberEvidence> members;
+		bool enumerationReadable = true;
+		const auto formID = a_weapon->GetFormID();
+		const int sameFormCount = GetSameFormInventoryCount(a_inv, a_weapon);
+		for (auto& [boundObj, data] : a_inv) {
+			if (!boundObj || boundObj->GetFormID() != formID || data.first <= 0 ||
+			    !data.second || !data.second->extraLists) {
+				continue;
+			}
+
+			std::vector<RE::ExtraDataList*> extraListSnapshot;
+			if (!CopyExtraListsSafe(data.second->extraLists, extraListSnapshot)) {
+				enumerationReadable = false;
+				break;
+			}
+			for (auto* extraData : extraListSnapshot) {
+				MemberEvidence member{};
+				if (!TryReadLiveVisualStatusMember(extraData, member)) {
+					enumerationReadable = false;
+					break;
+				}
+				members.push_back(member);
+			}
+			if (!enumerationReadable) {
+				break;
+			}
+		}
+
+		return WeaponLiveVisualStatusPolicy::Resolve({
+			sameFormCount,
+			a_storedUniqueID,
+			enumerationReadable,
+			a_weapon->formEnchanting != nullptr,
+			std::span<const MemberEvidence>{ members }
+		});
+	}
+
+	using GroupedPoisonLineageDiagnosticPolicy::Hand;
+	using GroupedPoisonLineageDiagnosticPolicy::Lineage;
+	using GroupedPoisonLineageDiagnosticPolicy::SnapshotSummary;
+	using GroupedPoisonLineageDiagnosticPolicy::Topology;
+	using GroupedPoisonPresentationAliasPolicy::Presentation;
+	using GroupedPoisonPresentationAliasPolicy::ValidationEvidence;
+	using GroupedPoisonPresentationAliasPolicy::ValidationFailure;
+
+	struct GroupedPoisonDiagnosticMember
+	{
+		std::uintptr_t ephemeralAddress = 0;
+		std::uint16_t uniqueID = 0;
+		int count = 0;
+		bool readable = false;
+		bool worn = false;
+		bool wornLeft = false;
+		bool poisoned = false;
+		bool enchanted = false;
+		bool hasHealth = false;
+		float health = 0.0F;
+		bool modified = false;
+		std::uint32_t poisonFormID = 0;
+		std::uint32_t poisonCount = 0;
+		std::uint64_t logicalSignatureDigest = 0;
+		std::uint64_t nonPoisonSignatureDigest = 0;
+	};
+
+	struct GroupedPoisonDiagnosticSnapshot
+	{
+		SnapshotSummary summary{};
+		std::vector<GroupedPoisonDiagnosticMember> members;
+	};
+
+	constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+	constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+
+	std::uint64_t HashGroupedPoisonText(std::string_view a_text)
+	{
+		std::uint64_t digest = kFnvOffsetBasis;
+		for (const unsigned char value : a_text) {
+			digest ^= value;
+			digest *= kFnvPrime;
+		}
+		return digest;
+	}
+
+	void MixGroupedPoisonDigest(std::uint64_t& a_digest, std::uint64_t a_value)
+	{
+		for (std::uint32_t shift = 0; shift < 64; shift += 8) {
+			a_digest ^= static_cast<std::uint8_t>(a_value >> shift);
+			a_digest *= kFnvPrime;
+		}
+	}
+
+	std::uint64_t BuildGroupedPoisonSlotDigest(
+		std::uint64_t a_runtimeSlotID,
+		RE::FormID a_formID,
+		Hand a_hand,
+		std::uint64_t a_beforeSignature)
+	{
+		auto digest = kFnvOffsetBasis;
+		MixGroupedPoisonDigest(digest, a_runtimeSlotID);
+		MixGroupedPoisonDigest(digest, a_formID);
+		MixGroupedPoisonDigest(digest, a_hand == Hand::Left ? 1 : 0);
+		MixGroupedPoisonDigest(digest, a_beforeSignature);
+		return digest;
+	}
+
+	std::atomic_uint64_t g_nextWeaponPresentationSlotID{ 0 };
+
+	std::uint64_t AllocateWeaponPresentationSlotID()
+	{
+		auto value = ++g_nextWeaponPresentationSlotID;
+		if (value == 0) {
+			value = ++g_nextWeaponPresentationSlotID;
+		}
+		return value;
+	}
+
+	double GetGroupedPoisonDiagnosticTime()
+	{
+		return std::chrono::duration<double>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+
+	const char* GetGroupedPoisonTopologyName(Topology a_topology)
+	{
+		switch (a_topology) {
+		case Topology::Empty:
+			return "empty";
+		case Topology::SingleLogicalRow:
+			return "single_logical_row";
+		case Topology::MixedLogicalRows:
+			return "mixed_logical_rows";
+		case Topology::Unknown:
+		default:
+			return "unknown";
+		}
+	}
+
+	const char* GetGroupedPoisonLineageName(Lineage a_lineage)
+	{
+		switch (a_lineage) {
+		case Lineage::StrongUniqueID:
+			return "STRONG_UID_LINEAGE";
+		case Lineage::StrongHandTransition:
+			return "STRONG_HAND_TRANSITION";
+		case Lineage::Ambiguous:
+		default:
+			return "AMBIGUOUS";
+		}
+	}
+
+	bool TryCaptureGroupedPoisonMember(
+		RE::ExtraDataList* a_extraData,
+		GroupedPoisonDiagnosticMember& a_out)
+	{
+		a_out.ephemeralAddress = reinterpret_cast<std::uintptr_t>(a_extraData);
+		if (!a_extraData || !TryGetExtraListCount(a_extraData, a_out.count)) {
+			return false;
+		}
+
+		bool hasUniqueID = false;
+		bool hasPoison = false;
+		bool hasEnchantment = false;
+		bool hasHealth = false;
+		if (!TryHasTypeSafe(a_extraData, RE::ExtraDataType::kUniqueID, hasUniqueID) ||
+		    !TryHasTypeSafe(a_extraData, RE::ExtraDataType::kWorn, a_out.worn) ||
+		    !TryHasTypeSafe(a_extraData, RE::ExtraDataType::kWornLeft, a_out.wornLeft) ||
+		    !TryHasTypeSafe(a_extraData, RE::ExtraDataType::kPoison, hasPoison) ||
+		    !TryHasTypeSafe(a_extraData, RE::ExtraDataType::kEnchantment, hasEnchantment) ||
+		    !TryHasTypeSafe(a_extraData, RE::ExtraDataType::kHealth, hasHealth)) {
+			return false;
+		}
+
+		if (hasUniqueID) {
+			auto* uniqueID = GetByTypeSafe<RE::ExtraUniqueID>(a_extraData);
+			if (!uniqueID) {
+				return false;
+			}
+			a_out.uniqueID = uniqueID->uniqueID;
+		}
+
+		auto* poison = hasPoison ? GetByTypeSafe<RE::ExtraPoison>(a_extraData) : nullptr;
+		if (hasPoison && !poison) {
+			return false;
+		}
+		a_out.poisoned = poison && poison->poison && poison->count > 0;
+		a_out.poisonFormID = poison && poison->poison ? poison->poison->GetFormID() : 0;
+		a_out.poisonCount = poison ? poison->count : 0;
+
+		auto* enchantment = hasEnchantment ? GetByTypeSafe<RE::ExtraEnchantment>(a_extraData) : nullptr;
+		if (hasEnchantment && !enchantment) {
+			return false;
+		}
+		a_out.enchanted = enchantment && enchantment->enchantment;
+
+		auto* health = hasHealth ? GetByTypeSafe<RE::ExtraHealth>(a_extraData) : nullptr;
+		if (hasHealth && !health) {
+			return false;
+		}
+		a_out.hasHealth = health != nullptr;
+		a_out.health = health ? health->health : 0.0F;
+
+		std::string logicalSignature;
+		if (!TryBuildReadableLogicalRowSignature(a_extraData, logicalSignature)) {
+			return false;
+		}
+		a_out.logicalSignatureDigest = HashGroupedPoisonText(logicalSignature);
+		a_out.modified = logicalSignature != GetPlainLogicalRowSignature();
+
+		auto* charge = GetByTypeSafe<RE::ExtraCharge>(a_extraData);
+		auto* text = GetByTypeSafe<RE::ExtraTextDisplayData>(a_extraData);
+		auto* ownership = GetByTypeSafe<RE::ExtraOwnership>(a_extraData);
+		auto* hotkey = GetByTypeSafe<RE::ExtraHotkey>(a_extraData);
+		const auto enchantmentFormID = enchantment && enchantment->enchantment ?
+			enchantment->enchantment->GetFormID() : 0;
+		const auto ownerFormID = ownership && ownership->owner ? ownership->owner->GetFormID() : 0;
+		const char* displayName = text ? text->displayName.c_str() : "";
+		const auto nonPoisonSignature = fmt::format(
+			"health={}:{};enchantment={}:{:08X}:{}:{};charge={}:{};name={}:{};temper={};owner={}:{:08X};hotkey={}",
+			health ? 1 : 0,
+			health ? health->health : 0.0F,
+			enchantment ? 1 : 0,
+			enchantmentFormID,
+			enchantment ? enchantment->charge : 0,
+			enchantment && enchantment->removeOnUnequip ? 1 : 0,
+			charge ? 1 : 0,
+			charge ? charge->charge : 0.0F,
+			text ? 1 : 0,
+			displayName ? displayName : "",
+			text ? text->temperFactor : 0.0F,
+			ownership ? 1 : 0,
+			ownerFormID,
+			hotkey ? static_cast<int>(hotkey->hotkey.underlying()) : -2);
+		a_out.nonPoisonSignatureDigest = HashGroupedPoisonText(nonPoisonSignature);
+		a_out.readable = true;
+		return true;
+	}
+
+	GroupedPoisonDiagnosticSnapshot CaptureGroupedPoisonTargetSnapshot(
+		RE::PlayerCharacter* a_player,
+		RE::FormID a_formID,
+		Hand a_targetHand)
+	{
+		GroupedPoisonDiagnosticSnapshot result;
+		if (!a_player || !a_player->Is3DLoaded() || a_formID == 0) {
+			return result;
+		}
+
+		const bool targetLeft = a_targetHand == Hand::Left;
+		auto* targetEquipped = a_player->GetEquippedObject(targetLeft);
+		auto* otherEquipped = a_player->GetEquippedObject(!targetLeft);
+		result.summary.targetHandHasForm = targetEquipped && targetEquipped->GetFormID() == a_formID;
+		result.summary.otherHandHasSameForm = otherEquipped && otherEquipped->GetFormID() == a_formID;
+
+		RE::TESObjectREFR::InventoryItemMap inventory;
+		if (!Utils::Inventory::TryGetInventorySnapshot(
+				a_player, inventory, "GroupedPoisonLineageDiagnostic")) {
+			return result;
+		}
+
+		RE::InventoryEntryData* entry = nullptr;
+		for (auto& [boundObject, data] : inventory) {
+			if (boundObject && boundObject->GetFormID() == a_formID) {
+				result.summary.totalInventoryCount = (std::max)(data.first, 0);
+				entry = data.second.get();
+				break;
+			}
+		}
+
+		if (!entry || !entry->extraLists) {
+			result.summary.implicitPlainCount = result.summary.totalInventoryCount;
+			result.summary.cleanItemCount = result.summary.totalInventoryCount;
+			result.summary.readable = true;
+			result.summary.topology = result.summary.totalInventoryCount == 0 ?
+				Topology::Empty : Topology::SingleLogicalRow;
+			result.summary.topologyDigest = kFnvOffsetBasis;
+			MixGroupedPoisonDigest(result.summary.topologyDigest,
+				static_cast<std::uint64_t>(result.summary.totalInventoryCount));
+			inventory.clear();
+			return result;
+		}
+
+		std::vector<RE::ExtraDataList*> extraLists;
+		if (!CopyExtraListsSafe(entry->extraLists, extraLists)) {
+			inventory.clear();
+			return result;
+		}
+
+		int targetIndex = -1;
+		std::vector<std::uint64_t> logicalDigests;
+		for (auto* extraData : extraLists) {
+			GroupedPoisonDiagnosticMember member;
+			result.summary.extraListCount++;
+			if (!TryCaptureGroupedPoisonMember(extraData, member)) {
+				result.summary.hasUnreadableMember = true;
+				result.members.push_back(member);
+				continue;
+			}
+			const auto memberIndex = static_cast<int>(result.members.size());
+			result.summary.representedItemCount += member.count;
+			if (member.modified) {
+				result.summary.modifiedItemCount += member.count;
+			} else {
+				result.summary.cleanItemCount += member.count;
+			}
+			if (member.poisoned) {
+				result.summary.poisonedMemberCount++;
+				result.summary.poisonedItemCount += member.count;
+			}
+			const bool wornInTargetHand = targetLeft ? member.wornLeft : (member.worn && !member.wornLeft);
+			if (wornInTargetHand) {
+				result.summary.targetWornMemberCount++;
+				targetIndex = memberIndex;
+			}
+			logicalDigests.push_back(member.logicalSignatureDigest);
+			result.members.push_back(member);
+		}
+
+		result.summary.implicitPlainCount = (std::max)(
+			0, result.summary.totalInventoryCount - result.summary.representedItemCount);
+		if (result.summary.representedItemCount > result.summary.totalInventoryCount) {
+			result.summary.hasUnreadableMember = true;
+		}
+		result.summary.cleanItemCount += result.summary.implicitPlainCount;
+		if (result.summary.implicitPlainCount > 0) {
+			logicalDigests.push_back(HashGroupedPoisonText(GetPlainLogicalRowSignature()));
+		}
+		std::sort(logicalDigests.begin(), logicalDigests.end());
+		logicalDigests.erase(std::unique(logicalDigests.begin(), logicalDigests.end()), logicalDigests.end());
+		if (result.summary.totalInventoryCount == 0) {
+			result.summary.topology = Topology::Empty;
+		} else if (!result.summary.hasUnreadableMember && logicalDigests.size() <= 1) {
+			result.summary.topology = Topology::SingleLogicalRow;
+		} else if (!result.summary.hasUnreadableMember) {
+			result.summary.topology = Topology::MixedLogicalRows;
+		}
+
+		result.summary.targetMemberUnique = result.summary.targetWornMemberCount == 1 && targetIndex >= 0;
+		if (result.summary.targetMemberUnique) {
+			const auto& target = result.members[static_cast<std::size_t>(targetIndex)];
+			result.summary.targetWornUniqueID = target.uniqueID;
+			result.summary.targetWornXListAddress = target.ephemeralAddress;
+			result.summary.targetMemberPoisoned = target.poisoned;
+			result.summary.targetMemberEnchanted = target.enchanted;
+			result.summary.targetPoisonFormID = target.poisonFormID;
+			result.summary.targetLogicalSignatureDigest = target.logicalSignatureDigest;
+			result.summary.targetNonPoisonSignatureDigest = target.nonPoisonSignatureDigest;
+			result.summary.otherModifiedItemCount = result.summary.modifiedItemCount -
+				(target.modified ? target.count : 0);
+			if (target.uniqueID != 0) {
+				const auto occurrences = std::count_if(
+					result.members.begin(), result.members.end(), [&](const auto& member) {
+						return member.readable && member.uniqueID == target.uniqueID;
+					});
+				result.summary.targetUniqueIDGloballyUnique = occurrences == 1;
+			}
+		} else {
+			result.summary.otherModifiedItemCount = result.summary.modifiedItemCount;
+		}
+		result.summary.exactlyOnePoisonedMember =
+			result.summary.poisonedMemberCount == 1 && result.summary.poisonedItemCount == 1;
+		result.summary.readable = !result.summary.hasUnreadableMember;
+
+		std::sort(result.members.begin(), result.members.end(), [](const auto& a_lhs, const auto& a_rhs) {
+			return std::tie(a_lhs.uniqueID, a_lhs.wornLeft, a_lhs.worn, a_lhs.logicalSignatureDigest,
+				a_lhs.count, a_lhs.ephemeralAddress) <
+			       std::tie(a_rhs.uniqueID, a_rhs.wornLeft, a_rhs.worn, a_rhs.logicalSignatureDigest,
+				a_rhs.count, a_rhs.ephemeralAddress);
+		});
+		result.summary.topologyDigest = kFnvOffsetBasis;
+		MixGroupedPoisonDigest(result.summary.topologyDigest,
+			static_cast<std::uint64_t>(result.summary.totalInventoryCount));
+		MixGroupedPoisonDigest(result.summary.topologyDigest,
+			static_cast<std::uint64_t>(result.summary.implicitPlainCount));
+		for (const auto& member : result.members) {
+			MixGroupedPoisonDigest(result.summary.topologyDigest, member.readable ? 1 : 0);
+			MixGroupedPoisonDigest(result.summary.topologyDigest, member.uniqueID);
+			MixGroupedPoisonDigest(result.summary.topologyDigest, static_cast<std::uint64_t>(member.count));
+			MixGroupedPoisonDigest(result.summary.topologyDigest, member.worn ? 1 : 0);
+			MixGroupedPoisonDigest(result.summary.topologyDigest, member.wornLeft ? 1 : 0);
+			MixGroupedPoisonDigest(result.summary.topologyDigest, member.logicalSignatureDigest);
+		}
+		inventory.clear();
+		return result;
+	}
+
+	void LogGroupedPoisonSnapshot(
+		const char* a_phase,
+		std::uint64_t a_transactionID,
+		std::uint64_t a_updateSequence,
+		RE::FormID a_formID,
+		Hand a_targetHand,
+		const GroupedPoisonDiagnosticSnapshot& a_snapshot)
+	{
+		const auto& summary = a_snapshot.summary;
+		logger::debug(
+			"GROUPED_POISON {} tx={} update={} form={:08X} hand={} readable={} total={} represented={} extraLists={} implicitPlain={} clean={} modified={} poisonedMembers={} poisonedItems={} targetWornMembers={} targetUID={} targetUIDGloballyUnique={} targetPoisoned={} otherHandSameForm={} topology={} topologyDigest={:016X}",
+			a_phase,
+			a_transactionID,
+			a_updateSequence,
+			a_formID,
+			a_targetHand == Hand::Left ? "LEFT" : "RIGHT",
+			summary.readable ? 1 : 0,
+			summary.totalInventoryCount,
+			summary.representedItemCount,
+			summary.extraListCount,
+			summary.implicitPlainCount,
+			summary.cleanItemCount,
+			summary.modifiedItemCount,
+			summary.poisonedMemberCount,
+			summary.poisonedItemCount,
+			summary.targetWornMemberCount,
+			summary.targetWornUniqueID,
+			summary.targetUniqueIDGloballyUnique ? 1 : 0,
+			summary.targetMemberPoisoned ? 1 : 0,
+			summary.otherHandHasSameForm ? 1 : 0,
+			GetGroupedPoisonTopologyName(summary.topology),
+			summary.topologyDigest);
+		for (std::size_t index = 0; index < a_snapshot.members.size(); ++index) {
+			const auto& member = a_snapshot.members[index];
+			logger::debug(
+				"GROUPED_POISON {} tx={} member={} ephemeralXList={:016X} loggingOnly=1 readable={} uid={} count={} worn={} wornLeft={} poison={} poisonForm={:08X} poisonCount={} enchant={} health={} healthValue={} logicalSig={:016X} nonPoisonSig={:016X}",
+				a_phase,
+				a_transactionID,
+				index,
+				static_cast<std::uint64_t>(member.ephemeralAddress),
+				member.readable ? 1 : 0,
+				member.uniqueID,
+				member.count,
+				member.worn ? 1 : 0,
+				member.wornLeft ? 1 : 0,
+				member.poisoned ? 1 : 0,
+				member.poisonFormID,
+				member.poisonCount,
+				member.enchanted ? 1 : 0,
+				member.hasHealth ? 1 : 0,
+				member.health,
+				member.logicalSignatureDigest,
+				member.nonPoisonSignatureDigest);
+		}
+	}
+
+	GroupedPoisonLineageDiagnosticPolicy::Watcher g_groupedPoisonWatcher{};
+	std::uint64_t g_nextGroupedPoisonTransactionID = 0;
+	std::uint64_t g_groupedPoisonUpdateSequence = 0;
+	GroupedPoisonPresentationAliasPolicy::Alias g_groupedPoisonPresentationAlias{};
+	std::uint64_t g_nextGroupedPoisonAliasGeneration = 0;
+
+	const char* GetGroupedPoisonAliasFailureName(ValidationFailure a_failure)
+	{
+		switch (a_failure) {
+		case ValidationFailure::UnreadableTopology: return "unreadable_topology";
+		case ValidationFailure::SlotMismatch: return "slot_rebound";
+		case ValidationFailure::FormMismatch: return "form_changed";
+		case ValidationFailure::EpochChanged: return "lifecycle_epoch_changed";
+		case ValidationFailure::StoredIdentityChanged: return "stored_identity_changed";
+		case ValidationFailure::TargetHandChanged: return "target_hand_unequipped_or_changed";
+		case ValidationFailure::OppositeHandSameForm: return "opposite_hand_same_form";
+		case ValidationFailure::TargetMemberAmbiguous: return "target_member_ambiguous";
+		case ValidationFailure::PoisonDisappeared: return "poison_disappeared";
+		case ValidationFailure::PoisonPopulationAmbiguous: return "poison_population_ambiguous";
+		case ValidationFailure::CompetingModifiedMember: return "competing_modified_member";
+		case ValidationFailure::CountChanged: return "same_form_count_changed";
+		case ValidationFailure::SignatureChanged: return "logical_signature_changed";
+		case ValidationFailure::PoisonFormChanged: return "poison_form_changed";
+		case ValidationFailure::Inactive: return "inactive";
+		case ValidationFailure::None:
+		default: return "none";
+		}
+	}
+
+	void DropGroupedPoisonPresentationAlias(const char* a_reason)
+	{
+		if (g_groupedPoisonPresentationAlias.IsActive()) {
+			logger::debug(
+				"GROUPED_POISON_ALIAS DROP slotDigest={:016X} form={:08X} hand={} epoch={} generation={} beforeSig={:016X} afterSig={:016X} reason={}",
+				g_groupedPoisonPresentationAlias.slotDigest,
+				g_groupedPoisonPresentationAlias.formID,
+				g_groupedPoisonPresentationAlias.hand == Hand::Left ? "LEFT" : "RIGHT",
+				g_groupedPoisonPresentationAlias.epoch,
+				g_groupedPoisonPresentationAlias.generation,
+				g_groupedPoisonPresentationAlias.beforeSignature,
+				g_groupedPoisonPresentationAlias.afterSignature,
+				a_reason ? a_reason : "unspecified");
+		}
+		g_groupedPoisonPresentationAlias.Clear();
+	}
+
+	void DropGroupedPoisonPresentationAliasForSlot(
+		std::uint64_t a_runtimeSlotID,
+		const char* a_reason)
+	{
+		if (g_groupedPoisonPresentationAlias.IsActive() &&
+		    g_groupedPoisonPresentationAlias.runtimeSlotID == a_runtimeSlotID) {
+			DropGroupedPoisonPresentationAlias(a_reason);
+		}
+	}
+
+	void TryCreateGroupedPoisonPresentationAlias(
+		Lineage a_lineage,
+		const SnapshotSummary& a_before,
+		const SnapshotSummary& a_after)
+	{
+		GroupedPoisonPresentationAliasPolicy::CreationEvidence evidence;
+		evidence.lineage = a_lineage;
+		evidence.originatedFromUID0GroupedFallback =
+			g_groupedPoisonWatcher.originatedFromUID0GroupedFallback;
+		evidence.epochMatches =
+			g_groupedPoisonWatcher.epoch == Wheeler::GetTransientRestorationEpoch();
+		evidence.slotSignatureMatchesBefore =
+			g_groupedPoisonWatcher.preEquipLogicalSignatureDigest ==
+			a_before.targetLogicalSignatureDigest;
+		evidence.readable = a_before.readable && a_after.readable &&
+			!a_before.hasUnreadableMember && !a_after.hasUnreadableMember;
+		evidence.targetHandHasForm = a_after.targetHandHasForm;
+		evidence.otherHandHasSameForm = a_after.otherHandHasSameForm;
+		evidence.targetMemberUnique = a_after.targetMemberUnique;
+		evidence.targetMemberPoisoned = a_after.targetMemberPoisoned;
+		evidence.exactlyOnePoisonedMember = a_after.exactlyOnePoisonedMember;
+		evidence.countConserved =
+			a_before.totalInventoryCount == a_after.totalInventoryCount;
+		evidence.hasCompetingModifiedMember =
+			a_before.otherModifiedItemCount != 0 || a_after.otherModifiedItemCount != 0;
+		evidence.preMutationUID = a_before.targetWornUniqueID;
+		evidence.runtimeSlotID = g_groupedPoisonWatcher.runtimeSlotID;
+		evidence.slotDigest = g_groupedPoisonWatcher.slotDigest;
+		evidence.formID = g_groupedPoisonWatcher.formID;
+		evidence.hand = g_groupedPoisonWatcher.targetHand;
+		evidence.epoch = g_groupedPoisonWatcher.epoch;
+		evidence.beforeSignature = a_before.targetLogicalSignatureDigest;
+		evidence.afterSignature = a_after.targetLogicalSignatureDigest;
+		evidence.afterNonPoisonSignature = a_after.targetNonPoisonSignatureDigest;
+		evidence.poisonFormID = a_after.targetPoisonFormID;
+		evidence.expectedTotalCount = a_before.totalInventoryCount;
+
+		if (++g_nextGroupedPoisonAliasGeneration == 0) {
+			++g_nextGroupedPoisonAliasGeneration;
+		}
+		auto alias = GroupedPoisonPresentationAliasPolicy::Create(
+			evidence, g_nextGroupedPoisonAliasGeneration);
+		if (!alias.IsActive()) {
+			return;
+		}
+		DropGroupedPoisonPresentationAlias("superseded_by_strong_transition");
+		g_groupedPoisonPresentationAlias = alias;
+		logger::debug(
+			"GROUPED_POISON_ALIAS CREATE slotDigest={:016X} form={:08X} hand={} epoch={} generation={} beforeSig={:016X} afterSig={:016X} reason=strong_hand_transition gameplayAuthority=0",
+			alias.slotDigest,
+			alias.formID,
+			alias.hand == Hand::Left ? "LEFT" : "RIGHT",
+			alias.epoch,
+			alias.generation,
+			alias.beforeSignature,
+			alias.afterSignature);
+	}
+
+	Presentation ResolveGroupedPoisonAliasPresentation(
+		std::uint64_t a_runtimeSlotID,
+		RE::FormID a_formID,
+		std::uint16_t a_storedUID,
+		std::uint64_t a_storedLogicalSignature)
+	{
+		if (!g_groupedPoisonPresentationAlias.IsActive() ||
+		    g_groupedPoisonPresentationAlias.runtimeSlotID != a_runtimeSlotID) {
+			return {};
+		}
+
+		const auto slotDigest = BuildGroupedPoisonSlotDigest(
+			a_runtimeSlotID,
+			a_formID,
+			g_groupedPoisonPresentationAlias.hand,
+			a_storedLogicalSignature);
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		const auto snapshot = CaptureGroupedPoisonTargetSnapshot(
+			player,
+			g_groupedPoisonPresentationAlias.formID,
+			g_groupedPoisonPresentationAlias.hand);
+
+		ValidationEvidence evidence;
+		evidence.readable = snapshot.summary.readable && !snapshot.summary.hasUnreadableMember;
+		evidence.targetHandHasForm = snapshot.summary.targetHandHasForm;
+		evidence.otherHandHasSameForm = snapshot.summary.otherHandHasSameForm;
+		evidence.targetMemberUnique = snapshot.summary.targetMemberUnique;
+		evidence.targetMemberPoisoned = snapshot.summary.targetMemberPoisoned;
+		evidence.targetMemberEnchanted = snapshot.summary.targetMemberEnchanted;
+		evidence.exactlyOnePoisonedMember = snapshot.summary.exactlyOnePoisonedMember;
+		evidence.hasCompetingModifiedMember = snapshot.summary.otherModifiedItemCount != 0;
+		evidence.storedUID = a_storedUID;
+		evidence.runtimeSlotID = a_runtimeSlotID;
+		evidence.slotDigest = slotDigest;
+		evidence.formID = a_formID;
+		evidence.epoch = Wheeler::GetTransientRestorationEpoch();
+		evidence.storedLogicalSignature = a_storedLogicalSignature;
+		evidence.currentTargetSignature = snapshot.summary.targetLogicalSignatureDigest;
+		evidence.currentTargetNonPoisonSignature = snapshot.summary.targetNonPoisonSignatureDigest;
+		evidence.currentPoisonFormID = snapshot.summary.targetPoisonFormID;
+		evidence.currentTotalCount = snapshot.summary.totalInventoryCount;
+
+		const auto failure = GroupedPoisonPresentationAliasPolicy::GetValidationFailure(
+			g_groupedPoisonPresentationAlias, evidence);
+		if (failure != ValidationFailure::None) {
+			DropGroupedPoisonPresentationAlias(GetGroupedPoisonAliasFailureName(failure));
+			return {};
+		}
+
+		if (!g_groupedPoisonPresentationAlias.validLogged) {
+			logger::debug(
+				"GROUPED_POISON_ALIAS VALID slotDigest={:016X} form={:08X} hand={} epoch={} generation={} beforeSig={:016X} afterSig={:016X} reason=fresh_draw_validation",
+				g_groupedPoisonPresentationAlias.slotDigest,
+				g_groupedPoisonPresentationAlias.formID,
+				g_groupedPoisonPresentationAlias.hand == Hand::Left ? "LEFT" : "RIGHT",
+				g_groupedPoisonPresentationAlias.epoch,
+				g_groupedPoisonPresentationAlias.generation,
+				g_groupedPoisonPresentationAlias.beforeSignature,
+				g_groupedPoisonPresentationAlias.afterSignature);
+			g_groupedPoisonPresentationAlias.validLogged = true;
+		}
+		return GroupedPoisonPresentationAliasPolicy::Present(
+			g_groupedPoisonPresentationAlias, evidence);
+	}
+
+	void CancelGroupedPoisonDiagnostic(const char* a_reason)
+	{
+		if (g_groupedPoisonWatcher.IsActive()) {
+			logger::debug(
+				"GROUPED_POISON CANCEL tx={} reason={} form={:08X} hand={} samplesRemaining={}",
+				g_groupedPoisonWatcher.transactionID,
+				a_reason ? a_reason : "unspecified",
+				g_groupedPoisonWatcher.formID,
+				g_groupedPoisonWatcher.targetHand == Hand::Left ? "LEFT" : "RIGHT",
+				g_groupedPoisonWatcher.samplesRemaining);
+		}
+		g_groupedPoisonWatcher.Clear();
+	}
+
+	void ArmGroupedPoisonDiagnostic(
+		std::uint64_t a_runtimeSlotID,
+		RE::FormID a_formID,
+		Hand a_targetHand,
+		int a_preEquipGroupCount,
+		std::string_view a_preEquipLogicalSignature)
+	{
+		CancelGroupedPoisonDiagnostic("superseded_by_grouped_equip");
+		if (++g_nextGroupedPoisonTransactionID == 0) {
+			++g_nextGroupedPoisonTransactionID;
+		}
+		const auto signatureDigest = HashGroupedPoisonText(a_preEquipLogicalSignature);
+		const auto slotDigest = BuildGroupedPoisonSlotDigest(
+			a_runtimeSlotID, a_formID, a_targetHand, signatureDigest);
+		g_groupedPoisonWatcher = GroupedPoisonLineageDiagnosticPolicy::Arm(
+			g_nextGroupedPoisonTransactionID,
+			Wheeler::GetTransientRestorationEpoch(),
+			a_runtimeSlotID,
+			a_formID,
+			a_targetHand,
+			a_preEquipGroupCount,
+			signatureDigest,
+			slotDigest,
+			GetGroupedPoisonDiagnosticTime(),
+			g_groupedPoisonUpdateSequence);
+		logger::debug(
+			"GROUPED_POISON ARM tx={} epoch={} slotDigest={:016X} form={:08X} hand={} preGroupCount={} preLogicalSig={:016X} lifetimeSeconds=25 scalarOnly=1",
+			g_groupedPoisonWatcher.transactionID,
+			g_groupedPoisonWatcher.epoch,
+			g_groupedPoisonWatcher.slotDigest,
+			a_formID,
+			a_targetHand == Hand::Left ? "LEFT" : "RIGHT",
+			a_preEquipGroupCount,
+			signatureDigest);
+	}
+
+	void DrawWeaponLiveStatusOverlays(
+		bool a_safelyResolved,
+		bool a_poisoned,
+		bool a_enchanted,
+		ImVec2 a_center,
+		DrawArgs a_drawArgs)
+	{
+		if (!a_safelyResolved || (!a_poisoned && !a_enchanted)) {
+			return;
+		}
+
+		std::array<Texture::icon_image_type, 2> badges{};
+		std::size_t badgeCount = 0;
+		if (a_poisoned) {
+			badges[badgeCount++] = Texture::icon_image_type::poison_default;
+		}
+		if (a_enchanted) {
+			badges[badgeCount++] = Texture::icon_image_type::weapon_enchanted;
+		}
+
+		const auto slotBackground = Texture::GetIconImage(Texture::icon_image_type::slot_background);
+		const float backgroundScale = Config::Styling::Item::Slot::BackgroundTexture::Scale;
+		const float slotWidth = slotBackground.width > 0 ? slotBackground.width * backgroundScale : 96.0F;
+		const float slotHeight = slotBackground.height > 0 ? slotBackground.height * backgroundScale : 96.0F;
+		const float badgeExtent = std::clamp((std::min)(slotWidth, slotHeight) * 0.18F, 12.0F, 28.0F);
+		const float spacing = badgeExtent * 1.15F;
+		const float firstOffsetX = badgeCount == 1 ? 0.0F : -spacing * 0.5F;
+		const float offsetY = slotHeight * 0.29F;
+
+		for (std::size_t index = 0; index < badgeCount; ++index) {
+			const auto image = Texture::GetIconImage(badges[index]);
+			if (!image.texture || image.width <= 0 || image.height <= 0) {
+				continue;
+			}
+			const float aspect = static_cast<float>(image.width) / static_cast<float>(image.height);
+			const ImVec2 size = aspect >= 1.0F ?
+				ImVec2(badgeExtent, badgeExtent / aspect) :
+				ImVec2(badgeExtent * aspect, badgeExtent);
+			Drawer::draw_texture(
+				image.texture,
+				a_center,
+				firstOffsetX + spacing * static_cast<float>(index),
+				offsetY,
+				size,
+				C_SKYRIMWHITE,
+				a_drawArgs);
+		}
+	}
+
 	bool IsOneHandedWeaponForCompat(RE::TESObjectWEAP* a_weapon)
 	{
 		if (!a_weapon) {
@@ -508,6 +1377,57 @@ namespace
 		       HasTypeSafe(a_extraData, RE::ExtraDataType::kHealth) ||
 		       HasTypeSafe(a_extraData, RE::ExtraDataType::kCharge) ||
 		       GetByTypeSafe<RE::ExtraTextDisplayData>(a_extraData) != nullptr;
+	}
+
+	bool IsTwoHandedIndicatorWeapon(const RE::TESObjectWEAP* a_weapon)
+	{
+		const auto type = a_weapon->GetWeaponType();
+		return WeaponHandIndicatorPresentationPolicy::IsTwoHanded(
+			a_weapon->IsBow(), a_weapon->IsCrossbow(),
+			type == RE::WEAPON_TYPE::kTwoHandSword, type == RE::WEAPON_TYPE::kTwoHandAxe);
+	}
+
+	bool MatchesMixedTwoHandedIndicatorRow(
+		RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon,
+		std::string_view a_rowSignature, bool a_cleanSentinel)
+	{
+		using namespace WeaponHandIndicatorPresentationPolicy;
+		auto* entry = FindInventoryEntryByForm(a_inv, a_weapon->GetFormID());
+		std::vector<RE::ExtraDataList*> lists;
+		bool snapshotReadable = false;
+		if (!InvokeWithSehGuard([&]() {
+			    snapshotReadable = entry && entry->extraLists && CopyExtraListsSafe(entry->extraLists, lists);
+		    }) || !snapshotReadable) {
+			return false;
+		}
+		std::vector<MemberEvidence> evidence;
+		evidence.reserve(lists.size());
+		for (auto* list : lists) {
+			MemberEvidence member;
+			// Probe success is distinct from absence. Never reuse the gameplay
+			// HasTypeSafe/clean-row predicate which collapses read failure to false.
+			if (!list || !TryHasTypeSafe(list, RE::ExtraDataType::kWorn, member.worn) ||
+			    !TryHasTypeSafe(list, RE::ExtraDataType::kWornLeft, member.wornLeft)) {
+				return false;
+			}
+			constexpr std::array instanceTypes{
+				RE::ExtraDataType::kEnchantment, RE::ExtraDataType::kPoison,
+				RE::ExtraDataType::kHealth, RE::ExtraDataType::kCharge, RE::ExtraDataType::kTextDisplayData
+			};
+			for (const auto type : instanceTypes) {
+				bool present = false;
+				if (!TryHasTypeSafe(list, type, present)) {
+					return false;
+				}
+				member.instanceSpecific = member.instanceSpecific || present;
+			}
+			if (!TryBuildReadableLogicalRowSignature(list, member.signature)) {
+				return false;
+			}
+			member.readable = true;
+			evidence.push_back(std::move(member));
+		}
+		return ResolveMixedTwoHanded(snapshotReadable, a_cleanSentinel, a_rowSignature, evidence);
 	}
 
 	bool MatchesRequestedHandWorn(RE::ExtraDataList* a_extraData, bool a_leftHand)
@@ -607,79 +1527,83 @@ namespace
 
 		return false;
 	}
-	bool HasMixedSameFormIndicatorSiblings(RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon)
-	{
-		if (!a_weapon || GetSameFormInventoryCount(a_inv, a_weapon) < 2) {
-			return false;
-		}
 
-		RE::InventoryEntryData* entry = FindInventoryEntryByForm(a_inv, a_weapon->GetFormID());
-		if (!entry || !entry->extraLists) {
-			return false;
-		}
-
-		std::vector<RE::ExtraDataList*> extraListSnapshot;
-		if (!CopyExtraListsSafe(entry->extraLists, extraListSnapshot)) {
-			return false;
-		}
-
-		for (auto* extraList : extraListSnapshot) {
-			if (IsInstanceSpecificIndicatorExtraData(extraList)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	std::optional<bool> MatchCleanSentinelHandIndicatorFromInventory(
-		RE::TESObjectREFR::InventoryItemMap& a_inv,
-		RE::TESObjectWEAP* a_weapon,
-		std::uint64_t a_handSignature,
-		bool a_leftHand)
+	int GetSameFormInventoryCount(const RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon)
 	{
 		if (!a_weapon) {
-			return false;
+			return 0;
 		}
 
-		RE::InventoryEntryData* entry = FindInventoryEntryByForm(a_inv, a_weapon->GetFormID());
-		if (!entry || !entry->extraLists) {
-			return false;
-		}
-
-		std::vector<RE::ExtraDataList*> extraListSnapshot;
-		if (!CopyExtraListsSafe(entry->extraLists, extraListSnapshot)) {
-			return false;
-		}
-
-		if (a_handSignature != 0) {
-			for (auto* extraList : extraListSnapshot) {
-				if (!extraList) {
-					continue;
-				}
-				auto* uniqueData = GetByTypeSafe<RE::ExtraUniqueID>(extraList);
-				if (uniqueData && uniqueData->uniqueID == a_handSignature) {
-					return !IsInstanceSpecificIndicatorExtraData(extraList);
-				}
-			}
-			return std::nullopt;
-		}
-
-		for (auto* extraList : extraListSnapshot) {
-			if (!extraList || !MatchesRequestedHandWorn(extraList, a_leftHand)) {
+		const RE::FormID formID = a_weapon->GetFormID();
+		int totalCount = 0;
+		for (const auto& [boundObj, data] : a_inv) {
+			if (!boundObj || boundObj->GetFormID() != formID) {
 				continue;
 			}
-
-			foundRequestedHandWorn = true;
-			if (!IsInstanceSpecificIndicatorExtraData(extraList)) {
-				return true;
-			}
+			totalCount += data.first;
 		}
+		return totalCount;
+	}
 
-		if (foundRequestedHandWorn) {
+	// Used only by IsActive, after its existing mutable identity maintenance.
+	std::optional<bool> ResolveUID0ActiveVisualOverride(
+		RE::TESObjectREFR::InventoryItemMap& a_inv, RE::TESObjectWEAP* a_weapon)
+	{
+		const int count = GetSameFormInventoryCount(a_inv, a_weapon);
+		if (count == 1) {
+			return std::nullopt;
+		}
+		if (!a_weapon || count <= 0) {
 			return false;
 		}
-
-		return std::nullopt;
+		std::vector<WeaponActiveVisualPolicy::MemberEvidence> members;
+		bool foundEntry = false;
+		for (const auto& [object, data] : a_inv) {
+			if (!object || object->GetFormID() != a_weapon->GetFormID()) {
+				continue;
+			}
+			if (!data.second) {
+				return false;
+			}
+			foundEntry = true;
+			if (!data.second->extraLists) {
+				continue;  // An existing entry may represent an implicit plain stack.
+			}
+			std::vector<RE::ExtraDataList*> snapshot;
+			if (!CopyExtraListsSafe(data.second->extraLists, snapshot)) {
+				return false;
+			}
+			for (auto* list : snapshot) {
+				if (!list) {
+					continue;
+				}
+				WeaponActiveVisualPolicy::MemberEvidence member;
+				member.metadataReadable = true;
+				// Same distinctions as the existing indicator classifier, but read
+				// failure must not masquerade as absent modification metadata.
+				for (const auto type : { RE::ExtraDataType::kPoison, RE::ExtraDataType::kEnchantment,
+				         RE::ExtraDataType::kHealth, RE::ExtraDataType::kCharge, RE::ExtraDataType::kTextDisplayData }) {
+					bool present = false;
+					if (!TryHasTypeSafe(list, type, present)) {
+						member.metadataReadable = false;
+					}
+					if (type == RE::ExtraDataType::kTextDisplayData) {
+						RE::ExtraTextDisplayData* text = nullptr;
+						if (!InvokeWithSehGuard([&]() { text = list->GetByType<RE::ExtraTextDisplayData>(); }) ||
+						    (present && !text)) {
+							member.metadataReadable = false;
+						}
+						present = text != nullptr;
+					}
+					member.instanceSpecific = member.instanceSpecific || present;
+				}
+				member.wornReadable = TryHasTypeSafe(list, RE::ExtraDataType::kWorn, member.worn) &&
+					TryHasTypeSafe(list, RE::ExtraDataType::kWornLeft, member.wornLeft);
+				TryGetExtraListCount(list, member.count);
+				members.push_back(member);
+			}
+		}
+		return WeaponActiveVisualPolicy::Resolve(0, count, foundEntry, members);
 	}
 
 	struct LogicalRowInventoryState
@@ -1732,8 +2656,126 @@ void WheelItemWeapon::ProcessIWSCompatTransfer()
 	ProcessPendingIWSExactWeaponTransfer();
 }
 
+void WheelItemWeapon::ProcessGroupedPoisonLineageDiagnostic()
+{
+	++g_groupedPoisonUpdateSequence;
+	const auto decision = GroupedPoisonLineageDiagnosticPolicy::Advance(
+		g_groupedPoisonWatcher,
+		Wheeler::GetTransientRestorationEpoch(),
+		GetGroupedPoisonDiagnosticTime(),
+		g_groupedPoisonUpdateSequence);
+	if (decision == GroupedPoisonLineageDiagnosticPolicy::AdvanceDecision::None) {
+		return;
+	}
+	if (decision == GroupedPoisonLineageDiagnosticPolicy::AdvanceDecision::CancelEpoch) {
+		CancelGroupedPoisonDiagnostic("lifecycle_epoch_changed");
+		return;
+	}
+	if (decision == GroupedPoisonLineageDiagnosticPolicy::AdvanceDecision::Timeout) {
+		CancelGroupedPoisonDiagnostic("bounded_timeout");
+		return;
+	}
+
+	auto* player = RE::PlayerCharacter::GetSingleton();
+	const auto snapshot = CaptureGroupedPoisonTargetSnapshot(
+		player, g_groupedPoisonWatcher.formID, g_groupedPoisonWatcher.targetHand);
+	if (!g_groupedPoisonWatcher.hasBaseline) {
+		LogGroupedPoisonSnapshot(
+			"PRE",
+			g_groupedPoisonWatcher.transactionID,
+			g_groupedPoisonUpdateSequence,
+			g_groupedPoisonWatcher.formID,
+			g_groupedPoisonWatcher.targetHand,
+			snapshot);
+		if (!snapshot.summary.readable) {
+			CancelGroupedPoisonDiagnostic("initial_snapshot_unreadable");
+			return;
+		}
+		if (!snapshot.summary.targetHandHasForm) {
+			CancelGroupedPoisonDiagnostic("target_hand_occupant_changed_before_pre");
+			return;
+		}
+		if (snapshot.summary.totalInventoryCount != g_groupedPoisonWatcher.preEquipGroupCount) {
+			CancelGroupedPoisonDiagnostic("target_form_count_changed_before_pre");
+			return;
+		}
+		g_groupedPoisonWatcher.baseline = snapshot.summary;
+		g_groupedPoisonWatcher.hasBaseline = true;
+		return;
+	}
+
+	if (!GroupedPoisonLineageDiagnosticPolicy::HasTopologyChanged(
+			g_groupedPoisonWatcher.baseline, snapshot.summary)) {
+		return;
+	}
+
+	const auto before = g_groupedPoisonWatcher.baseline;
+	const auto lineage = GroupedPoisonLineageDiagnosticPolicy::Classify(before, snapshot.summary);
+	const bool countConserved = before.totalInventoryCount == snapshot.summary.totalInventoryCount;
+	logger::debug(
+		"GROUPED_POISON MUTATION tx={} update={} classification={} countConserved={} targetHandSameForm={} preUID={} postWornUID={} exactlyOnePoisoned={} poisonedIsTargetWorn={} cleanBefore={} cleanAfter={} otherModifiedMembers={} preXList={:016X} postXList={:016X} addressesLoggingOnly=1 preLogicalSig={:016X} postLogicalSig={:016X} preTopologyDigest={:016X} postTopologyDigest={:016X}",
+		g_groupedPoisonWatcher.transactionID,
+		g_groupedPoisonUpdateSequence,
+		GetGroupedPoisonLineageName(lineage),
+		countConserved ? 1 : 0,
+		snapshot.summary.targetHandHasForm ? 1 : 0,
+		before.targetWornUniqueID,
+		snapshot.summary.targetWornUniqueID,
+		snapshot.summary.exactlyOnePoisonedMember ? 1 : 0,
+		(snapshot.summary.targetMemberUnique && snapshot.summary.targetMemberPoisoned) ? 1 : 0,
+		before.cleanItemCount,
+		snapshot.summary.cleanItemCount,
+		snapshot.summary.otherModifiedItemCount,
+		static_cast<std::uint64_t>(before.targetWornXListAddress),
+		static_cast<std::uint64_t>(snapshot.summary.targetWornXListAddress),
+		before.targetLogicalSignatureDigest,
+		snapshot.summary.targetLogicalSignatureDigest,
+		before.topologyDigest,
+		snapshot.summary.topologyDigest);
+	LogGroupedPoisonSnapshot(
+		"MUTATION",
+		g_groupedPoisonWatcher.transactionID,
+		g_groupedPoisonUpdateSequence,
+		g_groupedPoisonWatcher.formID,
+		g_groupedPoisonWatcher.targetHand,
+		snapshot);
+	TryCreateGroupedPoisonPresentationAlias(lineage, before, snapshot.summary);
+
+	if (!snapshot.summary.readable) {
+		CancelGroupedPoisonDiagnostic("mutation_snapshot_unreadable");
+		return;
+	}
+	if (!snapshot.summary.targetHandHasForm) {
+		CancelGroupedPoisonDiagnostic("target_hand_occupant_changed");
+		return;
+	}
+	if (!countConserved) {
+		CancelGroupedPoisonDiagnostic("target_form_count_changed");
+		return;
+	}
+	// Continue observing the same scalar transaction so poison expiry/topology
+	// reversion can be recorded within the same bounded window.
+	g_groupedPoisonWatcher.baseline = snapshot.summary;
+}
+
+void WheelItemWeapon::ResetTransientStateForLifecycle()
+{
+	DropGroupedPoisonPresentationAlias("lifecycle_reset");
+	CancelGroupedPoisonDiagnostic("lifecycle_reset");
+	ClearPendingIWSExactWeaponTransfer("lifecycle_reset");
+}
+
+void WheelItemWeapon::CancelTransientStateInCurrentWorld()
+{
+	DropGroupedPoisonPresentationAlias("current_world_cancel");
+	CancelGroupedPoisonDiagnostic("current_world_cancel");
+	AbortPendingIWSExactWeaponTransfer("current_world_cancel", true);
+}
+
 void WheelItemWeapon::DrawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
 {
+	_drawOnlyPresentationFrame = ImGui::GetFrameCount();
+	_drawOnlyHandPresentation = {};
 	auto* weapon = this->_obj ? this->_obj->As<RE::TESObjectWEAP>() : nullptr;
 	if (TransformWheelManager::ShouldDimWeaponActivation(weapon)) {
 		a_drawArgs.alphaMult *= 0.35f;
@@ -1743,11 +2785,37 @@ void WheelItemWeapon::DrawSlot(ImVec2 a_center, bool a_hovered, RE::TESObjectREF
 		text = "Unarmed";
 	}
 	int itemCount = this->GetItemExtraDataAndCount(a_imap).first;
+	const auto& storedSignature = _logicalRowSignature.empty() ?
+		GetPlainLogicalRowSignature() : _logicalRowSignature;
+	const auto aliasPresentation = ResolveGroupedPoisonAliasPresentation(
+		_runtimePresentationSlotID,
+		weapon ? weapon->GetFormID() : 0,
+		this->GetUniqueID(),
+		HashGroupedPoisonText(storedSignature));
+	if (aliasPresentation.active) {
+		itemCount = static_cast<int>(aliasPresentation.count);
+		_drawOnlyHandPresentation.right = aliasPresentation.right;
+		_drawOnlyHandPresentation.left = aliasPresentation.left;
+	}
 	if (itemCount > 1) {
 		text += " (" + std::to_string(itemCount) + ")";
 	}
 	this->drawSlotText(a_center, text.c_str(), a_drawArgs);
 	this->drawSlotTexture(a_center, a_drawArgs);
+	bool statusResolved = false;
+	bool poisoned = false;
+	bool enchanted = false;
+	if (aliasPresentation.active) {
+		statusResolved = true;
+		poisoned = aliasPresentation.poisoned;
+		enchanted = aliasPresentation.enchanted || (weapon && weapon->formEnchanting != nullptr);
+	} else {
+		const auto liveStatus = ResolveWeaponLiveVisualStatus(a_imap, weapon, this->GetUniqueID());
+		statusResolved = liveStatus.IsSafelyResolved();
+		poisoned = liveStatus.poisoned;
+		enchanted = liveStatus.enchanted;
+	}
+	DrawWeaponLiveStatusOverlays(statusResolved, poisoned, enchanted, a_center, a_drawArgs);
 }
 
 void WheelItemWeapon::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::InventoryItemMap& a_imap, DrawArgs a_drawArgs)
@@ -1790,6 +2858,8 @@ void WheelItemWeapon::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::Inventor
 			}
 		}
 	}
+	const auto poisonPresentation = ResolveWeaponPoisonPresentation(a_imap, weapon ? weapon->GetFormID() : 0, this->GetUniqueID());
+	descriptionBuf = AppendWeaponPoisonHighlightText(std::move(descriptionBuf), poisonPresentation);
 	const float textShiftY = calculateHighlightTextShiftY(descriptionBuf.c_str());
 	this->drawHighlightText(a_center, displayName.c_str(), a_drawArgs, textShiftY);
 	this->drawHighlightTexture(a_center, a_drawArgs);
@@ -1806,28 +2876,56 @@ void WheelItemWeapon::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::Inventor
 std::optional<bool> WheelItemWeapon::MatchesEquippedHandIndicator(
 	RE::TESObjectREFR::InventoryItemMap& a_inv,
 	RE::FormID a_handFormID,
-	std::uint64_t a_handSignature,
+	std::uint64_t,
 	bool a_leftHand) const
 {
 	auto* weapon = this->_obj ? this->_obj->As<RE::TESObjectWEAP>() : nullptr;
-	if (!weapon || this->GetUniqueID() != 0) {
+	if (!weapon) {
 		return std::nullopt;
 	}
 	if (a_handFormID == 0 || a_handFormID != weapon->GetFormID()) {
+		return false;
+	}
+	const auto topology = ClassifySameFormIndicatorTopology(a_inv, weapon);
+	if (topology == SameFormIndicatorTopology::kUnknown) {
+		// Unknown topology is not permission to fall through to a form-only match.
+		return false;
+	}
+	if (topology == SameFormIndicatorTopology::kUnambiguous) {
 		return std::nullopt;
 	}
-	if (!HasMixedSameFormIndicatorSiblings(a_inv, weapon)) {
-		return std::nullopt;
+
+	// Mixed same-form rows must never reach SlotHandIndicators' form-only fallback.
+	// Prove membership from this frame's inventory map and current worn state.
+	const bool cleanSentinel = this->GetUniqueID() == 0;
+	if (IsTwoHandedIndicatorWeapon(weapon)) {
+		return MatchesMixedTwoHandedIndicatorRow(a_inv, weapon, this->_logicalRowSignature, cleanSentinel);
 	}
-	return MatchCleanSentinelHandIndicatorFromInventory(a_inv, weapon, a_handSignature, a_leftHand);
+	return MatchesLogicalRowInHandFromInventory(
+		a_inv,
+		weapon,
+		this->_logicalRowSignature,
+		cleanSentinel,
+		a_leftHand);
+}
+
+WeaponPresentationHandState WheelItemWeapon::GetTransientDrawOnlyHandPresentation() const
+{
+	if (!ImGui::GetCurrentContext() || _drawOnlyPresentationFrame != ImGui::GetFrameCount()) {
+		return {};
+	}
+	return _drawOnlyHandPresentation;
 }
 
 WheelItemWeapon::~WheelItemWeapon()
 {
+	DropGroupedPoisonPresentationAliasForSlot(
+		_runtimePresentationSlotID, "slot_removed_or_rebound");
 }
 
 WheelItemWeapon::WheelItemWeapon(RE::TESBoundObject* a_weapon, uint16_t a_uniqueID)
 {
+	_runtimePresentationSlotID = AllocateWeaponPresentationSlotID();
 	this->_obj = a_weapon;
 	this->SetUniqueID(a_uniqueID);
 	this->_logicalRowSignature = CaptureLogicalRowSignature(a_weapon ? a_weapon->As<RE::TESObjectWEAP>() : nullptr, a_uniqueID);
@@ -1882,6 +2980,8 @@ WheelItemWeapon::WheelItemWeapon(RE::TESBoundObject* a_weapon, uint16_t a_unique
 
 void WheelItemWeapon::ActivateItemSecondary()
 {
+	DropGroupedPoisonPresentationAlias("new_wheeler_weapon_activation");
+	CancelGroupedPoisonDiagnostic("new_wheeler_weapon_activation");
 	auto* weapon = this->_obj ? this->_obj->As<RE::TESObjectWEAP>() : nullptr;
 	if (TransformWheelManager::ShouldBlockWeaponActivation(weapon)) {
 		logger::info("TransformWheels: blocked weapon activation source=EquipSecondary formId={:08X} name='{}'",
@@ -1970,6 +3070,8 @@ void WheelItemWeapon::ActivateItemSecondary()
 
 void WheelItemWeapon::ActivateItemPrimary()
 {
+	DropGroupedPoisonPresentationAlias("new_wheeler_weapon_activation");
+	CancelGroupedPoisonDiagnostic("new_wheeler_weapon_activation");
 	auto* weapon = this->_obj ? this->_obj->As<RE::TESObjectWEAP>() : nullptr;
 	if (TransformWheelManager::ShouldBlockWeaponActivation(weapon)) {
 		logger::info("TransformWheels: blocked weapon activation source=EquipPrimary formId={:08X} name='{}'",
@@ -2197,6 +3299,9 @@ bool WheelItemWeapon::equipItem(bool a_toRight)
 			// the same logical stack group.
 			extraData = nullptr;
 			usedGroupedFallback = true;
+			const auto& preSignature = this->_logicalRowSignature.empty() ?
+				GetPlainLogicalRowSignature() : this->_logicalRowSignature;
+			groupedPreLogicalSignatureDigest = HashGroupedPoisonText(preSignature);
 		}
 		if (MainWheelDebug::IsCategoryEnabled(MainWheelDebug::Category::Input)) {
 			MainWheelDebug::Log(
@@ -2217,6 +3322,19 @@ bool WheelItemWeapon::equipItem(bool a_toRight)
 		InventorySnapshotCache::EquipObject(equipManager, pc, _obj, extraData, 1, slot);
 		extraData = nullptr;
 		inv.clear();
+		if (usedGroupedFallback && this->GetUniqueID() == 0) {
+			const auto& preSignature = this->_logicalRowSignature.empty() ?
+				GetPlainLogicalRowSignature() : this->_logicalRowSignature;
+			ArmGroupedPoisonDiagnostic(
+				_runtimePresentationSlotID,
+				weapon->GetFormID(),
+				a_toRight ? Hand::Right : Hand::Left,
+				sameFormCount,
+				preSignature);
+			logger::debug(
+				"GROUPED_POISON ARM_CORRELATION preLogicalSig={:016X} source=uid0_grouped_fallback",
+				groupedPreLogicalSignatureDigest);
+		}
 	} catch (const std::exception& e) {
 		logger::error("Error while equipping weapon: {}", e.what());
 	}
@@ -2283,7 +3401,15 @@ bool WheelItemWeapon::IsActive(RE::TESObjectREFR::InventoryItemMap& a_inv)
 			return false;
 		}
 		auto itemData = this->GetItemExtraDataAndCount(a_inv);
-		if (ShouldBypassInstanceHandResolution(a_inv, this->_obj->As<RE::TESObjectWEAP>(), itemData.second)) {
+		// Read the UID after maintenance: promotion/collapse/relink keep their
+		// original order and nonzero-UID active resolution remains unchanged.
+		if (this->GetUniqueID() == 0) {
+			if (const auto active = ResolveUID0ActiveVisualOverride(a_inv, this->_obj->As<RE::TESObjectWEAP>());
+			    active.has_value()) {
+				return *active;
+			}
+		}
+		if (ShouldBypassInstanceHandResolution(a_inv, this->_obj->As<RE::TESObjectWEAP>(), this->GetUniqueID())) {
 			return GetEquippedHandByExactUniqueID(pc, this->_obj->As<RE::TESObjectWEAP>(), this->GetUniqueID()) != Utils::Inventory::Hand::None;
 		}
 		if (itemData.first >= 2) {

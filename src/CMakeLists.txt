@@ -12,6 +12,12 @@ list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/LegacyWeaponRestoreVerificat
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HandMemoryAttackDiagnosticVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/HandMemorySameFormRestoreVerification\\.cpp$")
 list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/AlreadyPoisonedReapplyGuardVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponPoisonPresentationVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponHandIndicatorPresentationVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponActiveVisualVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/WeaponLiveVisualStatusVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/GroupedPoisonLineageDiagnosticVerification\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "bin/Wheeler/GroupedPoisonPresentationAliasVerification\\.cpp$")
 
 # Explicitly include newly added capability helpers (guards against stale glob caches).
 list(APPEND SOURCE_FILES
@@ -230,6 +236,66 @@ target_compile_features(already_poisoned_reapply_guard_verification PRIVATE cxx_
 target_include_directories(already_poisoned_reapply_guard_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
 if(MSVC)
 	target_compile_options(already_poisoned_reapply_guard_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(wheeler_weapon_poison_presentation_verification EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/WeaponPoisonPresentationVerification.cpp")
+target_compile_features(wheeler_weapon_poison_presentation_verification PRIVATE cxx_std_23)
+if(MSVC)
+	target_compile_options(wheeler_weapon_poison_presentation_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(wheeler_weapon_hand_indicator_presentation_verification EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/WeaponHandIndicatorPresentationVerification.cpp")
+target_compile_features(wheeler_weapon_hand_indicator_presentation_verification PRIVATE cxx_std_23)
+if(MSVC)
+	target_compile_options(wheeler_weapon_hand_indicator_presentation_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(wheeler_weapon_active_visual_verification EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/WeaponActiveVisualVerification.cpp")
+target_compile_features(wheeler_weapon_active_visual_verification PRIVATE cxx_std_23)
+if(MSVC)
+	target_compile_options(wheeler_weapon_active_visual_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_weapon_live_visual_status_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/WeaponLiveVisualStatusVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/WeaponLiveVisualStatusPolicy.h"
+)
+target_compile_features(wheeler_weapon_live_visual_status_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_weapon_live_visual_status_verification PRIVATE WHEELER_WEAPON_LIVE_VISUAL_STATUS_VERIFICATION_MAIN)
+target_include_directories(wheeler_weapon_live_visual_status_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_weapon_live_visual_status_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_grouped_poison_lineage_diagnostic_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/GroupedPoisonLineageDiagnosticVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/GroupedPoisonLineageDiagnosticPolicy.h"
+)
+target_compile_features(wheeler_grouped_poison_lineage_diagnostic_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_grouped_poison_lineage_diagnostic_verification PRIVATE WHEELER_GROUPED_POISON_LINEAGE_DIAGNOSTIC_VERIFICATION_MAIN)
+target_include_directories(wheeler_grouped_poison_lineage_diagnostic_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_grouped_poison_lineage_diagnostic_verification PRIVATE "/utf-8" "/permissive-")
+endif()
+
+add_executable(
+	wheeler_grouped_poison_presentation_alias_verification
+	EXCLUDE_FROM_ALL
+	"${SOURCE_DIR}/bin/Wheeler/GroupedPoisonPresentationAliasVerification.cpp"
+	"${SOURCE_DIR}/bin/Wheeler/WheelItems/GroupedPoisonPresentationAliasPolicy.h"
+)
+target_compile_features(wheeler_grouped_poison_presentation_alias_verification PRIVATE cxx_std_23)
+target_compile_definitions(wheeler_grouped_poison_presentation_alias_verification PRIVATE WHEELER_GROUPED_POISON_PRESENTATION_ALIAS_VERIFICATION_MAIN)
+target_include_directories(wheeler_grouped_poison_presentation_alias_verification PRIVATE "${SOURCE_DIR}/bin/Wheeler")
+if(MSVC)
+	target_compile_options(wheeler_grouped_poison_presentation_alias_verification PRIVATE "/utf-8" "/permissive-")
 endif()
 
 target_precompile_headers(
