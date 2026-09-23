@@ -49,6 +49,7 @@
 #include "WheelItems/WheelItemShout.h"
 #include "WheelItems/WheelItemMissing.h"
 #include "WheelItems/WheelItemFactory.h"
+#include "WheelItems/WheelItemWeapon.h"
 #include "ShoutUtils.h"
 
 namespace
@@ -1231,7 +1232,7 @@ namespace
 	}
 
 	InventorySnapshotCache g_mainWheelInventorySnapshot;
-	constexpr double kMainWheelInventorySnapshotIntervalSeconds = 0.25;
+	constexpr double kMainWheelDerivedInventoryRefreshIntervalSeconds = 0.25;
 
 	class WheelerPauseMenu : public RE::IMenu
 	{
@@ -4562,6 +4563,89 @@ void Wheeler::ResetShoutStageSounds()
 	ShoutUtils::ClearCache();  // Invalidate cached unlock counts
 }
 
+PreparedWheelItemActivation Wheeler::PrepareHoveredWheelItemActivation(
+	WheelItemActivationKind a_kind,
+	std::optional<std::int32_t> a_expectedEntryIndex)
+{
+	PreparedWheelItemActivation prepared{};
+	const RestorationLifecycle::Epoch capturedEpoch = GetTransientRestorationEpoch();
+	std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
+	if (!HasValidActiveWheel_NoLock()) {
+		return prepared;
+	}
+
+	Wheel* const activeWheel = _wheels[_activeWheelIdx].get();
+	if (!activeWheel) {
+		return prepared;
+	}
+	if (a_expectedEntryIndex && activeWheel->GetHoveredEntryIndex() != *a_expectedEntryIndex) {
+		return prepared;
+	}
+
+	switch (a_kind) {
+	case WheelItemActivationKind::Primary:
+		prepared = activeWheel->ActivateHoveredEntryPrimary(false);
+		break;
+	case WheelItemActivationKind::Secondary:
+		prepared = activeWheel->ActivateHoveredEntrySecondary(false);
+		break;
+	case WheelItemActivationKind::Special:
+		prepared = activeWheel->ActivateHoveredEntrySpecial(false);
+		break;
+	}
+
+	if (prepared.accepted) {
+		prepared.transientEpoch = capturedEpoch;
+		prepared.wheelIndex = _activeWheelIdx;
+	}
+	return prepared;
+}
+
+bool Wheeler::ExecutePreparedWheelItemActivation(PreparedWheelItemActivation a_activation)
+{
+	if (!a_activation.accepted || !a_activation.selectedItem) {
+		return false;
+	}
+
+	if (a_activation.executeAfterContainerUnlock) {
+		WheelItemActivationResult activationResult = WheelItemActivationResult::Rejected;
+		const bool authorized = ExecuteTransientGameplayIfCurrent(
+			a_activation.transientEpoch,
+			[&a_activation, &activationResult]() {
+				activationResult = a_activation.selectedItem->ActivateItemWithResult(a_activation.kind);
+			});
+		if (!authorized) {
+			logger::info(
+				"[TransientGameplay] discarded stale prepared wheel activation wheel={} entry={} item={} formID={:08X}",
+				a_activation.wheelIndex,
+				a_activation.entryIndex,
+				a_activation.itemIndex,
+				a_activation.formID);
+			return false;
+		}
+		if (!IsSuccessfulActivation(activationResult)) {
+			logger::info(
+				"[TransientGameplay] prepared wheel activation produced no success wheel={} entry={} item={} formID={:08X} result={}",
+				a_activation.wheelIndex,
+				a_activation.entryIndex,
+				a_activation.itemIndex,
+				a_activation.formID,
+				WheelItemActivationResultName(activationResult));
+			return false;
+		}
+	}
+
+	if (a_activation.formID != 0) {
+		WheelerAPI::NotifyItemActivated(
+			a_activation.wheelIndex,
+			a_activation.entryIndex,
+			a_activation.itemIndex,
+			a_activation.formID,
+			a_activation.isPrimaryForAPI);
+	}
+	return true;
+}
+
 // Shared Release-to-Use activation logic used both when the wheel closes and (optionally) while open.
 bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 {
@@ -4570,7 +4654,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	}
 	if (_directActivatedThisOpenSession) {
 		if (logDelaySkip) {
-			logger::info("ReleaseResolve[RTU]: skipped because directActivatedThisOpenSession=true");
+			logger::debug("ReleaseResolve[RTU]: skipped because directActivatedThisOpenSession=true");
 		}
 		return false;
 	}
@@ -4580,6 +4664,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 	if (_editMode) {
 		return false;
 	}
+	const RestorationLifecycle::Epoch directActivationEpoch = GetTransientRestorationEpoch();
 	// Anti-slip cancel check: block activation if cursor is in deadzone or lockout
 	if (Config::WheelBehavior::RTUAntiSlipEnabled) {
 		const float cursorLen = std::sqrt(_cursorPos.x * _cursorPos.x + _cursorPos.y * _cursorPos.y);
@@ -4707,7 +4792,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 		resolvedAction = ReleaseAction::CastShout;
 	}
 
-	logger::info("ReleaseResolve[RTU]: action={} entry={} formId={:08X}",
+	logger::debug("ReleaseResolve[RTU]: action={} entry={} formId={:08X}",
 		GetReleaseActionName(resolvedAction), hoveredEntryIndex, formId);
 
 	TargetHand resolvedHand = ResolveTargetHandRTU(hoveredEntryIndex, hoveredItem, resolvedAction);
@@ -4720,24 +4805,28 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 			"RTU",
 			hoveredEntryIndex);
 	}
-	logger::info("ReleaseResolve[RTU]: hand={} entry={} formId={:08X}",
+	logger::debug("ReleaseResolve[RTU]: hand={} entry={} formId={:08X}",
 		GetTargetHandName(resolvedHand), hoveredEntryIndex, formId);
 
 	if (resolvedAction == ReleaseAction::CastSpell && spellItem) {
 		RE::SpellItem* spell = spellItem->GetSpell();
 		if (spell && IsPowerSpellType(spell)) {
-			activated = QueuePowerActivation(spell->GetFormID());
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = QueuePowerActivation(spell->GetFormID());
+				})) {
+				return false;
+			}
 			if (activated) {
-				logger::info("ReleaseResolve[RTU]: queued vanilla power activation entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[RTU]: queued vanilla power activation entry={} formId={:08X}",
 					hoveredEntryIndex, spell->GetFormID());
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[RTU]: power queue failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[RTU]: power queue failed, fallback to equip entry={} formId={:08X}",
 					hoveredEntryIndex, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
 		} else if (!spell) {
-			logger::info("ReleaseResolve[RTU]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
+			logger::debug("ReleaseResolve[RTU]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
 				hoveredEntryIndex, formId);
 			resolvedAction = ReleaseAction::Equip;
 		} else if (Config::WheelBehavior::InstantSpellUseDirectCast) {
@@ -4745,25 +4834,33 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 				spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ?
 				Config::WheelBehavior::InstantSpellConcentrationMaxSeconds :
 				0.0f;
-			activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+				})) {
+				return false;
+			}
 			if (activated) {
 				LOG_INFO(Activation_InstantSpell, "RTU: DirectCast queued entry={} hand={} holdSec={:.2f}",
 					hoveredEntryIndex, GetTargetHandName(resolvedHand), concentrationHoldSeconds);
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[RTU]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[RTU]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
 					hoveredEntryIndex, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
 		} else {
 			const auto castingSource = GetCastingSourceForHand(resolvedHand);
-			activated = spellItem->CastImmediate(true, castingSource);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = spellItem->CastImmediate(true, castingSource);
+				})) {
+				return false;
+			}
 			if (activated) {
 				LOG_INFO(Activation_InstantSpell, "RTU: InstantSpell cast on release (Timed) entry={} hand={}",
 					hoveredEntryIndex, GetTargetHandName(resolvedHand));
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[RTU]: cast failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[RTU]: cast failed, fallback to equip entry={} formId={:08X}",
 					hoveredEntryIndex, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
@@ -4772,11 +4869,15 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 
 	if (!activated && resolvedAction == ReleaseAction::CastShout &&
 		shoutItem && IsRTUAutoInstantShoutEnabled()) {
-		activated = shoutItem->CastImmediate(_hoveredEntryTime);
+		if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+				activated = shoutItem->CastImmediate(_hoveredEntryTime);
+			})) {
+			return false;
+		}
 		if (activated) {
 			LOG_INFO(Activation_InstantShout, "RTU: InstantShout cast immediate with hoverTime={:.2f}s", _hoveredEntryTime);
 		} else {
-			logger::info("ReleaseResolve[RTU]: shout cast failed, fallback to equip entry={} formId={:08X}",
+			logger::debug("ReleaseResolve[RTU]: shout cast failed, fallback to equip entry={} formId={:08X}",
 				hoveredEntryIndex, formId);
 			resolvedAction = ReleaseAction::Equip;
 		}
@@ -4797,7 +4898,7 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 				}
 			}
 		}
-		logger::info("ReleaseResolve[RTU]: equip={} reason={} entry={} hand={} formId={:08X}",
+		logger::debug("ReleaseResolve[RTU]: equip={} reason={} entry={} hand={} formId={:08X}",
 			equipBlocked ? "blocked" : "allowed",
 			equipReason,
 			hoveredEntryIndex,
@@ -4812,22 +4913,13 @@ bool Wheeler::TryActivateHoveredEntryRTU(bool logDelaySkip)
 				formId);
 			return false;
 		}
-		{
-			std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
-			if (!HasValidActiveWheel_NoLock()) {
-				return false;
-			}
-			Wheel* activeWheel = _wheels[_activeWheelIdx].get();
-			if (activeWheel->GetHoveredEntryIndex() != hoveredEntryIndex) {
-				return false;
-			}
-			if (useLeft) {
-				activeWheel->ActivateHoveredEntrySecondary(false);
-			} else {
-				activeWheel->ActivateHoveredEntryPrimary(false);
-			}
+		PreparedWheelItemActivation prepared = PrepareHoveredWheelItemActivation(
+			useLeft ? WheelItemActivationKind::Secondary : WheelItemActivationKind::Primary,
+			hoveredEntryIndex);
+		activated = ExecutePreparedWheelItemActivation(std::move(prepared));
+		if (!activated) {
+			return false;
 		}
-		activated = true;
 		// Record what was applied (prevents snap-back on close)
 		_rtuAppliedThisOpen = true;
 		_rtuAppliedEntryIdx = hoveredEntryIndex;
@@ -7984,6 +8076,10 @@ void Wheeler::ProcessPendingActions()
 			logger::warn("[MiscItem] pending use failed: no player");
 		} else if (!baseForm) {
 			logger::warn("[MiscItem] pending use failed: LookupByID {:08X}", miscFormID);
+		} else if (baseForm->As<RE::TESObjectWEAP>()) {
+			logger::warn(
+				"[MiscItem] pending use suppressed for weapon form {:08X}; canonical WheelItemWeapon activation is required",
+				miscFormID);
 		} else if (!miscItem) {
 			RE::ActorEquipManager* aeMan = RE::ActorEquipManager::GetSingleton();
 			RE::TESBoundObject* boundObj = baseForm->As<RE::TESBoundObject>();
@@ -8924,18 +9020,20 @@ void Wheeler::Update(float a_deltaTime)
 
 		auto* pc = RE::PlayerCharacter::GetSingleton();
 		InventorySnapshotCache::Stats inventoryStats{};
-		RE::TESObjectREFR::InventoryItemMap& inv = g_mainWheelInventorySnapshot.Get(
+		RE::TESObjectREFR::InventoryItemMap inv;
+		g_mainWheelInventorySnapshot.CaptureFresh(
 			pc,
 			true,
-			kMainWheelInventorySnapshotIntervalSeconds,
+			kMainWheelDerivedInventoryRefreshIntervalSeconds,
+			inv,
 			&inventoryStats);
 		if (inventoryStats.shouldLog) {
 			MainWheelDebug::Log(
 				MainWheelDebug::Category::Perf,
-				"[Perf] MainWheel InventorySnapshot refresh ms={:.2f} interval={:.2f} countThisSecond={}",
-				inventoryStats.lastRefreshMs,
-				inventoryStats.refreshIntervalSeconds,
-				inventoryStats.refreshCountThisWindow);
+				"[Perf] MainWheel fresh InventorySnapshot capture ms={:.2f} countThisSecond={} mutationGeneration={}",
+				inventoryStats.lastCaptureMs,
+				inventoryStats.captureCountThisWindow,
+				inventoryStats.mutationGeneration);
 		}
 
 		float cursorAngle = atan2f(_cursorPos.y, _cursorPos.x);  // where the cursor is pointing to
@@ -11608,129 +11706,97 @@ float Wheeler::GetCursorDistance()
 
 void Wheeler::ActivateHoveredEntrySecondary()
 {
-	if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
-		return;
-	}
 	if (_state != WheelState::KOpened) {
 		return;
 	}
-	if (_state == WheelState::KOpened) {
-		const bool allowEditMutation = _editMode;
+	const bool allowEditMutation = _editMode;
+	if (allowEditMutation) {
+		// Edit mutation remains on the legacy path and never enters transient gameplay.
+		if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
+			return;
+		}
 		std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
 		if (activeWheel->IsEmpty()) {         // empty wheel, we can only delete in edit mode.
-			if (allowEditMutation && _wheels.size() > 1) {  // we have more than one wheel, so it's safe to delete this one.
+			if (_wheels.size() > 1) {  // we have more than one wheel, so it's safe to delete this one.
 				DeleteCurrentWheel();
 			}
 		} else {
-			if (allowEditMutation) {
-				// Legacy Wheeler edit mode keeps delete semantics; FavWheel edit mode falls through
-				// to normal activation so slot management is handled only by reorder actions.
-				activeWheel->ActivateHoveredEntrySecondary(true);
-			} else {
-				// Non-edit mode: RMB pressed
-				// RTU OFF: directly equip to left hand (vanilla behavior)
-				// RTU ON: latch left-hand override for RTU release
-				const int hoveredIdx = activeWheel->GetHoveredEntryIndex();
-				if (hoveredIdx < 0) {
-					return;
-				}
-				if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
-					return;
-				}
-				if (!Config::WheelBehavior::ReleaseToUse) {
-					// RTU OFF: directly equip to left hand now
-					activeWheel->ActivateHoveredEntrySecondary(false);
-					_activateOnCloseFired = true;
-					
-					// Diagnostic log
-					std::shared_ptr<WheelItem> item = activeWheel->GetHoveredSelectedItem();
-					RE::FormID formId = item ? item->GetFormID() : 0;
-					logger::info("Activation: rtu=OFF, entry={}, hand=LEFT, action=equip (RMB direct), formId={:08X}",
-						hoveredIdx, formId);
-					if (IsBowLikeFormID(formId)) {
-						logger::info("[HandMemoryDiag] DirectSecondaryRTUOffBowLike entry={} formId={:08X} immediateNotify=0",
-							hoveredIdx,
-							formId);
-					}
-					
-					PlaySoundByEditorID(Config::Sounds::ActivateSoundEditorID.c_str(), Config::Sounds::ActivateSoundVolume);
-					if (Config::WheelBehavior::CloseWheelAfterUse) {
-						TryCloseWheeler();
-					}
-				} else {
-					// RTU ON: latch left-hand override (equip happens on RTU release)
-					LatchHandOverrideLeft();
-				}
-			}
+			// Legacy Wheeler edit mode keeps delete semantics.
+			(void)activeWheel->ActivateHoveredEntrySecondary(true);
 		}
+		return;
+	}
+
+	if (Config::WheelBehavior::ReleaseToUse) {
+		// RTU ON: latch left-hand override (equip happens on RTU release).
+		LatchHandOverrideLeft();
+		return;
+	}
+
+	PreparedWheelItemActivation prepared = PrepareHoveredWheelItemActivation(WheelItemActivationKind::Secondary);
+	const int hoveredIdx = prepared.entryIndex;
+	const RE::FormID formId = prepared.formID;
+	if (!ExecutePreparedWheelItemActivation(std::move(prepared))) {
+		return;
+	}
+	_activateOnCloseFired = true;
+	logger::info("Activation: rtu=OFF, entry={}, hand=LEFT, action=equip (RMB direct), formId={:08X}",
+		hoveredIdx, formId);
+	if (IsBowLikeFormID(formId)) {
+		logger::debug("[HandMemoryDiag] DirectSecondaryRTUOffBowLike entry={} formId={:08X} immediateNotify=0",
+			hoveredIdx,
+			formId);
+	}
+	PlaySoundByEditorID(Config::Sounds::ActivateSoundEditorID.c_str(), Config::Sounds::ActivateSoundVolume);
+	if (Config::WheelBehavior::CloseWheelAfterUse) {
+		TryCloseWheeler();
 	}
 }
 
 void Wheeler::ActivateHoveredEntryPrimary()
 {
-	if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
-		return;
-	}
 	if (_state != WheelState::KOpened) {
 		return;
 	}
-	if (_state == WheelState::KOpened) {
-		const bool allowEditMutation = _editMode;
-		int hoveredIdx = -1;
-		RE::FormID hoveredFormID = 0;
-		if (!allowEditMutation) {
-			std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-			if (activeWheel) {
-				hoveredIdx = activeWheel->GetHoveredEntryIndex();
-				if (hoveredIdx < 0) {
-					return;
-				}
-				if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
-					return;
-				}
-				if (std::shared_ptr<WheelItem> hoveredItem = activeWheel->GetHoveredSelectedItem()) {
-					hoveredFormID = hoveredItem->GetFormID();
-				}
-			}
+	if (_editMode) {
+		if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
+			return;
 		}
-		_wheels[_activeWheelIdx]->ActivateHoveredEntryPrimary(allowEditMutation);
-		if (!allowEditMutation && !Config::WheelBehavior::ReleaseToUse && IsBowLikeFormID(hoveredFormID)) {
-			logger::info("[HandMemoryDiag] DirectPrimaryRTUOffBowLike entry={} formId={:08X} immediateNotify=0",
-				hoveredIdx,
-				hoveredFormID);
-		}
-		if (!_editMode && Config::WheelBehavior::CloseWheelAfterUse) {
-			// Prevent RTU activation on close from double-activating the hovered slot.
-			_activateOnCloseFired = true;
-			TryCloseWheeler();
-		}
+		(void)_wheels[_activeWheelIdx]->ActivateHoveredEntryPrimary(true);
+		return;
+	}
+
+	PreparedWheelItemActivation prepared = PrepareHoveredWheelItemActivation(WheelItemActivationKind::Primary);
+	const int hoveredIdx = prepared.entryIndex;
+	const RE::FormID hoveredFormID = prepared.formID;
+	if (!ExecutePreparedWheelItemActivation(std::move(prepared))) {
+		return;
+	}
+	if (!Config::WheelBehavior::ReleaseToUse && IsBowLikeFormID(hoveredFormID)) {
+		logger::debug("[HandMemoryDiag] DirectPrimaryRTUOffBowLike entry={} formId={:08X} immediateNotify=0",
+			hoveredIdx,
+			hoveredFormID);
+	}
+	if (Config::WheelBehavior::CloseWheelAfterUse) {
+		// Prevent RTU activation on close from double-activating the hovered slot.
+		_activateOnCloseFired = true;
+		TryCloseWheeler();
 	}
 }
 
 void Wheeler::ActivateHoveredEntrySpecial()
 {
-	if (_wheels.empty() || !HasValidActiveWheel_NoLock()) {
+	if (_state != WheelState::KOpened || _editMode) {
 		return;
 	}
-	if (_state == WheelState::KOpened) {
-		if (!_editMode) {
-			std::unique_ptr<Wheel>& activeWheel = _wheels[_activeWheelIdx];
-			if (activeWheel) {
-				const int hoveredIdx = activeWheel->GetHoveredEntryIndex();
-				if (hoveredIdx < 0) {
-					return;
-				}
-				if (WheelEntry* entry = activeWheel->GetEntry(hoveredIdx); entry && entry->IsMissingInInventory()) {
-					return;
-				}
-			}
-		}
-		_wheels[_activeWheelIdx]->ActivateHoveredEntrySpecial(_editMode);
-		if (!_editMode && Config::WheelBehavior::CloseWheelAfterUse) {
-			// Prevent RTU activation on close from double-activating the hovered slot.
-			_activateOnCloseFired = true;
-			TryCloseWheeler();
-		}
+	PreparedWheelItemActivation prepared = PrepareHoveredWheelItemActivation(WheelItemActivationKind::Special);
+	if (!ExecutePreparedWheelItemActivation(std::move(prepared))) {
+		return;
+	}
+	if (Config::WheelBehavior::CloseWheelAfterUse) {
+		// Prevent RTU activation on close from double-activating the hovered slot.
+		_activateOnCloseFired = true;
+		TryCloseWheeler();
 	}
 }
 
@@ -11802,6 +11868,7 @@ void Wheeler::OnConfirmUp()
 	if (_state != WheelState::KOpened || _editMode) {
 		return;
 	}
+	const RestorationLifecycle::Epoch directActivationEpoch = GetTransientRestorationEpoch();
 
 	int currentHoveredIdx = -1;
 	std::shared_ptr<WheelItem> hoveredItem;
@@ -11851,7 +11918,7 @@ void Wheeler::OnConfirmUp()
 
 	// InstantShout via Hold-to-Use
 	// Threshold to distinguish Tap (Equip) vs Hold (Shout)
-	// Delay prevents instant firing on quick taps.
+	// User requested delay to prevent instant firing on quick taps
 	constexpr float kInstantShoutThreshold = 0.60f; // 600ms
 	const bool shoutReady = shoutItem && Config::WheelBehavior::InstantShout && holdDuration >= kInstantShoutThreshold;
 	if (shoutReady) {
@@ -11904,7 +11971,7 @@ void Wheeler::OnConfirmUp()
 		}
 	}
 
-	logger::info("ReleaseResolve[Hold]: source={} action={} entry={} formId={:08X}",
+	logger::debug("ReleaseResolve[Hold]: source={} action={} entry={} formId={:08X}",
 		sourceLabel, GetReleaseActionName(resolvedAction), currentHoveredIdx, formId);
 
 	TargetHand resolvedHand = ResolveTargetHand(currentHoveredIdx);
@@ -11924,7 +11991,7 @@ void Wheeler::OnConfirmUp()
 			_handOverrideEntryIdx = -1;
 			_handOverrideLeft = false;
 		}
-		logger::info("ReleaseResolve[Hold]: source={} combined simultaneous hold -> hand=BOTH (primary-first)", sourceLabel);
+		logger::debug("ReleaseResolve[Hold]: source={} combined simultaneous hold -> hand=BOTH (primary-first)", sourceLabel);
 	}
 	if (resolvedAction == ReleaseAction::CastSpell &&
 		spellItem &&
@@ -11935,19 +12002,23 @@ void Wheeler::OnConfirmUp()
 			sourceLabel,
 			currentHoveredIdx);
 	}
-	logger::info("ReleaseResolve[Hold]: source={} hand={} entry={} formId={:08X}",
+	logger::debug("ReleaseResolve[Hold]: source={} hand={} entry={} formId={:08X}",
 		sourceLabel, GetTargetHandName(resolvedHand), currentHoveredIdx, formId);
 
 	if (resolvedAction == ReleaseAction::CastShout && shoutItem && Config::WheelBehavior::InstantShout) {
 		if (shoutReady) {
 			// Adjust effective time so the shout logic sees time starting from 0 after threshold
 			// This matches the indicator visual change we will make
-			activated = shoutItem->CastImmediate(holdDuration - kInstantShoutThreshold);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = shoutItem->CastImmediate(holdDuration - kInstantShoutThreshold);
+				})) {
+				return;
+			}
 			if (activated) {
 				logger::info("Hold-to-Use: InstantShout cast with holdDuration={:.2f}s (eff={:.2f}s)",
 					holdDuration, holdDuration - kInstantShoutThreshold);
 			} else {
-				logger::info("ReleaseResolve[Hold]: shout cast failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: shout cast failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 			}
 		}
@@ -11959,18 +12030,22 @@ void Wheeler::OnConfirmUp()
 	if (!activated && resolvedAction == ReleaseAction::CastSpell && spellItem && spellReady) {
 		RE::SpellItem* spell = spellItem->GetSpell();
 		if (spell && IsPowerSpellType(spell)) {
-			activated = QueuePowerActivation(spell->GetFormID());
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = QueuePowerActivation(spell->GetFormID());
+				})) {
+				return;
+			}
 			if (activated) {
 				logger::info("Hold-to-Use: queued vanilla power activation entry={} hand={} formId={:08X}",
 					currentHoveredIdx, GetTargetHandName(resolvedHand), spell->GetFormID());
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[Hold]: power queue failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: power queue failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
 		} else if (!spell) {
-			logger::info("ReleaseResolve[Hold]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
+			logger::debug("ReleaseResolve[Hold]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
 				currentHoveredIdx, formId);
 			resolvedAction = ReleaseAction::Equip;
 		} else if (Config::WheelBehavior::InstantSpellUseDirectCast) {
@@ -11978,31 +12053,39 @@ void Wheeler::OnConfirmUp()
 				spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ?
 				Config::WheelBehavior::InstantSpellConcentrationMaxSeconds :
 				0.0f;
-			if (resolvedHand == TargetHand::Both) {
-				const bool queuedPrimary = QueueSpellActivation(spell->GetFormID(), TargetHand::Right, concentrationHoldSeconds);
-				const bool queuedSecondary = queuedPrimary && QueueSpellActivation(spell->GetFormID(), TargetHand::Left, concentrationHoldSeconds);
-				activated = queuedPrimary && queuedSecondary;
-			} else {
-				activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					if (resolvedHand == TargetHand::Both) {
+						const bool queuedPrimary = QueueSpellActivation(spell->GetFormID(), TargetHand::Right, concentrationHoldSeconds);
+						const bool queuedSecondary = queuedPrimary && QueueSpellActivation(spell->GetFormID(), TargetHand::Left, concentrationHoldSeconds);
+						activated = queuedPrimary && queuedSecondary;
+					} else {
+						activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+					}
+				})) {
+				return;
 			}
 			if (activated) {
 				logger::info("Hold-to-Use: DirectCast queued entry={} inTransform={} hand={} holdSec={:.2f}",
 					currentHoveredIdx, isInTransform, GetTargetHandName(resolvedHand), concentrationHoldSeconds);
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[Hold]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
 		} else {
 			const auto castingSource = GetCastingSourceForHand(resolvedHand);
-			activated = spellItem->CastImmediate(true, castingSource);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = spellItem->CastImmediate(true, castingSource);
+				})) {
+				return;
+			}
 			if (activated) {
 				logger::info("Hold-to-Use: InstantSpell cast on release (Timed) entry={} inTransform={} hand={}",
 					currentHoveredIdx, isInTransform, GetTargetHandName(resolvedHand));
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[Hold]: cast failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: cast failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
@@ -12025,7 +12108,7 @@ void Wheeler::OnConfirmUp()
 				}
 			}
 		}
-		logger::info("ReleaseResolve[Hold]: source={} equip={} reason={} entry={} hand={} formId={:08X}",
+		logger::debug("ReleaseResolve[Hold]: source={} equip={} reason={} entry={} hand={} formId={:08X}",
 			sourceLabel,
 			equipBlocked ? "blocked" : "allowed",
 			equipReason,
@@ -12041,22 +12124,13 @@ void Wheeler::OnConfirmUp()
 			return;
 		}
 		
-		{
-			std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
-			if (!HasValidActiveWheel_NoLock()) {
-				return;
-			}
-			Wheel* activeWheel = _wheels[_activeWheelIdx].get();
-			if (activeWheel->GetHoveredEntryIndex() != currentHoveredIdx) {
-				return;
-			}
-			if (useLeft) {
-				activeWheel->ActivateHoveredEntrySecondary(false);
-			} else {
-				activeWheel->ActivateHoveredEntryPrimary(false);
-			}
+		PreparedWheelItemActivation prepared = PrepareHoveredWheelItemActivation(
+			useLeft ? WheelItemActivationKind::Secondary : WheelItemActivationKind::Primary,
+			currentHoveredIdx);
+		activated = ExecutePreparedWheelItemActivation(std::move(prepared));
+		if (!activated) {
+			return;
 		}
-		activated = true;
 		
 		// Diagnostic log (gated, once per activation)
 		logger::info("Activation: source=HoldPrimary rtu={}, entry={}, hand={}, action=equip, formId={:08X}",
@@ -12072,7 +12146,7 @@ void Wheeler::OnConfirmUp()
 		}
 		if (!_directActivatedThisOpenSession) {
 			_directActivatedThisOpenSession = true;
-			logger::info("DirectActivate: set directActivatedThisOpenSession=true source={} entry={} hand={}",
+			logger::debug("DirectActivate: set directActivatedThisOpenSession=true source={} entry={} hand={}",
 				sourceLabel, currentHoveredIdx, GetTargetHandName(resolvedHand));
 		}
 		_activateOnCloseFired = true;  // Prevent RTU double-activation
@@ -12195,6 +12269,7 @@ void Wheeler::OnSecondaryConfirmUp()
 	if (_state != WheelState::KOpened || _editMode) {
 		return;
 	}
+	const RestorationLifecycle::Epoch directActivationEpoch = GetTransientRestorationEpoch();
 
 	int currentHoveredIdx = -1;
 	std::shared_ptr<WheelItem> hoveredItem;
@@ -12244,7 +12319,7 @@ void Wheeler::OnSecondaryConfirmUp()
 
 	// InstantShout via Hold-to-Use
 	// Threshold to distinguish Tap (Equip) vs Hold (Shout)
-	// Delay prevents instant firing on quick taps.
+	// User requested delay to prevent instant firing on quick taps
 	constexpr float kInstantShoutThreshold = 0.60f; // 600ms
 	const bool shoutReady = shoutItem && Config::WheelBehavior::InstantShout && holdDuration >= kInstantShoutThreshold;
 	if (shoutReady) {
@@ -12297,7 +12372,7 @@ void Wheeler::OnSecondaryConfirmUp()
 		}
 	}
 
-	logger::info("ReleaseResolve[Hold]: source={} action={} entry={} formId={:08X}",
+	logger::debug("ReleaseResolve[Hold]: source={} action={} entry={} formId={:08X}",
 		sourceLabel, GetReleaseActionName(resolvedAction), currentHoveredIdx, formId);
 
 	// Secondary direct-cast intent is always left hand (RMB/LB path).
@@ -12313,7 +12388,7 @@ void Wheeler::OnSecondaryConfirmUp()
 		_confirmHeld = false;
 		_confirmHoldSeconds = 0.0f;
 		_confirmHoldEntryIdx = -1;
-		logger::info("ReleaseResolve[Hold]: source={} combined simultaneous hold -> hand=BOTH (secondary-first)", sourceLabel);
+		logger::debug("ReleaseResolve[Hold]: source={} combined simultaneous hold -> hand=BOTH (secondary-first)", sourceLabel);
 	}
 	if (resolvedAction == ReleaseAction::CastSpell &&
 		spellItem &&
@@ -12324,19 +12399,23 @@ void Wheeler::OnSecondaryConfirmUp()
 			sourceLabel,
 			currentHoveredIdx);
 	}
-	logger::info("ReleaseResolve[Hold]: source={} hand={} entry={} formId={:08X}",
+	logger::debug("ReleaseResolve[Hold]: source={} hand={} entry={} formId={:08X}",
 		sourceLabel, GetTargetHandName(resolvedHand), currentHoveredIdx, formId);
 
 	if (resolvedAction == ReleaseAction::CastShout && shoutItem && Config::WheelBehavior::InstantShout) {
 		if (shoutReady) {
 			// Adjust effective time so the shout logic sees time starting from 0 after threshold
 			// This matches the indicator visual change we will make
-			activated = shoutItem->CastImmediate(holdDuration - kInstantShoutThreshold);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = shoutItem->CastImmediate(holdDuration - kInstantShoutThreshold);
+				})) {
+				return;
+			}
 			if (activated) {
 				logger::info("Hold-to-Use: InstantShout cast with holdDuration={:.2f}s (eff={:.2f}s)",
 					holdDuration, holdDuration - kInstantShoutThreshold);
 			} else {
-				logger::info("ReleaseResolve[Hold]: shout cast failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: shout cast failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 			}
 		}
@@ -12348,18 +12427,22 @@ void Wheeler::OnSecondaryConfirmUp()
 	if (!activated && resolvedAction == ReleaseAction::CastSpell && spellItem && spellReady) {
 		RE::SpellItem* spell = spellItem->GetSpell();
 		if (spell && IsPowerSpellType(spell)) {
-			activated = QueuePowerActivation(spell->GetFormID());
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = QueuePowerActivation(spell->GetFormID());
+				})) {
+				return;
+			}
 			if (activated) {
 				logger::info("Hold-to-Use: queued vanilla power activation entry={} hand={} formId={:08X}",
 					currentHoveredIdx, GetTargetHandName(resolvedHand), spell->GetFormID());
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[Hold]: power queue failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: power queue failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
 		} else if (!spell) {
-			logger::info("ReleaseResolve[Hold]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
+			logger::debug("ReleaseResolve[Hold]: cast skipped (spell null), fallback to equip entry={} formId={:08X}",
 				currentHoveredIdx, formId);
 			resolvedAction = ReleaseAction::Equip;
 		} else if (Config::WheelBehavior::InstantSpellUseDirectCast) {
@@ -12367,31 +12450,39 @@ void Wheeler::OnSecondaryConfirmUp()
 				spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ?
 				Config::WheelBehavior::InstantSpellConcentrationMaxSeconds :
 				0.0f;
-			if (resolvedHand == TargetHand::Both) {
-				const bool queuedPrimary = QueueSpellActivation(spell->GetFormID(), TargetHand::Left, concentrationHoldSeconds);
-				const bool queuedSecondary = queuedPrimary && QueueSpellActivation(spell->GetFormID(), TargetHand::Right, concentrationHoldSeconds);
-				activated = queuedPrimary && queuedSecondary;
-			} else {
-				activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					if (resolvedHand == TargetHand::Both) {
+						const bool queuedPrimary = QueueSpellActivation(spell->GetFormID(), TargetHand::Left, concentrationHoldSeconds);
+						const bool queuedSecondary = queuedPrimary && QueueSpellActivation(spell->GetFormID(), TargetHand::Right, concentrationHoldSeconds);
+						activated = queuedPrimary && queuedSecondary;
+					} else {
+						activated = QueueSpellActivation(spell->GetFormID(), resolvedHand, concentrationHoldSeconds);
+					}
+				})) {
+				return;
 			}
 			if (activated) {
 				logger::info("Hold-to-Use: DirectCast queued entry={} inTransform={} hand={} holdSec={:.2f}",
 					currentHoveredIdx, isInTransform, GetTargetHandName(resolvedHand), concentrationHoldSeconds);
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[Hold]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: direct cast queue failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
 		} else {
 			const auto castingSource = GetCastingSourceForHand(resolvedHand);
-			activated = spellItem->CastImmediate(true, castingSource);
+			if (!ExecuteTransientGameplayIfCurrent(directActivationEpoch, [&]() {
+					activated = spellItem->CastImmediate(true, castingSource);
+				})) {
+				return;
+			}
 			if (activated) {
 				logger::info("Hold-to-Use: InstantSpell cast on release (Timed) entry={} inTransform={} hand={}",
 					currentHoveredIdx, isInTransform, GetTargetHandName(resolvedHand));
 				_rtuConsumedByInstant = true;
 			} else {
-				logger::info("ReleaseResolve[Hold]: cast failed, fallback to equip entry={} formId={:08X}",
+				logger::debug("ReleaseResolve[Hold]: cast failed, fallback to equip entry={} formId={:08X}",
 					currentHoveredIdx, formId);
 				resolvedAction = ReleaseAction::Equip;
 			}
@@ -12413,7 +12504,7 @@ void Wheeler::OnSecondaryConfirmUp()
 				}
 			}
 		}
-		logger::info("ReleaseResolve[Hold]: source={} equip={} reason={} entry={} hand={} formId={:08X}",
+		logger::debug("ReleaseResolve[Hold]: source={} equip={} reason={} entry={} hand={} formId={:08X}",
 			sourceLabel,
 			equipBlocked ? "blocked" : "allowed",
 			equipReason,
@@ -12429,18 +12520,13 @@ void Wheeler::OnSecondaryConfirmUp()
 			return;
 		}
 
-		{
-			std::shared_lock<std::shared_mutex> wheelDataLock(_wheelDataLock);
-			if (!HasValidActiveWheel_NoLock()) {
-				return;
-			}
-			Wheel* activeWheel = _wheels[_activeWheelIdx].get();
-			if (activeWheel->GetHoveredEntryIndex() != currentHoveredIdx) {
-				return;
-			}
-			activeWheel->ActivateHoveredEntrySecondary(false);
+		PreparedWheelItemActivation prepared = PrepareHoveredWheelItemActivation(
+			WheelItemActivationKind::Secondary,
+			currentHoveredIdx);
+		activated = ExecutePreparedWheelItemActivation(std::move(prepared));
+		if (!activated) {
+			return;
 		}
-		activated = true;
 
 		// Diagnostic log (gated, once per activation)
 		logger::info("Activation: source=HoldSecondary rtu={}, entry={}, hand={}, action=equip, formId={:08X}",
@@ -12456,7 +12542,7 @@ void Wheeler::OnSecondaryConfirmUp()
 		}
 		if (!_directActivatedThisOpenSession) {
 			_directActivatedThisOpenSession = true;
-			logger::info("DirectActivate: set directActivatedThisOpenSession=true source={} entry={} hand={}",
+			logger::debug("DirectActivate: set directActivatedThisOpenSession=true source={} entry={} hand={}",
 				sourceLabel, currentHoveredIdx, GetTargetHandName(resolvedHand));
 		}
 		_activateOnCloseFired = true;  // Prevent RTU double-activation

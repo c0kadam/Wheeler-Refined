@@ -669,8 +669,8 @@ namespace ActionPolicy
 			
 			case Action::ApplyPoison:
 			{
-				// Poison application is handled specially - it needs weapon selection
-				// Only inventory presence is required before selecting a weapon.
+				// Poison application is handled separately because it needs weapon selection.
+				// Verify poison availability before queuing application.
 				int countBefore = GetInventoryCount(ctx.form);
 				if (countBefore <= 0) {
 					result = ActionResult::NotInInventory;
@@ -798,6 +798,13 @@ namespace ActionPolicy
 			logger::warn("[ActionPolicy] ExecuteEntry called with null form");
 			return false;
 		}
+		if (form->As<RE::TESObjectWEAP>()) {
+			logger::warn(
+				"[ActionPolicy] rejected FormID-only weapon execution form={:08X}; canonical WheelItemWeapon activation is required",
+				form->GetFormID());
+			return false;
+		}
+		
 		ExecutionContext ctx;
 		ctx.form = form;
 		ctx.formID = form->GetFormID();
