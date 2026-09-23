@@ -6,6 +6,156 @@
 
 namespace
 {
+	template <class Fn>
+	bool InvokeWithSehGuard(Fn&& a_fn)
+	{
+#if defined(_MSC_VER)
+		__try {
+			a_fn();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+#else
+		try {
+			a_fn();
+			return true;
+		} catch (...) {
+			return false;
+		}
+#endif
+	}
+
+	bool TryGetExtraDataListWornSafe(RE::ExtraDataList* a_extraData, bool& a_outWorn)
+	{
+		a_outWorn = false;
+		if (!a_extraData) {
+			return false;
+		}
+
+		return InvokeWithSehGuard([&]() {
+			const bool worn = a_extraData->HasType(RE::ExtraDataType::kWorn);
+			const bool wornLeft = a_extraData->HasType(RE::ExtraDataType::kWornLeft);
+			a_outWorn = worn || wornLeft;
+		});
+	}
+
+	bool IsExtraDataListWornSafe(RE::ExtraDataList* a_extraData)
+	{
+		bool worn = false;
+		return TryGetExtraDataListWornSafe(a_extraData, worn) && worn;
+	}
+
+	bool TryHasInstanceSpecificMutableDataSafe(RE::ExtraDataList* a_extraData, bool& a_outInstanceSpecific)
+	{
+		a_outInstanceSpecific = false;
+		if (!a_extraData) {
+			return false;
+		}
+
+		return InvokeWithSehGuard([&]() {
+			a_outInstanceSpecific =
+				a_extraData->HasType(RE::ExtraDataType::kEnchantment) ||
+				a_extraData->HasType(RE::ExtraDataType::kPoison) ||
+				a_extraData->HasType(RE::ExtraDataType::kHealth) ||
+				a_extraData->HasType(RE::ExtraDataType::kCharge) ||
+				a_extraData->GetByType<RE::ExtraTextDisplayData>() != nullptr;
+		});
+	}
+
+	template <class TContainer>
+	bool CopyExtraListsSafe(TContainer* a_extraLists, std::vector<RE::ExtraDataList*>& a_out)
+	{
+		if (!a_extraLists) {
+			return false;
+		}
+
+		return InvokeWithSehGuard([&]() {
+			for (auto* extraList : *a_extraLists) {
+				a_out.push_back(extraList);
+			}
+		});
+	}
+
+	bool TryGetInventoryEntryWornSafe(RE::InventoryEntryData* a_entry, bool& a_outWorn)
+	{
+		a_outWorn = false;
+		return a_entry && InvokeWithSehGuard([&]() { a_outWorn = a_entry->IsWorn(); });
+	}
+
+	bool IsSameFormPlainArmorGroupWorn(
+		const RE::TESObjectREFR::InventoryItemMap& a_inv,
+		RE::FormID a_formID)
+	{
+		if (a_formID == 0) {
+			return false;
+		}
+
+		bool foundSameForm = false;
+		bool allDataReadable = true;
+		bool anyInstanceSpecific = false;
+		bool anyPlainWorn = false;
+		bool anyEntryWorn = false;
+		for (const auto& [boundObj, data] : a_inv) {
+			if (!boundObj || boundObj->GetFormID() != a_formID) {
+				continue;
+			}
+			foundSameForm = true;
+
+			auto* entry = data.second.get();
+			if (!entry) {
+				continue;
+			}
+
+			bool entryWorn = false;
+			if (!TryGetInventoryEntryWornSafe(entry, entryWorn)) {
+				allDataReadable = false;
+			} else {
+				anyEntryWorn = anyEntryWorn || entryWorn;
+			}
+
+			if (!entry->extraLists) {
+				continue;
+			}
+
+			std::vector<RE::ExtraDataList*> extraLists;
+			if (!CopyExtraListsSafe(entry->extraLists, extraLists)) {
+				allDataReadable = false;
+				continue;
+			}
+
+			for (auto* extraList : extraLists) {
+				if (!extraList) {
+					continue;
+				}
+
+				bool instanceSpecific = false;
+				bool worn = false;
+				const bool classificationReadable =
+					TryHasInstanceSpecificMutableDataSafe(extraList, instanceSpecific);
+				const bool wornReadable = TryGetExtraDataListWornSafe(extraList, worn);
+				if (!classificationReadable || !wornReadable) {
+					allDataReadable = false;
+					continue;
+				}
+
+				anyInstanceSpecific = anyInstanceSpecific || instanceSpecific;
+				anyPlainWorn = anyPlainWorn || (worn && !instanceSpecific);
+			}
+		}
+
+		if (anyPlainWorn) {
+			return true;
+		}
+		if (!foundSameForm || !allDataReadable || anyInstanceSpecific) {
+			return false;
+		}
+
+		// No modified sibling exists, so a base-entry worn state can only belong
+		// to the logical plain group (including implicit clean items without xLists).
+		return anyEntryWorn;
+	}
+
 	float GetArmorRatingSafe(RE::PlayerCharacter* a_player, RE::InventoryEntryData* a_entry, RE::TESObjectARMO* a_armor)
 	{
 		if (!a_armor) {
@@ -71,7 +221,7 @@ void WheelItemArmor::DrawHighlight(ImVec2 a_center, RE::TESObjectREFR::Inventory
 		std::vector<RE::EnchantmentItem*> enchants;
 		this->GetItemEnchantment(invData, enchants);
 		if (!enchants.empty()) {
-			// Use the first item from the result.
+			// Use the first resolved enchantment description.
 			Utils::Magic::GetMagicItemDescription(enchants[0], descriptionBuf);
 		}
 	}
@@ -239,12 +389,19 @@ void WheelItemArmor::unequipArmor()
 
 bool WheelItemArmor::IsActive(RE::TESObjectREFR::InventoryItemMap& a_inv)
 {
-	auto pc = RE::PlayerCharacter::GetSingleton();
-	if (!a_inv.contains(this->_obj)) {
+	const auto itemData = this->GetItemExtraDataAndCount(a_inv);
+	const std::uint16_t resolvedUniqueID = this->GetUniqueID();
+	if (resolvedUniqueID != 0) {
+		if (itemData.first <= 0 || !itemData.second) {
+			return false;
+		}
+		return IsExtraDataListWornSafe(itemData.second);
+	}
+
+	if (itemData.first <= 0 || !this->_obj) {
 		return false;
 	}
-	auto entry = a_inv.find(this->_obj)->second.second.get();
-	return entry && entry->IsWorn();
+	return IsSameFormPlainArmorGroupWorn(a_inv, this->_obj->GetFormID());
 }
 bool WheelItemArmor::IsAvailable(RE::TESObjectREFR::InventoryItemMap& a_inv)
 {
