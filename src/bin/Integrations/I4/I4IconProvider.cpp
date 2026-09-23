@@ -17,7 +17,6 @@ namespace I4Integration
 		constexpr auto kDebugLogInterval = std::chrono::seconds(5);
 		constexpr std::uint32_t kExtractionMinRenderSize = 96;
 		constexpr std::uint32_t kExtractionSupersampleFactor = 2;
-		constexpr RE::FormID kTrackedI4DiagFormID = 0x00057A7A;
 
 		enum class IconCategory : std::uint8_t
 		{
@@ -215,20 +214,6 @@ namespace I4Integration
 			return source.find("skyui\\icons_item_psychosteve.swf") != std::string::npos;
 		}
 
-		bool IsTrackedI4DiagForm(RE::FormID formID)
-		{
-			return formID == kTrackedI4DiagFormID;
-		}
-
-		void LogTrackedI4ProviderState(const std::string& message)
-		{
-			static std::string lastMessage;
-			if (message == lastMessage) {
-				return;
-			}
-			lastMessage = message;
-			logger::info("{}", message);
-		}
 	}
 
 	I4IconProvider& I4IconProvider::GetSingleton()
@@ -359,13 +344,6 @@ namespace I4Integration
 		}
 
 		if (!Config::I4::Enabled || !Config::I4::PreferI4Icons || !object) {
-			if (IsTrackedI4DiagForm(formID)) {
-				LogTrackedI4ProviderState(fmt::format(
-					"[I4Diag:00057A7A][provider] decision=fallback reason=disabled enabled={} prefer={} object={}",
-					Config::I4::Enabled,
-					Config::I4::PreferI4Icons,
-					object != nullptr));
-			}
 			stats.displayedFallback.fetch_add(1, std::memory_order_relaxed);
 			stats.fallbackDisabled.fetch_add(1, std::memory_order_relaxed);
 			_loggedUnavailable = false;
@@ -380,11 +358,6 @@ namespace I4Integration
 		}
 
 		if (!categoryEnabled) {
-			if (IsTrackedI4DiagForm(formID)) {
-				LogTrackedI4ProviderState(fmt::format(
-					"[I4Diag:00057A7A][provider] decision=fallback reason=category_filtered category={}",
-					CategoryToString(category)));
-			}
 			stats.displayedFallback.fetch_add(1, std::memory_order_relaxed);
 			stats.fallbackCategoryFiltered.fetch_add(1, std::memory_order_relaxed);
 			if (trace) {
@@ -413,20 +386,6 @@ namespace I4Integration
 				result.tint = cachedPrecolored ? C_SKYRIMWHITE : cachedSpec.color;
 				result.usingI4 = true;
 				stats.displayedI4.fetch_add(1, std::memory_order_relaxed);
-				if (IsTrackedI4DiagForm(formID)) {
-					LogTrackedI4ProviderState(fmt::format(
-						"[I4Diag:00057A7A][provider] decision=i4_cached_unavailable status={} category={} precolored={} sourceKind={} source='{}' label='{}' color=0x{:08X} tint=0x{:08X} image={}x{}",
-						availability.GetStatusString(),
-						CategoryToString(category),
-						cachedPrecolored,
-						IsDefaultSourcePath(cachedSpec.iconSource) ? "default" : "custom",
-						cachedSpec.iconSource,
-						cachedSpec.iconLabel,
-						static_cast<std::uint32_t>(cachedSpec.color),
-						static_cast<std::uint32_t>(result.tint),
-						result.image.width,
-						result.image.height));
-				}
 				if (trace) {
 					I4_LOG_INFO("[I4][TRACE][provider.out] form={:08X} decision=i4_cached_unavailable status={} precolored={} tint=0x{:08X} image={}x{}",
 						formID,
@@ -438,11 +397,6 @@ namespace I4Integration
 				}
 				MaybeLogDebug();
 				return result;
-			}
-			if (IsTrackedI4DiagForm(formID)) {
-				LogTrackedI4ProviderState(fmt::format(
-					"[I4Diag:00057A7A][provider] decision=fallback reason=unavailable status={}",
-					availability.GetStatusString()));
 			}
 			if (!_loggedUnavailable) {
 				_loggedUnavailable = true;
@@ -464,9 +418,6 @@ namespace I4Integration
 
 		I4IconSpec spec = I4IconResolver::GetSingleton().Resolve(object, signature);
 		if (!spec.valid) {
-			if (IsTrackedI4DiagForm(formID)) {
-				LogTrackedI4ProviderState("[I4Diag:00057A7A][provider] decision=fallback reason=no_spec");
-			}
 			stats.displayedFallback.fetch_add(1, std::memory_order_relaxed);
 			stats.fallbackNoSpec.fetch_add(1, std::memory_order_relaxed);
 			if (trace) {
@@ -491,17 +442,6 @@ namespace I4Integration
 
 		auto image = I4SwfIconRenderer::GetSingleton().GetIcon(spec, effectiveRenderSize, extractionActiveForRequest);
 		if (!image.texture) {
-			if (IsTrackedI4DiagForm(formID)) {
-				LogTrackedI4ProviderState(fmt::format(
-					"[I4Diag:00057A7A][provider] decision=fallback reason=no_image category={} extractionActive={} sourceKind={} source='{}' label='{}' color=0x{:08X} renderSize={}",
-					CategoryToString(category),
-					extractionActiveForRequest,
-					IsDefaultSourcePath(spec.iconSource) ? "default" : "custom",
-					spec.iconSource,
-					spec.iconLabel,
-					static_cast<std::uint32_t>(spec.color),
-					effectiveRenderSize));
-			}
 			stats.displayedFallback.fetch_add(1, std::memory_order_relaxed);
 			stats.fallbackNoImage.fetch_add(1, std::memory_order_relaxed);
 			if (trace) {
@@ -520,20 +460,6 @@ namespace I4Integration
 		result.image = image;
 		result.tint = precolored ? C_SKYRIMWHITE : spec.color;
 		result.usingI4 = true;
-		if (IsTrackedI4DiagForm(formID)) {
-			LogTrackedI4ProviderState(fmt::format(
-				"[I4Diag:00057A7A][provider] decision=i4_ok category={} extractionActive={} precolored={} sourceKind={} source='{}' label='{}' color=0x{:08X} tint=0x{:08X} image={}x{}",
-				CategoryToString(category),
-				extractionActiveForRequest,
-				precolored,
-				IsDefaultSourcePath(spec.iconSource) ? "default" : "custom",
-				spec.iconSource,
-				spec.iconLabel,
-				static_cast<std::uint32_t>(spec.color),
-				static_cast<std::uint32_t>(result.tint),
-				result.image.width,
-				result.image.height));
-		}
 		stats.displayedI4.fetch_add(1, std::memory_order_relaxed);
 		if (trace) {
 			I4_LOG_INFO("[I4][TRACE][provider.out] form={:08X} decision=i4_ok precolored={} tint=0x{:08X} image={}x{}",
