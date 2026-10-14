@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -3599,9 +3601,13 @@ namespace
 		return TransformState::Human;
 	}
 
-	bool TryResolveVisitedSpellFormID(RE::SpellItem* spell, RE::FormID& outFormID)
+	bool TryResolveVisitedSpellFormID(RE::SpellItem* spell, RE::FormID& outFormID,
+		RE::SpellItem** outResolvedSpell = nullptr)
 	{
 		outFormID = 0;
+		if (outResolvedSpell) {
+			*outResolvedSpell = nullptr;
+		}
 		if (!spell) {
 			return false;
 		}
@@ -3620,7 +3626,14 @@ namespace
 		}
 #endif
 
-		return outFormID != 0 && RE::TESForm::LookupByID<RE::SpellItem>(outFormID) != nullptr;
+		if (outFormID == 0) {
+			return false;
+		}
+		auto* resolvedSpell = RE::TESForm::LookupByID<RE::SpellItem>(outFormID);
+		if (outResolvedSpell) {
+			*outResolvedSpell = resolvedSpell;
+		}
+		return resolvedSpell != nullptr;
 	}
 
 	struct SpellCollector : RE::Actor::ForEachSpellVisitor
@@ -3654,6 +3667,23 @@ namespace
 		return result;
 	}
 
+	void LogRejectedSpellDataSpell(RE::SpellItem* spell, std::uint32_t index,
+		std::string_view reason, RE::FormID formID = 0)
+	{
+		static std::atomic_uint32_t loggedNull{ 0 };
+		static std::atomic_uint32_t loggedInvalid{ 0 };
+		auto& logged = spell ? loggedInvalid : loggedNull;
+		const auto limit = spell ? 8u : 2u;
+		const auto prior = logged.fetch_add(1, std::memory_order_relaxed);
+		if (prior < limit) {
+			logger::warn("TransformWheels: CollectSpellDataSpells rejected reference reason={} index={} ptr={:p} formID={:08X}",
+				reason, index, static_cast<const void*>(spell), formID);
+		} else if (prior == limit) {
+			logger::warn("TransformWheels: CollectSpellDataSpells further {} reference logs suppressed",
+				spell ? "invalid" : "null");
+		}
+	}
+
 	void CollectSpellDataSpells(RE::TESSpellList::SpellData* data, std::unordered_set<RE::FormID>& out)
 	{
 		if (!data || !data->spells) {
@@ -3661,9 +3691,26 @@ namespace
 		}
 		for (std::uint32_t i = 0; i < data->numSpells; ++i) {
 			RE::SpellItem* spell = data->spells[i];
-			if (spell) {
-				out.insert(spell->GetFormID());
+			if (!spell) {
+				LogRejectedSpellDataSpell(spell, i, "null");
+				continue;
 			}
+			if (reinterpret_cast<std::uintptr_t>(spell) % alignof(RE::SpellItem) != 0) {
+				LogRejectedSpellDataSpell(spell, i, "misaligned");
+				continue;
+			}
+			RE::FormID formID = 0;
+			RE::SpellItem* resolvedSpell = nullptr;
+			if (!TryResolveVisitedSpellFormID(spell, formID, &resolvedSpell)) {
+				LogRejectedSpellDataSpell(spell, i,
+					formID == 0 ? "unreadable-or-zero-form-id" : "unresolved-or-wrong-form-type", formID);
+				continue;
+			}
+			if (resolvedSpell != spell) {
+				LogRejectedSpellDataSpell(spell, i, "stale-pointer-mismatch", formID);
+				continue;
+			}
+			out.insert(formID);
 		}
 	}
 
