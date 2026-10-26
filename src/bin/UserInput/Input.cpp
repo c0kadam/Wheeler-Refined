@@ -741,9 +741,6 @@ void Input::ProcessAndFilter(RE::InputEvent** a_event)
 				bool isDown = button->IsDown();
 				bool isUp = button->IsUp();
 				float analogValue = GetButtonAnalogValue(button);
-				if (isGamePad && input != kInvalid) {
-					NormalizeGamepadTriggerEdges(button, input, isDown, isUp, analogValue);
-				}
 				const bool isDownEdge = IsButtonDownEdge(device, button->GetIDCode(), isDown, isUp);
 				spyIsDown = isDown;
 				spyIsUp = isUp;
